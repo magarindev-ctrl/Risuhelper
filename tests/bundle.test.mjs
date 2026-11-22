@@ -196,3 +196,112 @@ test('dist/risuhelper.js boots cleanly in mock Plugin v3 sandbox, prevents prese
   await unloadHandler();
   assert.deepEqual(unregisteredIds.sort(), ['risuhelper-fab', 'risuhelper-ham', 'risuhelper-setting']);
 });
+
+test('dist/risuhelper.js applies a proposal to its pinned target even if user switches target before clicking Apply', async () => {
+  const code = fs.readFileSync(BUNDLE_PATH, 'utf8');
+  const doc = createMockDocument();
+  const registeredButtons = [];
+  const state = {
+    character: {
+      chaId: 'char-pin-1',
+      name: '핀테스트',
+      desc: '원본 설명',
+      firstMessage: '원본 첫 메시지',
+      globalLore: [],
+      customscript: [],
+      triggerscript: [],
+      chats: [{ message: [{ role: 'char', data: '원본 첫 메시지' }] }],
+    },
+  };
+
+  const mockRisuai = {
+    pluginStorage: { async getItem() { return null; }, async setItem() {} },
+    async getColorScheme() { return { scheme: { type: 'dark' } }; },
+    async registerButton(meta, cb) { registeredButtons.push({ meta, cb }); return { id: meta.id }; },
+    async registerSetting(name, cb, _icon, _type, id) { return { id }; },
+    async unregisterUIPart() {},
+    async onUnload() {},
+    async showContainer() {},
+    async hideContainer() {},
+    async getCharacter() { return structuredClone(state.character); },
+    async setCharacter(c) { state.character = structuredClone(c); },
+    async getCurrentCharacterIndex() { return 0; },
+    async getCurrentChatIndex() { return 0; },
+    async getRootDocument() { return null; },
+    async runLLMModel() {
+      return [
+        '설명을 개선했습니다.',
+        '```risuhelper-proposal',
+        '{"action":"replace_text","title":"설명 개선"}',
+        '<<<CONTENT>>>',
+        '새로 작성된 설명',
+        '<<<END>>>',
+        '```',
+      ].join('\n');
+    },
+  };
+
+  const sandbox = {
+    risuai: mockRisuai,
+    document: doc,
+    console,
+    setTimeout,
+    clearTimeout,
+    TextEncoder,
+    TextDecoder,
+    Uint8Array,
+    Int32Array,
+    DataView,
+    URL,
+    Blob,
+    atob,
+    crypto,
+    DecompressionStream,
+    structuredClone,
+  };
+  sandbox.globalThis = sandbox;
+  vm.runInNewContext(code, sandbox, { filename: 'dist/risuhelper.js' });
+  await new Promise(r => setTimeout(r, 30));
+
+  // Open drawer
+  registeredButtons[0].cb();
+  await new Promise(r => setTimeout(r, 20));
+
+  // Find helper to locate elements by predicate
+  const findAll = (pred) => {
+    const out = [];
+    const walk = (node) => {
+      if (pred(node)) out.push(node);
+      for (const c of node.children || []) walk(c);
+    };
+    walk(doc.body);
+    return out;
+  };
+
+  // 1. Select char_field:desc in target picker
+  const selectEl = findAll(n => n.tagName === 'SELECT')[0];
+  selectEl.value = 'char_field:desc';
+  for (const fn of selectEl.listeners.get('change') || []) await fn({ target: selectEl });
+
+  // 2. Send prompt to get replace_text proposal for desc
+  const composer = doc.querySelector('.rh-composer-input');
+  composer.value = '설명 고쳐줘';
+  const sendBtn = findAll(n => n.tagName === 'BUTTON' && n.textContent === '전송')[0];
+  sendBtn.click();
+  await new Promise(r => setTimeout(r, 30));
+
+  // 3. Before clicking Apply, switch target picker to char_field:firstMessage!
+  const selectAfter = findAll(n => n.tagName === 'SELECT')[0];
+  selectAfter.value = 'char_field:firstMessage';
+  for (const fn of selectAfter.listeners.get('change') || []) await fn({ target: selectAfter });
+
+  // 4. Click Apply on the proposal card -> MUST apply to pinned desc, NOT firstMessage!
+  const applyBtn = findAll(n => n.tagName === 'BUTTON' && n.textContent === '적용')[0];
+  assert.ok(applyBtn, 'Apply button should exist');
+  applyBtn.click();
+  await new Promise(r => setTimeout(r, 30));
+
+  assert.equal(state.character.desc, '새로 작성된 설명');
+  assert.equal(state.character.firstMessage, '원본 첫 메시지');
+});
+

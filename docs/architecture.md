@@ -71,7 +71,13 @@ User Input + Detected/Manual Target
              [host-adapter.js] Apply + 1-Click Undo Stack
 ```
 
-### 주요 설계 원칙
+### 주요 설계 원칙 및 안전장치
 - **무의존성(Zero Runtime Dependencies)**: 순수 표준 Web API(`WebCrypto` AES-256-GCM, `DecompressionStream`, `TextEncoder`/`TextDecoder`)와 자체 MessagePack/RPack/CBS 구현만으로 단일 파일 `dist/risuhelper.js`를 빌드합니다.
-- **검토 후 적용(Review-before-Apply)**: 일반 질문에는 데이터를 절대 수정하지 않으며, 편집·생성 제안은 줄 단위 Diff 카드 검증을 거쳐 사용자가 명시적으로 **적용**을 클릭할 때만 호스트 상태를 변경합니다.
+- **검토 후 적용 및 대상 고정(Pinned Target)**: 일반 질문에는 데이터를 절대 수정하지 않으며, 제안 생성 시점의 대상(`pinnedTarget`)과 캐릭터/채팅 식별자(`hostBinding`)를 카드에 고정합니다. 본문 Diff뿐 아니라 로어북·페르소나·정규식의 메타데이터 변경(`metaChanges`)도 모두 카드에 표시합니다.
+- **정밀 필드 단위 되돌리기(Surgical Undo)**: Undo 시 객체 전체 스냅샷을 덮어쓰지 않고 최신 캐릭터·채팅·모듈·페르소나를 다시 읽어(read-modify-write) 변경된 필드/항목만 복원·제거하여, 적용 이후 이어진 채팅이나 추가 항목을 보존합니다.
+- **프롬프트 인젝션 및 데이터 유실 방어**:
+  - 캐릭터(`ALLOWED_CHAR_FIELDS`), 로어북(`ALLOWED_LORE_TEXT_FIELDS`), 페르소나(`ALLOWED_PERSONA_TEXT_FIELDS`), 설정(`ALLOWED_CONFIG_KEYS`) 필드 화이트리스트를 강제하며, `patch_text`/`replace_text`에서 `proposal.target`으로 대상을 탈취하는 시도를 차단합니다.
+  - 모델 입력 상한(`24,000자`)을 초과해 잘린 원문에는 전체 덮어쓰기(`replace_text` / Lua 전체 `code` 교체)를 차단하고 부분 편집(`patch_text` / `edits`)만 허용합니다.
+  - 기존 V1/V2 트리거가 있는 상태에서 Lua로 전환할 때는 삭제·대체 경고와 명시적 확인 체크박스를 요구합니다.
+- **원문 구분자 프로토콜(Raw Delimiter Sections)**: 표준 JSON 외에 `<<<CODE>>>`, `<<<CONTENT>>>`, `<<<BEFORE>>>`/`<<<AFTER>>>`, `<<<IN>>>`/`<<<OUT>>>`, `<<<END>>>` 구분자를 지원해 따옴표·백슬래시가 많은 Lua/정규식/HTML 생성 시 JSON 이스케이프 오류를 방지합니다.
 - **본체 프리셋 불변**: 프리셋 적용 모드의 `.risup` / `.risupreset` / `.json` 상태는 `pluginStorage`에 독립 저장되며 RisuAI 본체의 활성 프리셋이나 모듈 활성 상태를 변경하지 않습니다.

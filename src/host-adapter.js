@@ -1,5 +1,42 @@
-import { ALLOWED_CONFIG_KEYS, CONFIG_KEY_TYPES, CHAR_FIELD_META } from './version.js';
+import {
+  ALLOWED_CONFIG_KEYS,
+  CONFIG_KEY_TYPES,
+  CHAR_FIELD_META,
+  MAX_LLM_CONTENT_CHARS,
+  ALLOWED_CHAR_FIELDS,
+  ALLOWED_LORE_TEXT_FIELDS,
+  ALLOWED_PERSONA_TEXT_FIELDS,
+} from './version.js';
 import { applyTextEdits } from './text-edits.js';
+
+const BAD_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+const LORE_META_SPECS = [
+  ['comment', '이름'],
+  ['key', '활성화 키'],
+  ['secondkey', '보조 키'],
+  ['insertorder', '배치 순서'],
+  ['alwaysActive', '항상 활성'],
+  ['selective', '보조 키 사용'],
+  ['useRegex', '정규식 키'],
+  ['activationPercent', '활성 확률'],
+  ['mode', '모드'],
+  ['folder', '폴더'],
+];
+
+const PERSONA_META_SPECS = [
+  ['name', '이름'],
+  ['note', '메모'],
+  ['largePortrait', '큰 초상화'],
+];
+
+const REGEX_META_SPECS = [
+  ['comment', '이름'],
+  ['type', '적용 유형'],
+  ['in', 'IN 패턴'],
+  ['flag', '플래그'],
+  ['ableFlag', '플래그 활성'],
+];
 
 function clone(value) {
   if (typeof structuredClone === 'function') {
@@ -15,18 +52,123 @@ function makeUuid() {
   return 'rh-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
 }
 
+function formatMetaValue(val) {
+  if (val === undefined || val === null || val === '') return '(비어 있음)';
+  if (typeof val === 'boolean') return val ? '예' : '아니오';
+  return String(val);
+}
+
+function computeMetaChanges(beforeObj, afterObj, specs, skipKey = null) {
+  const changes = [];
+  for (const [key, label] of specs) {
+    if (key === skipKey) continue;
+    const prev = beforeObj ? beforeObj[key] : undefined;
+    const next = afterObj ? afterObj[key] : undefined;
+    if (prev !== next) {
+      changes.push({
+        key,
+        label,
+        before: formatMetaValue(prev),
+        after: formatMetaValue(next),
+      });
+    }
+  }
+  return changes;
+}
+
+function validateAllowedFieldKey(kind, fieldKey) {
+  if (fieldKey === undefined || fieldKey === null || fieldKey === '') return null;
+  if (typeof fieldKey !== 'string' || BAD_KEYS.has(fieldKey)) {
+    return `허용되지 않는 필드 키입니다: ${String(fieldKey)}`;
+  }
+  if (kind === 'char_field' && !ALLOWED_CHAR_FIELDS.includes(fieldKey)) {
+    return `허용되지 않는 캐릭터 필드입니다: ${fieldKey}`;
+  }
+  if (
+    (kind === 'char_lorebook' || kind === 'chat_lorebook' || kind === 'module_lorebook') &&
+    !ALLOWED_LORE_TEXT_FIELDS.includes(fieldKey)
+  ) {
+    return `허용되지 않는 로어북 필드입니다: ${fieldKey}`;
+  }
+  if (kind === 'persona' && !ALLOWED_PERSONA_TEXT_FIELDS.includes(fieldKey)) {
+    return `허용되지 않는 페르소나 필드입니다: ${fieldKey}`;
+  }
+  if (kind === 'config' && !ALLOWED_CONFIG_KEYS.includes(fieldKey)) {
+    return `허용되지 않는 설정 키입니다: ${fieldKey}`;
+  }
+  return null;
+}
+
+function assertAllowedFieldKey(kind, fieldKey) {
+  const err = validateAllowedFieldKey(kind, fieldKey);
+  if (err) throw new Error(err);
+}
+
+function checkTruncationGuard(beforeText, actionLabel) {
+  if (typeof beforeText === 'string' && beforeText.length > MAX_LLM_CONTENT_CHARS) {
+    return (
+      `현재 원문(${beforeText.length.toLocaleString()}자)이 모델 입력 한도(${MAX_LLM_CONTENT_CHARS.toLocaleString()}자)를 초과해 앞부분만 전달되었습니다. ` +
+      `뒷부분 유실을 방지하기 위해 ${actionLabel}은(는) 차단됩니다. 부분 편집(patch_text / edits)을 사용해 주세요.`
+    );
+  }
+  return null;
+}
+
+function getCharIdentity(char) {
+  if (!char) return { charId: null, charName: null };
+  return {
+    charId: char.chaId ?? char.id ?? null,
+    charName: char.name ?? null,
+  };
+}
+
+function isSameCharacter(char, charIndex, binding) {
+  if (!binding) return true;
+  if (!char) return false;
+  const cur = getCharIdentity(char);
+  if (binding.charId && cur.charId) {
+    return binding.charId === cur.charId;
+  }
+  if (
+    Number.isInteger(binding.charIndex) &&
+    Number.isInteger(charIndex) &&
+    binding.charIndex !== charIndex
+  ) {
+    return false;
+  }
+  if (binding.charName !== null && binding.charName !== undefined && cur.charName !== binding.charName) {
+    return false;
+  }
+  return true;
+}
+
+function removeCreatedItem(list, insertedIndex, matcher) {
+  if (!Array.isArray(list)) return false;
+  if (insertedIndex >= 0 && insertedIndex < list.length && matcher(list[insertedIndex])) {
+    list.splice(insertedIndex, 1);
+    return true;
+  }
+  for (let i = list.length - 1; i >= 0; i--) {
+    if (matcher(list[i])) {
+      list.splice(i, 1);
+      return true;
+    }
+  }
+  return false;
+}
+
 /**
  * Extracts Lua code from RisuAI's triggerscript array (both character.triggerscript and module.trigger).
  */
 function extractLuaFromTriggers(triggers) {
   if (!Array.isArray(triggers) || triggers.length === 0) {
-    return { isLua: false, code: '', hasOtherTriggers: false };
+    return { isLua: false, code: '', hasOtherTriggers: false, otherTriggerCount: 0 };
   }
   const firstEffect = triggers[0]?.effect?.[0];
   if (firstEffect && firstEffect.type === 'triggerlua') {
-    return { isLua: true, code: String(firstEffect.code ?? ''), hasOtherTriggers: false };
+    return { isLua: true, code: String(firstEffect.code ?? ''), hasOtherTriggers: false, otherTriggerCount: 0 };
   }
-  return { isLua: false, code: '', hasOtherTriggers: true };
+  return { isLua: false, code: '', hasOtherTriggers: true, otherTriggerCount: triggers.length };
 }
 
 /**
@@ -46,6 +188,15 @@ function buildLuaTriggers(code) {
       ],
     },
   ];
+}
+
+function buildLuaDestructiveWarning(otherTriggerCount) {
+  const countText = otherTriggerCount > 0 ? `${otherTriggerCount}개의 ` : '';
+  return (
+    `⚠️ 기존 V1/V2 트리거(${countText}항목)가 설정되어 있습니다. ` +
+    'Lua 트리거를 적용하면 기존 트리거와 병합되지 않고 모두 삭제된 뒤 새 Lua 스크립트로 통째로 대체됩니다. ' +
+    '(적용 직후 되돌리기로 기존 트리거를 복구할 수 있습니다.)'
+  );
 }
 
 function normalizeLorebookEntry(input, existing = null) {
@@ -151,30 +302,39 @@ class HostAdapter {
   }
 
   /**
-   * Reads active chat via getChatFromIndex first (required by PocketRisu for unopened _placeholder chats),
-   * falling back to char.chats[chatPage].
+   * Reads a specific chat by index (preferring getChatFromIndex for PocketRisu _placeholder safety).
    */
-  async readActiveChat() {
-    const { char, charIndex, chatIndex } = await this.readActiveCharacter();
-    if (!char) return { chat: null, charIndex, chatIndex };
-    const resolvedChatIdx = Number.isInteger(chatIndex) ? chatIndex : (char.chatPage ?? 0);
+  async _readChatAt(charIndex, chatIndex, fallbackChar = null) {
     if (
       Number.isInteger(charIndex) &&
       charIndex >= 0 &&
       typeof this.api.getChatFromIndex === 'function'
     ) {
       try {
-        const fetched = await this.api.getChatFromIndex(charIndex, resolvedChatIdx);
+        const fetched = await this.api.getChatFromIndex(charIndex, chatIndex);
         if (fetched && !fetched._placeholder) {
-          return { chat: fetched, charIndex, chatIndex: resolvedChatIdx };
+          return fetched;
         }
       } catch {}
     }
-    const fallback = char.chats?.[resolvedChatIdx] ?? null;
+    const char = fallbackChar || (await this._getCharacter());
+    const fallback = char?.chats?.[chatIndex] ?? null;
     if (fallback?._placeholder) {
       throw new Error('채팅 본문이 아직 서버에서 로드되지 않았습니다(_placeholder). 채팅을 연 뒤 다시 시도해 주세요.');
     }
-    return { chat: fallback, charIndex, chatIndex: resolvedChatIdx };
+    return fallback;
+  }
+
+  /**
+   * Reads active chat via getChatFromIndex first (required by PocketRisu for unopened _placeholder chats),
+   * falling back to char.chats[chatPage].
+   */
+  async readActiveChat() {
+    const { char, charIndex, chatIndex } = await this.readActiveCharacter();
+    if (!char) return { chat: null, char, charIndex, chatIndex };
+    const resolvedChatIdx = Number.isInteger(chatIndex) ? chatIndex : (char.chatPage ?? 0);
+    const chat = await this._readChatAt(charIndex, resolvedChatIdx, char);
+    return { chat, char, charIndex, chatIndex: resolvedChatIdx };
   }
 
   /**
@@ -200,6 +360,64 @@ class HostAdapter {
     const nextChar = clone(char);
     nextChar.chats[chatIndex] = clone(nextChat);
     await this._setCharacter(nextChar);
+  }
+
+  async _requireSameActiveCharacter(binding, actionVerb = '적용') {
+    const { char, charIndex, chatIndex } = await this.readActiveCharacter();
+    if (!char) throw new Error('선택된 캐릭터가 없습니다.');
+    if (binding && !isSameCharacter(char, charIndex, binding)) {
+      throw new Error(`다른 캐릭터로 전환되어 ${actionVerb}을(를) 중단했습니다. 원래 캐릭터로 돌아온 뒤 다시 시도해 주세요.`);
+    }
+    return { char, charIndex, chatIndex };
+  }
+
+  async _requireSameActiveChat(binding, actionVerb = '적용') {
+    const { chat, char, charIndex, chatIndex } = await this.readActiveChat();
+    if (!chat) throw new Error('활성 채팅을 찾을 수 없습니다.');
+    if (binding) {
+      if (!isSameCharacter(char, charIndex, binding)) {
+        throw new Error(`다른 캐릭터로 전환되어 ${actionVerb}을(를) 중단했습니다. 원래 캐릭터로 돌아온 뒤 다시 시도해 주세요.`);
+      }
+      if (Number.isInteger(binding.chatIndex) && binding.chatIndex !== chatIndex) {
+        throw new Error(`다른 채팅으로 전환되어 ${actionVerb}을(를) 중단했습니다. 원래 채팅으로 돌아온 뒤 다시 시도해 주세요.`);
+      }
+    }
+    return { chat, char, charIndex, chatIndex };
+  }
+
+  /**
+   * Resolves the effective target while blocking prompt-injected target/fieldKey overrides.
+   */
+  _resolveSafeTarget(proposal, activeTarget) {
+    const base = { ...(activeTarget || {}) };
+    const pt = proposal?.target;
+
+    if (pt !== undefined) {
+      if (!pt || typeof pt !== 'object' || Array.isArray(pt)) {
+        throw new Error('제안의 target 형식이 올바르지 않습니다.');
+      }
+      for (const k of Object.keys(pt)) {
+        if (BAD_KEYS.has(k)) throw new Error(`허용되지 않는 target 키입니다: ${k}`);
+      }
+    }
+
+    if (proposal?.action === 'patch_text' || proposal?.action === 'replace_text') {
+      // Never allow LLM proposal.target to redirect a direct text edit to a different field or target
+      if (pt) {
+        const guardedKeys = ['targetKind', 'fieldKey', 'loreIndex', 'loreScope', 'personaIndex', 'moduleIndex', 'regexIndex'];
+        for (const k of guardedKeys) {
+          if (pt[k] !== undefined && pt[k] !== null && pt[k] !== base[k]) {
+            throw new Error(`보안상 제안 블록의 target.${k}(${String(pt[k])})로 현재 선택 대상을 덮어쓸 수 없습니다.`);
+          }
+        }
+      }
+      assertAllowedFieldKey(base.targetKind, base.fieldKey);
+      return base;
+    }
+
+    const merged = pt ? { ...base, ...pt } : base;
+    assertAllowedFieldKey(merged.targetKind, merged.fieldKey);
+    return merged;
   }
 
   async readDbSubset(keys) {
@@ -260,19 +478,22 @@ class HostAdapter {
   }
 
   /**
-   * Resolves the current source content and rich metadata for any target descriptor.
+   * Resolves the current source content, host identity binding, and rich metadata for any target descriptor.
    */
   async readTargetSnapshot(target) {
     const t = target || { targetKind: 'general' };
 
     if (t.targetKind === 'char_field') {
-      const { char } = await this.readActiveCharacter();
+      const { char, charIndex } = await this.readActiveCharacter();
       if (!char) return { ok: false, reason: '선택된 캐릭터가 없습니다.', content: '' };
       const fieldKey = t.fieldKey || 'desc';
+      const fieldErr = validateAllowedFieldKey('char_field', fieldKey);
+      if (fieldErr) return { ok: false, reason: fieldErr, content: '' };
       const content = String(char[fieldKey] ?? '');
       return {
         ok: true,
         target: { ...t, fieldKey },
+        hostBinding: { charIndex, ...getCharIdentity(char) },
         label: CHAR_FIELD_META[fieldKey]?.label || fieldKey,
         content,
         charName: char.name || '(이름 없음)',
@@ -280,15 +501,18 @@ class HostAdapter {
     }
 
     if (t.targetKind === 'char_lorebook') {
-      const { char } = await this.readActiveCharacter();
+      const { char, charIndex } = await this.readActiveCharacter();
       if (!char) return { ok: false, reason: '선택된 캐릭터가 없습니다.', content: '' };
       const list = Array.isArray(char.globalLore) ? char.globalLore : [];
       const idx = Number.isInteger(t.loreIndex) ? t.loreIndex : null;
       const entry = idx !== null && list[idx] ? list[idx] : null;
       const fieldKey = t.fieldKey || 'content';
+      const fieldErr = validateAllowedFieldKey('char_lorebook', fieldKey);
+      if (fieldErr) return { ok: false, reason: fieldErr, content: '' };
       return {
         ok: true,
         target: { ...t, loreIndex: idx, fieldKey },
+        hostBinding: { charIndex, ...getCharIdentity(char) },
         label: entry ? `캐릭터 로어북 #${idx + 1} (${entry.comment || '무제'})` : `캐릭터 로어북 (${list.length}개)`,
         content: entry ? String(entry[fieldKey] ?? '') : '',
         entry,
@@ -305,15 +529,18 @@ class HostAdapter {
     }
 
     if (t.targetKind === 'chat_lorebook') {
-      const { chat } = await this.readActiveChat();
+      const { chat, char, charIndex, chatIndex } = await this.readActiveChat();
       if (!chat) return { ok: false, reason: '활성 채팅을 찾을 수 없습니다.', content: '' };
       const list = Array.isArray(chat.localLore) ? chat.localLore : [];
       const idx = Number.isInteger(t.loreIndex) ? t.loreIndex : null;
       const entry = idx !== null && list[idx] ? list[idx] : null;
       const fieldKey = t.fieldKey || 'content';
+      const fieldErr = validateAllowedFieldKey('chat_lorebook', fieldKey);
+      if (fieldErr) return { ok: false, reason: fieldErr, content: '' };
       return {
         ok: true,
         target: { ...t, loreIndex: idx, fieldKey },
+        hostBinding: { charIndex, chatIndex, ...getCharIdentity(char) },
         label: entry ? `채팅 로어북 #${idx + 1} (${entry.comment || '무제'})` : `채팅 로어북 (${list.length}개)`,
         content: entry ? String(entry[fieldKey] ?? '') : '',
         entry,
@@ -329,21 +556,23 @@ class HostAdapter {
     }
 
     if (t.targetKind === 'char_lua') {
-      const { char } = await this.readActiveCharacter();
+      const { char, charIndex } = await this.readActiveCharacter();
       if (!char) return { ok: false, reason: '선택된 캐릭터가 없습니다.', content: '' };
       const lua = extractLuaFromTriggers(char.triggerscript);
       return {
         ok: true,
         target: { ...t, fieldKey: 'code' },
+        hostBinding: { charIndex, ...getCharIdentity(char) },
         label: `캐릭터 Lua 트리거 (${char.name || '무제'})`,
         content: lua.code,
         isLua: lua.isLua,
         hasOtherTriggers: lua.hasOtherTriggers,
+        otherTriggerCount: lua.otherTriggerCount,
       };
     }
 
     if (t.targetKind === 'char_regex') {
-      const { char } = await this.readActiveCharacter();
+      const { char, charIndex } = await this.readActiveCharacter();
       if (!char) return { ok: false, reason: '선택된 캐릭터가 없습니다.', content: '' };
       const list = Array.isArray(char.customscript) ? char.customscript : [];
       const idx = Number.isInteger(t.regexIndex) ? t.regexIndex : null;
@@ -351,6 +580,7 @@ class HostAdapter {
       return {
         ok: true,
         target: { ...t, regexIndex: idx },
+        hostBinding: { charIndex, ...getCharIdentity(char) },
         label: entry ? `캐릭터 정규식 #${idx + 1} (${entry.comment || '무제'})` : `캐릭터 정규식 (${list.length}개)`,
         content: entry ? JSON.stringify(entry, null, 2) : '',
         entry,
@@ -364,9 +594,12 @@ class HostAdapter {
       const idx = Number.isInteger(t.personaIndex) ? t.personaIndex : selectedPersona;
       const entry = personas[idx] ?? null;
       const fieldKey = t.fieldKey || 'personaPrompt';
+      const fieldErr = validateAllowedFieldKey('persona', fieldKey);
+      if (fieldErr) return { ok: false, reason: fieldErr, content: '' };
       return {
         ok: true,
         target: { ...t, personaIndex: idx, fieldKey },
+        hostBinding: { personaIndex: idx, personaId: entry?.id || null },
         label: entry ? `페르소나 #${idx + 1} (${entry.name || '무제'})` : '페르소나 목록',
         content: entry ? String(entry[fieldKey] ?? '') : '',
         entry,
@@ -390,27 +623,44 @@ class HostAdapter {
 
       let content = '';
       let label = `모듈: ${mod.name}`;
+      let entry = null;
+      let isLua = false;
+      let hasOtherTriggers = false;
+      let otherTriggerCount = 0;
+
       if (t.targetKind === 'module_lua') {
-        content = extractLuaFromTriggers(mod.trigger).code;
+        const lua = extractLuaFromTriggers(mod.trigger);
+        content = lua.code;
+        isLua = lua.isLua;
+        hasOtherTriggers = lua.hasOtherTriggers;
+        otherTriggerCount = lua.otherTriggerCount;
         label = `모듈 Lua (${mod.name})`;
       } else if (t.targetKind === 'module_regex') {
         const list = Array.isArray(mod.regex) ? mod.regex : [];
         const rIdx = Number.isInteger(t.regexIndex) ? t.regexIndex : null;
-        content = rIdx !== null && list[rIdx] ? JSON.stringify(list[rIdx], null, 2) : '';
-        label = `모듈 정규식 (${mod.name}, ${list.length}개)`;
+        entry = rIdx !== null && list[rIdx] ? list[rIdx] : null;
+        content = entry ? JSON.stringify(entry, null, 2) : '';
+        label = entry ? `모듈 정규식 (${mod.name} #${rIdx + 1})` : `모듈 정규식 (${mod.name}, ${list.length}개)`;
       } else {
         const list = Array.isArray(mod.lorebook) ? mod.lorebook : [];
         const lIdx = Number.isInteger(t.loreIndex) ? t.loreIndex : null;
-        const entry = lIdx !== null && list[lIdx] ? list[lIdx] : null;
+        entry = lIdx !== null && list[lIdx] ? list[lIdx] : null;
         const fieldKey = t.fieldKey || 'content';
+        const fieldErr = validateAllowedFieldKey('module_lorebook', fieldKey);
+        if (fieldErr) return { ok: false, reason: fieldErr, content: '' };
         content = entry ? String(entry[fieldKey] ?? '') : '';
         label = entry ? `모듈 로어북 (${mod.name} #${lIdx + 1})` : `모듈 로어북 (${mod.name}, ${list.length}개)`;
       }
       return {
         ok: true,
         target: { ...t, moduleIndex: modIdx },
+        hostBinding: { moduleIndex: modIdx, moduleId: mod.id || null },
         label,
         content,
+        entry,
+        isLua,
+        hasOtherTriggers,
+        otherTriggerCount,
         module: mod,
         modulesSummary: modules.map((m, i) => ({
           index: i,
@@ -426,6 +676,8 @@ class HostAdapter {
       const cfg = await this.readAllowedConfig();
       if (!cfg) return { ok: false, reason: 'DB 읽기 권한(db)이 필요합니다.', content: '' };
       const fieldKey = t.fieldKey || null;
+      const fieldErr = validateAllowedFieldKey('config', fieldKey);
+      if (fieldErr) return { ok: false, reason: fieldErr, content: '' };
       return {
         ok: true,
         target: { ...t, fieldKey },
@@ -451,10 +703,15 @@ class HostAdapter {
   }
 
   /**
-   * Computes the resulting text & preview before mutating anything (dry run for Review UI).
+   * Computes the resulting text, metadata diffs, warnings, and pinned target binding before mutating anything.
    */
   async previewProposal(proposal, activeTarget) {
-    const target = { ...(activeTarget || {}), ...(proposal.target || {}) };
+    let target;
+    try {
+      target = this._resolveSafeTarget(proposal, activeTarget);
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
 
     if (proposal.action === 'patch_text' || proposal.action === 'replace_text') {
       const snap = await this.readTargetSnapshot(target);
@@ -489,11 +746,31 @@ class HostAdapter {
         };
       }
       const before = snap.content;
+      if (proposal.action === 'replace_text') {
+        const truncErr = checkTruncationGuard(before, '전체 덮어쓰기(replace_text)');
+        if (truncErr) {
+          return { ok: false, error: truncErr, before, label: snap.label, target: snap.target };
+        }
+      }
       try {
         const after = proposal.action === 'patch_text'
           ? applyTextEdits(before, proposal.edits, proposal.title || snap.label)
           : String(proposal.content ?? '');
-        return { ok: true, before, after, label: snap.label, target: snap.target };
+        const isLuaTarget = kind === 'char_lua' || kind === 'module_lua';
+        const destructiveWarning = isLuaTarget && snap.hasOtherTriggers
+          ? buildLuaDestructiveWarning(snap.otherTriggerCount)
+          : null;
+        return {
+          ok: true,
+          before,
+          after,
+          label: snap.label,
+          target: snap.target,
+          hostBinding: snap.hostBinding || null,
+          destructiveWarning,
+          requiresConfirm: Boolean(destructiveWarning),
+          confirmLabel: destructiveWarning ? '기존 V1/V2 트리거가 삭제되고 Lua로 대체됨을 확인했습니다' : null,
+        };
       } catch (err) {
         return { ok: false, error: err.message, before, label: snap.label, target: snap.target };
       }
@@ -507,19 +784,30 @@ class HostAdapter {
       });
       if (!snap.ok) return { ok: false, error: snap.reason };
       const before = snap.content;
+      if (!proposal.edits) {
+        const truncErr = checkTruncationGuard(before, 'Lua 전체 교체');
+        if (truncErr) {
+          return { ok: false, error: truncErr, before, label: snap.label, target: snap.target };
+        }
+      }
       try {
         const after = proposal.edits
           ? applyTextEdits(before, proposal.edits, 'Lua 스크립트')
           : String(proposal.code ?? proposal.content ?? '');
+        const destructiveWarning = snap.hasOtherTriggers
+          ? buildLuaDestructiveWarning(snap.otherTriggerCount)
+          : null;
         return {
           ok: true,
           before,
           after,
           label: snap.label,
           target: snap.target,
-          warning: snap.hasOtherTriggers
-            ? '기존에 V1/V2 트리거가 설정되어 있습니다. 적용하면 Lua 트리거 모드로 전환됩니다.'
-            : null,
+          hostBinding: snap.hostBinding || null,
+          warning: destructiveWarning,
+          destructiveWarning,
+          requiresConfirm: Boolean(destructiveWarning),
+          confirmLabel: destructiveWarning ? '기존 V1/V2 트리거가 삭제되고 Lua로 대체됨을 확인했습니다' : null,
         };
       } catch (err) {
         return { ok: false, error: err.message, before, label: snap.label, target: snap.target };
@@ -531,6 +819,8 @@ class HostAdapter {
       const targetKind = scope === 'chat' ? 'chat_lorebook' : scope === 'module' ? 'module_lorebook' : 'char_lorebook';
       const loreIndex = Number.isInteger(proposal.loreIndex) ? proposal.loreIndex : target.loreIndex;
       const fieldKey = proposal.fieldKey || 'content';
+      const fieldErr = validateAllowedFieldKey(targetKind, fieldKey);
+      if (fieldErr) return { ok: false, error: fieldErr };
       const snap = await this.readTargetSnapshot({
         targetKind,
         loreIndex,
@@ -539,47 +829,160 @@ class HostAdapter {
       });
       if (!snap.ok) return { ok: false, error: snap.reason };
       if (!snap.entry) return { ok: false, error: `수정할 로어북 항목(#${loreIndex})을 찾을 수 없습니다.` };
+
       const before = String(snap.entry[fieldKey] ?? '');
-      let after = before;
+      if (!proposal.edits && (proposal[fieldKey] !== undefined || (fieldKey === 'content' && proposal.content !== undefined))) {
+        const truncErr = checkTruncationGuard(before, '로어북 본문 전체 덮어쓰기');
+        if (truncErr) return { ok: false, error: truncErr, before, label: snap.label, target: snap.target };
+      }
+
+      const nextEntry = normalizeLorebookEntry(proposal, snap.entry);
       if (proposal.edits) {
         try {
-          after = applyTextEdits(before, proposal.edits, '로어북');
+          nextEntry[fieldKey] = applyTextEdits(before, proposal.edits, '로어북');
         } catch (err) {
-          return { ok: false, error: err.message, before, label: snap.label };
+          return { ok: false, error: err.message, before, label: snap.label, target: snap.target };
         }
-      } else if (proposal[fieldKey] !== undefined) {
-        after = String(proposal[fieldKey]);
-      } else if (fieldKey === 'content' && proposal.content !== undefined) {
-        after = String(proposal.content);
       }
-      return { ok: true, before, after, label: snap.label, target: snap.target };
+      const after = String(nextEntry[fieldKey] ?? '');
+      const metaChanges = computeMetaChanges(snap.entry, nextEntry, LORE_META_SPECS, fieldKey);
+      return {
+        ok: true,
+        before,
+        after,
+        metaChanges,
+        label: snap.label,
+        target: snap.target,
+        hostBinding: snap.hostBinding || null,
+      };
     }
 
     if (proposal.action === 'update_persona') {
+      const fieldKey = proposal.fieldKey || 'personaPrompt';
+      const fieldErr = validateAllowedFieldKey('persona', fieldKey);
+      if (fieldErr) return { ok: false, error: fieldErr };
       const snap = await this.readTargetSnapshot({
         targetKind: 'persona',
         personaIndex: proposal.personaIndex ?? target.personaIndex,
-        fieldKey: 'personaPrompt',
+        fieldKey,
       });
       if (!snap.ok) return { ok: false, error: snap.reason };
       if (!snap.entry) return { ok: false, error: '수정할 페르소나를 찾을 수 없습니다.' };
-      const before = String(snap.entry.personaPrompt ?? '');
-      let after = before;
+
+      const before = String(snap.entry[fieldKey] ?? '');
+      if (!proposal.edits && !proposal.fieldEdits && proposal[fieldKey] !== undefined) {
+        const truncErr = checkTruncationGuard(before, '페르소나 전체 덮어쓰기');
+        if (truncErr) return { ok: false, error: truncErr, before, label: snap.label, target: snap.target };
+      }
+
+      const nextEntry = clone(snap.entry);
+      if (proposal.name !== undefined) nextEntry.name = String(proposal.name);
+      if (proposal.note !== undefined) nextEntry.note = String(proposal.note);
+      if (proposal.largePortrait !== undefined) nextEntry.largePortrait = Boolean(proposal.largePortrait);
       if (proposal.edits) {
         try {
-          after = applyTextEdits(before, proposal.edits, '페르소나 프롬프트');
+          nextEntry.personaPrompt = applyTextEdits(String(snap.entry.personaPrompt ?? ''), proposal.edits, '페르소나 프롬프트');
         } catch (err) {
-          return { ok: false, error: err.message, before, label: snap.label };
+          return { ok: false, error: err.message, before, label: snap.label, target: snap.target };
+        }
+      } else if (proposal.fieldEdits && proposal.fieldKey) {
+        try {
+          nextEntry[proposal.fieldKey] = applyTextEdits(String(snap.entry[proposal.fieldKey] ?? ''), proposal.fieldEdits, `페르소나 ${proposal.fieldKey}`);
+        } catch (err) {
+          return { ok: false, error: err.message, before, label: snap.label, target: snap.target };
         }
       } else if (proposal.personaPrompt !== undefined) {
-        after = String(proposal.personaPrompt);
+        nextEntry.personaPrompt = String(proposal.personaPrompt);
       }
+
+      const after = String(nextEntry[fieldKey] ?? '');
+      const metaChanges = computeMetaChanges(snap.entry, nextEntry, PERSONA_META_SPECS, fieldKey);
       const flavor = this.detectHostFlavor();
       const isSelected = snap.target.personaIndex === snap.selectedPersona;
       const warning = isSelected && !flavor.activePersonaAutoSyncs && !proposal.bindToCurrentChat
         ? '원본 RisuAI/PocketRisu/RisuBard에서는 현재 선택된 전역 페르소나 UI가 즉시 갱신되지 않을 수 있습니다. "현재 채팅에 바인딩"을 체크하면 즉시 반영됩니다.'
         : null;
-      return { ok: true, before, after, label: snap.label, target: snap.target, warning };
+      return {
+        ok: true,
+        before,
+        after,
+        metaChanges,
+        label: snap.label,
+        target: snap.target,
+        hostBinding: snap.hostBinding || null,
+        warning,
+      };
+    }
+
+    if (proposal.action === 'upsert_regex') {
+      const scope = proposal.scope || (target.targetKind === 'module_regex' ? 'module' : 'character');
+      const targetKind = scope === 'module' ? 'module_regex' : 'char_regex';
+      const idx = Number.isInteger(proposal.regexIndex) ? proposal.regexIndex : null;
+      const snap = await this.readTargetSnapshot({
+        targetKind,
+        regexIndex: idx,
+        moduleIndex: proposal.moduleIndex ?? target.moduleIndex,
+      });
+      if (!snap.ok) return { ok: false, error: snap.reason };
+      const existing = idx !== null ? snap.entry : null;
+      const nextEntry = normalizeRegexEntry(proposal, existing);
+      const metaChanges = existing
+        ? computeMetaChanges(existing, nextEntry, REGEX_META_SPECS)
+        : REGEX_META_SPECS.map(([key, label]) => ({
+            key,
+            label,
+            before: '(신규)',
+            after: formatMetaValue(nextEntry[key]),
+          }));
+      return {
+        ok: true,
+        before: existing ? String(existing.out ?? '') : '',
+        after: String(nextEntry.out ?? ''),
+        metaChanges,
+        label: existing ? `${snap.label} 수정` : (proposal.title || `새 정규식 (${nextEntry.comment})`),
+        target: snap.target,
+        hostBinding: snap.hostBinding || null,
+      };
+    }
+
+    if (proposal.action === 'create_lorebook') {
+      const scope = proposal.scope || target.loreScope || 'character';
+      const targetKind = scope === 'chat' ? 'chat_lorebook' : scope === 'module' ? 'module_lorebook' : 'char_lorebook';
+      const snap = await this.readTargetSnapshot({
+        targetKind,
+        moduleIndex: proposal.moduleIndex ?? target.moduleIndex,
+      });
+      if (!snap.ok) return { ok: false, error: snap.reason };
+      const nextEntry = normalizeLorebookEntry(proposal);
+      const metaChanges = LORE_META_SPECS
+        .filter(([k]) => nextEntry[k] !== undefined && nextEntry[k] !== '' && nextEntry[k] !== false)
+        .map(([key, label]) => ({ key, label, before: '(신규)', after: formatMetaValue(nextEntry[key]) }));
+      return {
+        ok: true,
+        before: '',
+        after: String(nextEntry.content ?? ''),
+        metaChanges,
+        label: proposal.title || `새 로어북 (${nextEntry.comment})`,
+        target: snap.target,
+        hostBinding: snap.hostBinding || null,
+      };
+    }
+
+    if (proposal.action === 'create_persona') {
+      const metaChanges = [
+        { key: 'name', label: '이름', before: '(신규)', after: formatMetaValue(proposal.name || 'New Persona') },
+      ];
+      if (proposal.note) metaChanges.push({ key: 'note', label: '메모', before: '(신규)', after: formatMetaValue(proposal.note) });
+      if (proposal.largePortrait) metaChanges.push({ key: 'largePortrait', label: '큰 초상화', before: '(신규)', after: '예' });
+      return {
+        ok: true,
+        before: '',
+        after: String(proposal.personaPrompt ?? proposal.content ?? ''),
+        metaChanges,
+        label: proposal.title || `새 페르소나 (${proposal.name || 'New Persona'})`,
+        target,
+        hostBinding: null,
+      };
     }
 
     if (proposal.action === 'update_config') {
@@ -601,36 +1004,32 @@ class HostAdapter {
         before: JSON.stringify(beforeObj, null, 2),
         after: JSON.stringify(afterObj, null, 2),
         label: `설정 변경 (${Object.keys(changes).join(', ')})`,
+        target,
+        hostBinding: null,
       };
     }
 
-    // Create actions (create_lorebook, create_persona, upsert_regex)
-    return {
-      ok: true,
-      before: '',
-      after: String(proposal.content ?? proposal.personaPrompt ?? proposal.out ?? JSON.stringify(proposal, null, 2)),
-      label: proposal.title || proposal.comment || proposal.name || proposal.action,
-    };
+    return { ok: false, error: `지원하지 않는 작업 종류입니다: ${proposal.action}` };
   }
 
   /**
-   * Applies a validated proposal to RisuAI and pushes an Undo record.
+   * Applies a validated proposal to RisuAI using the pinned target and pushes a surgical Undo record.
    */
   async applyProposal(proposal, activeTarget, options = {}) {
-    const target = { ...(activeTarget || {}), ...(proposal.target || {}) };
+    const target = this._resolveSafeTarget(proposal, activeTarget);
 
     switch (proposal.action) {
       case 'patch_text':
       case 'replace_text':
         return await this._applyTextTarget(proposal, target, options);
       case 'create_lorebook':
-        return await this._applyCreateLorebook(proposal, target);
+        return await this._applyCreateLorebook(proposal, target, options);
       case 'update_lorebook':
-        return await this._applyUpdateLorebook(proposal, target);
+        return await this._applyUpdateLorebook(proposal, target, options);
       case 'update_lua':
-        return await this._applyUpdateLua(proposal, target);
+        return await this._applyUpdateLua(proposal, target, options);
       case 'upsert_regex':
-        return await this._applyUpsertRegex(proposal, target);
+        return await this._applyUpsertRegex(proposal, target, options);
       case 'create_persona':
         return await this._applyCreatePersona(proposal, options);
       case 'update_persona':
@@ -644,61 +1043,105 @@ class HostAdapter {
 
   async _applyTextTarget(proposal, target, options = {}) {
     const kind = target.targetKind;
-    const compute = (before, label) => (
-      proposal.action === 'patch_text'
-        ? applyTextEdits(before, proposal.edits, label)
-        : String(proposal.content ?? '')
-    );
+    const compute = (before, label) => {
+      if (proposal.action === 'replace_text') {
+        const truncErr = checkTruncationGuard(before, '전체 덮어쓰기(replace_text)');
+        if (truncErr) throw new Error(truncErr);
+        return String(proposal.content ?? '');
+      }
+      return applyTextEdits(before, proposal.edits, label);
+    };
 
     if (kind === 'char_field') {
-      const { char } = await this.readActiveCharacter();
-      if (!char) throw new Error('선택된 캐릭터가 없습니다.');
       const fieldKey = target.fieldKey || 'desc';
-      const prevChar = clone(char);
+      assertAllowedFieldKey('char_field', fieldKey);
+      const { char, charIndex } = await this._requireSameActiveCharacter(options.hostBinding, '적용');
+      const hadKey = Object.hasOwn(char, fieldKey);
+      const prevValue = clone(char[fieldKey]);
+      const charBinding = { charIndex, ...getCharIdentity(char) };
+
       const nextChar = clone(char);
       nextChar[fieldKey] = compute(String(nextChar[fieldKey] ?? ''), fieldKey);
       await this._setCharacter(nextChar);
+
       const undoId = this._pushUndo({
         label: `캐릭터 ${fieldKey} 수정`,
-        restore: async () => { await this._setCharacter(prevChar); },
+        restore: async () => {
+          const { char: latest } = await this._requireSameActiveCharacter(charBinding, '되돌리기');
+          const restored = clone(latest);
+          if (hadKey) restored[fieldKey] = clone(prevValue);
+          else delete restored[fieldKey];
+          await this._setCharacter(restored);
+        },
       });
       return { ok: true, undoId, summary: `캐릭터 ${CHAR_FIELD_META[fieldKey]?.label || fieldKey}에 적용했습니다.` };
     }
 
     if (kind === 'char_lorebook') {
-      const { char } = await this.readActiveCharacter();
-      if (!char) throw new Error('선택된 캐릭터가 없습니다.');
+      const fieldKey = target.fieldKey || 'content';
+      assertAllowedFieldKey('char_lorebook', fieldKey);
+      const { char, charIndex } = await this._requireSameActiveCharacter(options.hostBinding, '적용');
       const idx = target.loreIndex;
       if (!Number.isInteger(idx) || !char.globalLore?.[idx]) {
         throw new Error('수정할 캐릭터 로어북 인덱스가 올바르지 않습니다.');
       }
-      const fieldKey = target.fieldKey || 'content';
-      const prevChar = clone(char);
+      const prevFieldValue = clone(char.globalLore[idx][fieldKey]);
+      const charBinding = { charIndex, ...getCharIdentity(char) };
+
       const nextChar = clone(char);
-      nextChar.globalLore[idx][fieldKey] = compute(String(nextChar.globalLore[idx][fieldKey] ?? ''), '캐릭터 로어북');
+      const nextStr = compute(String(nextChar.globalLore[idx][fieldKey] ?? ''), '캐릭터 로어북');
+      if (fieldKey === 'insertorder') {
+        const num = Number(nextStr.trim());
+        if (!Number.isFinite(num)) throw new Error('배치 순서(insertorder)는 유한한 숫자여야 합니다.');
+        nextChar.globalLore[idx][fieldKey] = num;
+      } else {
+        nextChar.globalLore[idx][fieldKey] = nextStr;
+      }
       await this._setCharacter(nextChar);
+
       const undoId = this._pushUndo({
         label: `캐릭터 로어북 #${idx + 1} 수정`,
-        restore: async () => { await this._setCharacter(prevChar); },
+        restore: async () => {
+          const { char: latest } = await this._requireSameActiveCharacter(charBinding, '되돌리기');
+          if (!latest.globalLore?.[idx]) throw new Error('되돌릴 캐릭터 로어북 항목을 찾을 수 없습니다.');
+          const restored = clone(latest);
+          restored.globalLore[idx][fieldKey] = clone(prevFieldValue);
+          await this._setCharacter(restored);
+        },
       });
       return { ok: true, undoId, summary: `캐릭터 로어북 #${idx + 1}의 ${fieldKey}을(를) 수정했습니다.` };
     }
 
     if (kind === 'chat_lorebook') {
-      const { chat, charIndex, chatIndex } = await this.readActiveChat();
-      if (!chat) throw new Error('활성 채팅을 찾을 수 없습니다.');
+      const fieldKey = target.fieldKey || 'content';
+      assertAllowedFieldKey('chat_lorebook', fieldKey);
+      const { chat, charIndex, chatIndex } = await this._requireSameActiveChat(options.hostBinding, '적용');
       const idx = target.loreIndex;
       if (!Number.isInteger(idx) || !chat.localLore?.[idx]) {
         throw new Error('수정할 채팅 로어북 인덱스가 올바르지 않습니다.');
       }
-      const fieldKey = target.fieldKey || 'content';
-      const prevChat = clone(chat);
+      const prevFieldValue = clone(chat.localLore[idx][fieldKey]);
+
       const nextChat = clone(chat);
-      nextChat.localLore[idx][fieldKey] = compute(String(nextChat.localLore[idx][fieldKey] ?? ''), '채팅 로어북');
+      const nextStr = compute(String(nextChat.localLore[idx][fieldKey] ?? ''), '채팅 로어북');
+      if (fieldKey === 'insertorder') {
+        const num = Number(nextStr.trim());
+        if (!Number.isFinite(num)) throw new Error('배치 순서(insertorder)는 유한한 숫자여야 합니다.');
+        nextChat.localLore[idx][fieldKey] = num;
+      } else {
+        nextChat.localLore[idx][fieldKey] = nextStr;
+      }
       await this._setChat(charIndex, chatIndex, nextChat);
+
       const undoId = this._pushUndo({
         label: `채팅 로어북 #${idx + 1} 수정`,
-        restore: async () => { await this._setChat(charIndex, chatIndex, prevChat); },
+        restore: async () => {
+          const latestChat = await this._readChatAt(charIndex, chatIndex);
+          if (!latestChat?.localLore?.[idx]) throw new Error('되돌릴 채팅 로어북 항목을 찾을 수 없습니다.');
+          const restored = clone(latestChat);
+          restored.localLore[idx][fieldKey] = clone(prevFieldValue);
+          await this._setChat(charIndex, chatIndex, restored);
+        },
       });
       return { ok: true, undoId, summary: `채팅 로어북 #${idx + 1}의 ${fieldKey}을(를) 수정했습니다.` };
     }
@@ -709,11 +1152,12 @@ class HostAdapter {
         moduleIndex: target.moduleIndex,
         edits: proposal.action === 'patch_text' ? proposal.edits : undefined,
         code: proposal.action === 'replace_text' ? proposal.content : undefined,
-      }, target);
+      }, target, options);
     }
 
     if (kind === 'persona') {
       const fieldKey = target.fieldKey || 'personaPrompt';
+      assertAllowedFieldKey('persona', fieldKey);
       return await this._applyUpdatePersona({
         personaIndex: target.personaIndex,
         [fieldKey]: proposal.action === 'replace_text' ? proposal.content : undefined,
@@ -724,14 +1168,16 @@ class HostAdapter {
     }
 
     if (kind === 'module_lorebook') {
+      const fieldKey = target.fieldKey || 'content';
+      assertAllowedFieldKey('module_lorebook', fieldKey);
       return await this._applyUpdateLorebook({
         scope: 'module',
         moduleIndex: target.moduleIndex,
         loreIndex: target.loreIndex,
-        fieldKey: target.fieldKey || 'content',
+        fieldKey,
         edits: proposal.action === 'patch_text' ? proposal.edits : undefined,
-        content: proposal.action === 'replace_text' ? proposal.content : undefined,
-      }, target);
+        [fieldKey]: proposal.action === 'replace_text' ? proposal.content : undefined,
+      }, target, options);
     }
 
     if (kind === 'config' && target.fieldKey && ALLOWED_CONFIG_KEYS.includes(target.fieldKey)) {
@@ -744,21 +1190,30 @@ class HostAdapter {
     throw new Error(`현재 대상(${kind || '없음'})에는 직접 텍스트 적용을 지원하지 않습니다. 상단에서 대상을 선택해 주세요.`);
   }
 
-  async _applyCreateLorebook(proposal, target) {
+  async _applyCreateLorebook(proposal, target, options = {}) {
     const scope = proposal.scope || target.loreScope || 'character';
     const entry = normalizeLorebookEntry(proposal);
 
     if (scope === 'chat') {
-      const { chat, charIndex, chatIndex } = await this.readActiveChat();
-      if (!chat) throw new Error('활성 채팅을 찾을 수 없습니다.');
-      const prevChat = clone(chat);
+      const { chat, charIndex, chatIndex } = await this._requireSameActiveChat(options.hostBinding, '적용');
       const nextChat = clone(chat);
       nextChat.localLore = Array.isArray(nextChat.localLore) ? nextChat.localLore : [];
+      const insertedIndex = nextChat.localLore.length;
       nextChat.localLore.push(entry);
       await this._setChat(charIndex, chatIndex, nextChat);
+
+      const snapshotEntry = clone(entry);
       const undoId = this._pushUndo({
         label: `채팅 로어북 생성 (${entry.comment})`,
-        restore: async () => { await this._setChat(charIndex, chatIndex, prevChat); },
+        restore: async () => {
+          const latestChat = await this._readChatAt(charIndex, chatIndex);
+          if (!latestChat) throw new Error('되돌릴 채팅을 찾을 수 없습니다.');
+          const restored = clone(latestChat);
+          removeCreatedItem(restored.localLore, insertedIndex, e =>
+            e && e.comment === snapshotEntry.comment && e.key === snapshotEntry.key && e.content === snapshotEntry.content
+          );
+          await this._setChat(charIndex, chatIndex, restored);
+        },
       });
       return { ok: true, undoId, summary: `새 채팅 로어북 "${entry.comment}"을(를) 추가했습니다.` };
     }
@@ -768,59 +1223,99 @@ class HostAdapter {
       if (permissionDenied) throw new Error('DB 읽기 권한(db)이 필요합니다.');
       const modIdx = Number.isInteger(proposal.moduleIndex) ? proposal.moduleIndex : (target.moduleIndex ?? 0);
       if (!modules[modIdx]) throw new Error('대상 모듈을 찾을 수 없습니다.');
-      const prevModules = clone(modules);
+      const moduleId = modules[modIdx].id;
       const nextModules = clone(modules);
       nextModules[modIdx].lorebook = Array.isArray(nextModules[modIdx].lorebook) ? nextModules[modIdx].lorebook : [];
+      const insertedIndex = nextModules[modIdx].lorebook.length;
       nextModules[modIdx].lorebook.push(entry);
       await this.writeDbSubset({ modules: nextModules });
+
+      const snapshotEntry = clone(entry);
       const undoId = this._pushUndo({
         label: `모듈 로어북 생성 (${entry.comment})`,
-        restore: async () => { await this.writeDbSubset({ modules: prevModules }); },
+        restore: async () => {
+          const { modules: latestModules } = await this.readModules();
+          const idx = latestModules.findIndex(m => m.id === moduleId);
+          if (idx === -1) throw new Error('되돌릴 모듈을 찾을 수 없습니다.');
+          const restored = clone(latestModules);
+          removeCreatedItem(restored[idx].lorebook, insertedIndex, e =>
+            e && e.comment === snapshotEntry.comment && e.key === snapshotEntry.key && e.content === snapshotEntry.content
+          );
+          await this.writeDbSubset({ modules: restored });
+        },
       });
       return { ok: true, undoId, summary: `모듈 "${nextModules[modIdx].name}"에 새 로어북 "${entry.comment}"을(를) 추가했습니다.` };
     }
 
     // Default: character lorebook
-    const { char } = await this.readActiveCharacter();
-    if (!char) throw new Error('선택된 캐릭터가 없습니다.');
-    const prevChar = clone(char);
+    const { char, charIndex } = await this._requireSameActiveCharacter(options.hostBinding, '적용');
+    const charBinding = { charIndex, ...getCharIdentity(char) };
     const nextChar = clone(char);
     nextChar.globalLore = Array.isArray(nextChar.globalLore) ? nextChar.globalLore : [];
+    const insertedIndex = nextChar.globalLore.length;
     nextChar.globalLore.push(entry);
     await this._setCharacter(nextChar);
+
+    const snapshotEntry = clone(entry);
     const undoId = this._pushUndo({
       label: `캐릭터 로어북 생성 (${entry.comment})`,
-      restore: async () => { await this._setCharacter(prevChar); },
+      restore: async () => {
+        const { char: latest } = await this._requireSameActiveCharacter(charBinding, '되돌리기');
+        const restored = clone(latest);
+        removeCreatedItem(restored.globalLore, insertedIndex, e =>
+          e && e.comment === snapshotEntry.comment && e.key === snapshotEntry.key && e.content === snapshotEntry.content
+        );
+        await this._setCharacter(restored);
+      },
     });
     return { ok: true, undoId, summary: `새 캐릭터 로어북 "${entry.comment}"을(를) 추가했습니다.` };
   }
 
-  async _applyUpdateLorebook(proposal, target) {
+  async _applyUpdateLorebook(proposal, target, options = {}) {
     const scope = proposal.scope || target.loreScope || 'character';
     const loreIndex = Number.isInteger(proposal.loreIndex) ? proposal.loreIndex : target.loreIndex;
     if (!Number.isInteger(loreIndex) || loreIndex < 0) {
       throw new Error('수정할 로어북 인덱스(loreIndex)가 필요합니다.');
     }
+    const fieldKey = proposal.fieldKey || 'content';
+    assertAllowedFieldKey('char_lorebook', fieldKey);
 
     const mutateEntry = (existing) => {
+      if (!proposal.edits && (proposal[fieldKey] !== undefined || (fieldKey === 'content' && proposal.content !== undefined))) {
+        const truncErr = checkTruncationGuard(String(existing[fieldKey] ?? ''), '로어북 전체 덮어쓰기');
+        if (truncErr) throw new Error(truncErr);
+      }
       const next = normalizeLorebookEntry(proposal, existing);
       if (proposal.edits) {
-        const key = proposal.fieldKey || 'content';
-        next[key] = applyTextEdits(String(existing[key] ?? ''), proposal.edits, '로어북');
+        const nextStr = applyTextEdits(String(existing[fieldKey] ?? ''), proposal.edits, '로어북');
+        if (fieldKey === 'insertorder') {
+          const num = Number(nextStr.trim());
+          if (!Number.isFinite(num)) throw new Error('배치 순서(insertorder)는 유한한 숫자여야 합니다.');
+          next[fieldKey] = num;
+        } else {
+          next[fieldKey] = nextStr;
+        }
       }
       return next;
     };
 
     if (scope === 'chat') {
-      const { chat, charIndex, chatIndex } = await this.readActiveChat();
+      const { chat, charIndex, chatIndex } = await this._requireSameActiveChat(options.hostBinding, '적용');
       if (!chat?.localLore?.[loreIndex]) throw new Error(`채팅 로어북 #${loreIndex + 1}을(를) 찾을 수 없습니다.`);
-      const prevChat = clone(chat);
+      const prevEntry = clone(chat.localLore[loreIndex]);
       const nextChat = clone(chat);
       nextChat.localLore[loreIndex] = mutateEntry(nextChat.localLore[loreIndex]);
       await this._setChat(charIndex, chatIndex, nextChat);
+
       const undoId = this._pushUndo({
         label: `채팅 로어북 #${loreIndex + 1} 수정`,
-        restore: async () => { await this._setChat(charIndex, chatIndex, prevChat); },
+        restore: async () => {
+          const latestChat = await this._readChatAt(charIndex, chatIndex);
+          if (!latestChat?.localLore?.[loreIndex]) throw new Error('되돌릴 채팅 로어북 항목을 찾을 수 없습니다.');
+          const restored = clone(latestChat);
+          restored.localLore[loreIndex] = clone(prevEntry);
+          await this._setChat(charIndex, chatIndex, restored);
+        },
       });
       return { ok: true, undoId, summary: `채팅 로어북 #${loreIndex + 1}을(를) 수정했습니다.` };
     }
@@ -830,31 +1325,48 @@ class HostAdapter {
       if (permissionDenied) throw new Error('DB 읽기 권한(db)이 필요합니다.');
       const modIdx = Number.isInteger(proposal.moduleIndex) ? proposal.moduleIndex : (target.moduleIndex ?? 0);
       if (!modules[modIdx]?.lorebook?.[loreIndex]) throw new Error('대상 모듈 로어북 항목을 찾을 수 없습니다.');
-      const prevModules = clone(modules);
+      const moduleId = modules[modIdx].id;
+      const prevEntry = clone(modules[modIdx].lorebook[loreIndex]);
       const nextModules = clone(modules);
       nextModules[modIdx].lorebook[loreIndex] = mutateEntry(nextModules[modIdx].lorebook[loreIndex]);
       await this.writeDbSubset({ modules: nextModules });
+
       const undoId = this._pushUndo({
         label: `모듈 로어북 #${loreIndex + 1} 수정`,
-        restore: async () => { await this.writeDbSubset({ modules: prevModules }); },
+        restore: async () => {
+          const { modules: latestModules } = await this.readModules();
+          const idx = latestModules.findIndex(m => m.id === moduleId);
+          if (idx === -1 || !latestModules[idx].lorebook?.[loreIndex]) throw new Error('되돌릴 모듈 로어북 항목을 찾을 수 없습니다.');
+          const restored = clone(latestModules);
+          restored[idx].lorebook[loreIndex] = clone(prevEntry);
+          await this.writeDbSubset({ modules: restored });
+        },
       });
       return { ok: true, undoId, summary: `모듈 "${nextModules[modIdx].name}" 로어북 #${loreIndex + 1}을(를) 수정했습니다.` };
     }
 
-    const { char } = await this.readActiveCharacter();
+    const { char, charIndex } = await this._requireSameActiveCharacter(options.hostBinding, '적용');
     if (!char?.globalLore?.[loreIndex]) throw new Error(`캐릭터 로어북 #${loreIndex + 1}을(를) 찾을 수 없습니다.`);
-    const prevChar = clone(char);
+    const charBinding = { charIndex, ...getCharIdentity(char) };
+    const prevEntry = clone(char.globalLore[loreIndex]);
     const nextChar = clone(char);
     nextChar.globalLore[loreIndex] = mutateEntry(nextChar.globalLore[loreIndex]);
     await this._setCharacter(nextChar);
+
     const undoId = this._pushUndo({
       label: `캐릭터 로어북 #${loreIndex + 1} 수정`,
-      restore: async () => { await this._setCharacter(prevChar); },
+      restore: async () => {
+        const { char: latest } = await this._requireSameActiveCharacter(charBinding, '되돌리기');
+        if (!latest.globalLore?.[loreIndex]) throw new Error('되돌릴 캐릭터 로어북 항목을 찾을 수 없습니다.');
+        const restored = clone(latest);
+        restored.globalLore[loreIndex] = clone(prevEntry);
+        await this._setCharacter(restored);
+      },
     });
     return { ok: true, undoId, summary: `캐릭터 로어북 #${loreIndex + 1}을(를) 수정했습니다.` };
   }
 
-  async _applyUpdateLua(proposal, target) {
+  async _applyUpdateLua(proposal, target, options = {}) {
     const scope = proposal.scope || (target.targetKind === 'module_lua' ? 'module' : 'character');
 
     if (scope === 'module') {
@@ -862,39 +1374,70 @@ class HostAdapter {
       if (permissionDenied) throw new Error('DB 읽기 권한(db)이 필요합니다.');
       const modIdx = Number.isInteger(proposal.moduleIndex) ? proposal.moduleIndex : (target.moduleIndex ?? 0);
       if (!modules[modIdx]) throw new Error('대상 모듈을 찾을 수 없습니다.');
-      const prevModules = clone(modules);
+      const luaInfo = extractLuaFromTriggers(modules[modIdx].trigger);
+      if (luaInfo.hasOtherTriggers && options.requireDestructiveConfirm && !options.destructiveConfirmed) {
+        throw new Error('기존 V1/V2 트리거 삭제 확인 체크가 필요합니다.');
+      }
+      if (!proposal.edits) {
+        const truncErr = checkTruncationGuard(luaInfo.code, '모듈 Lua 전체 교체');
+        if (truncErr) throw new Error(truncErr);
+      }
+
+      const moduleId = modules[modIdx].id;
+      const prevTriggers = clone(modules[modIdx].trigger);
       const nextModules = clone(modules);
-      const currentCode = extractLuaFromTriggers(nextModules[modIdx].trigger).code;
       const nextCode = proposal.edits
-        ? applyTextEdits(currentCode, proposal.edits, '모듈 Lua')
+        ? applyTextEdits(luaInfo.code, proposal.edits, '모듈 Lua')
         : String(proposal.code ?? proposal.content ?? '');
       nextModules[modIdx].trigger = buildLuaTriggers(nextCode);
       await this.writeDbSubset({ modules: nextModules });
+
       const undoId = this._pushUndo({
         label: `모듈 Lua 수정 (${nextModules[modIdx].name})`,
-        restore: async () => { await this.writeDbSubset({ modules: prevModules }); },
+        restore: async () => {
+          const { modules: latestModules } = await this.readModules();
+          const idx = latestModules.findIndex(m => m.id === moduleId);
+          if (idx === -1) throw new Error('되돌릴 모듈을 찾을 수 없습니다.');
+          const restored = clone(latestModules);
+          restored[idx].trigger = clone(prevTriggers);
+          await this.writeDbSubset({ modules: restored });
+        },
       });
       return { ok: true, undoId, summary: `모듈 "${nextModules[modIdx].name}" Lua 스크립트를 저장했습니다.` };
     }
 
-    const { char } = await this.readActiveCharacter();
-    if (!char) throw new Error('선택된 캐릭터가 없습니다.');
-    const prevChar = clone(char);
+    const { char, charIndex } = await this._requireSameActiveCharacter(options.hostBinding, '적용');
+    const luaInfo = extractLuaFromTriggers(char.triggerscript);
+    if (luaInfo.hasOtherTriggers && options.requireDestructiveConfirm && !options.destructiveConfirmed) {
+      throw new Error('기존 V1/V2 트리거 삭제 확인 체크가 필요합니다.');
+    }
+    if (!proposal.edits) {
+      const truncErr = checkTruncationGuard(luaInfo.code, '캐릭터 Lua 전체 교체');
+      if (truncErr) throw new Error(truncErr);
+    }
+
+    const charBinding = { charIndex, ...getCharIdentity(char) };
+    const prevTriggers = clone(char.triggerscript);
     const nextChar = clone(char);
-    const currentCode = extractLuaFromTriggers(nextChar.triggerscript).code;
     const nextCode = proposal.edits
-      ? applyTextEdits(currentCode, proposal.edits, '캐릭터 Lua')
+      ? applyTextEdits(luaInfo.code, proposal.edits, '캐릭터 Lua')
       : String(proposal.code ?? proposal.content ?? '');
     nextChar.triggerscript = buildLuaTriggers(nextCode);
     await this._setCharacter(nextChar);
+
     const undoId = this._pushUndo({
       label: `캐릭터 Lua 수정 (${nextChar.name})`,
-      restore: async () => { await this._setCharacter(prevChar); },
+      restore: async () => {
+        const { char: latest } = await this._requireSameActiveCharacter(charBinding, '되돌리기');
+        const restored = clone(latest);
+        restored.triggerscript = clone(prevTriggers);
+        await this._setCharacter(restored);
+      },
     });
     return { ok: true, undoId, summary: `캐릭터 "${nextChar.name}" Lua 트리거 스크립트를 저장했습니다.` };
   }
 
-  async _applyUpsertRegex(proposal, target) {
+  async _applyUpsertRegex(proposal, target, options = {}) {
     const scope = proposal.scope || (target.targetKind === 'module_regex' ? 'module' : 'character');
     const idx = Number.isInteger(proposal.regexIndex) ? proposal.regexIndex : null;
 
@@ -903,36 +1446,73 @@ class HostAdapter {
       if (permissionDenied) throw new Error('DB 읽기 권한(db)이 필요합니다.');
       const modIdx = Number.isInteger(proposal.moduleIndex) ? proposal.moduleIndex : (target.moduleIndex ?? 0);
       if (!modules[modIdx]) throw new Error('대상 모듈을 찾을 수 없습니다.');
-      const prevModules = clone(modules);
+      const moduleId = modules[modIdx].id;
       const nextModules = clone(modules);
       nextModules[modIdx].regex = Array.isArray(nextModules[modIdx].regex) ? nextModules[modIdx].regex : [];
-      if (idx !== null && nextModules[modIdx].regex[idx]) {
-        nextModules[modIdx].regex[idx] = normalizeRegexEntry(proposal, nextModules[modIdx].regex[idx]);
-      } else {
-        nextModules[modIdx].regex.push(normalizeRegexEntry(proposal));
-      }
+
+      const isUpdate = idx !== null && Boolean(nextModules[modIdx].regex[idx]);
+      const prevEntry = isUpdate ? clone(nextModules[modIdx].regex[idx]) : null;
+      const savedEntry = isUpdate
+        ? normalizeRegexEntry(proposal, nextModules[modIdx].regex[idx])
+        : normalizeRegexEntry(proposal);
+      const insertedIndex = isUpdate ? idx : nextModules[modIdx].regex.length;
+      if (isUpdate) nextModules[modIdx].regex[idx] = savedEntry;
+      else nextModules[modIdx].regex.push(savedEntry);
+
       await this.writeDbSubset({ modules: nextModules });
+      const snapshotEntry = clone(savedEntry);
       const undoId = this._pushUndo({
         label: `모듈 정규식 저장 (${proposal.comment || 'Regex'})`,
-        restore: async () => { await this.writeDbSubset({ modules: prevModules }); },
+        restore: async () => {
+          const { modules: latestModules } = await this.readModules();
+          const mIdx = latestModules.findIndex(m => m.id === moduleId);
+          if (mIdx === -1) throw new Error('되돌릴 모듈을 찾을 수 없습니다.');
+          const restored = clone(latestModules);
+          if (isUpdate) {
+            if (!restored[mIdx].regex?.[idx]) throw new Error('되돌릴 모듈 정규식 항목을 찾을 수 없습니다.');
+            restored[mIdx].regex[idx] = clone(prevEntry);
+          } else {
+            removeCreatedItem(restored[mIdx].regex, insertedIndex, e =>
+              e && e.comment === snapshotEntry.comment && e.in === snapshotEntry.in && e.out === snapshotEntry.out
+            );
+          }
+          await this.writeDbSubset({ modules: restored });
+        },
       });
       return { ok: true, undoId, summary: `모듈 "${nextModules[modIdx].name}" 정규식을 저장했습니다.` };
     }
 
-    const { char } = await this.readActiveCharacter();
-    if (!char) throw new Error('선택된 캐릭터가 없습니다.');
-    const prevChar = clone(char);
+    const { char, charIndex } = await this._requireSameActiveCharacter(options.hostBinding, '적용');
+    const charBinding = { charIndex, ...getCharIdentity(char) };
     const nextChar = clone(char);
     nextChar.customscript = Array.isArray(nextChar.customscript) ? nextChar.customscript : [];
-    if (idx !== null && nextChar.customscript[idx]) {
-      nextChar.customscript[idx] = normalizeRegexEntry(proposal, nextChar.customscript[idx]);
-    } else {
-      nextChar.customscript.push(normalizeRegexEntry(proposal));
-    }
+
+    const isUpdate = idx !== null && Boolean(nextChar.customscript[idx]);
+    const prevEntry = isUpdate ? clone(nextChar.customscript[idx]) : null;
+    const savedEntry = isUpdate
+      ? normalizeRegexEntry(proposal, nextChar.customscript[idx])
+      : normalizeRegexEntry(proposal);
+    const insertedIndex = isUpdate ? idx : nextChar.customscript.length;
+    if (isUpdate) nextChar.customscript[idx] = savedEntry;
+    else nextChar.customscript.push(savedEntry);
+
     await this._setCharacter(nextChar);
+    const snapshotEntry = clone(savedEntry);
     const undoId = this._pushUndo({
       label: `캐릭터 정규식 저장 (${proposal.comment || 'Regex'})`,
-      restore: async () => { await this._setCharacter(prevChar); },
+      restore: async () => {
+        const { char: latest } = await this._requireSameActiveCharacter(charBinding, '되돌리기');
+        const restored = clone(latest);
+        if (isUpdate) {
+          if (!restored.customscript?.[idx]) throw new Error('되돌릴 캐릭터 정규식 항목을 찾을 수 없습니다.');
+          restored.customscript[idx] = clone(prevEntry);
+        } else {
+          removeCreatedItem(restored.customscript, insertedIndex, e =>
+            e && e.comment === snapshotEntry.comment && e.in === snapshotEntry.in && e.out === snapshotEntry.out
+          );
+        }
+        await this._setCharacter(restored);
+      },
     });
     return { ok: true, undoId, summary: `캐릭터 정규식 "${proposal.comment || 'New Regex'}"을(를) 저장했습니다.` };
   }
@@ -940,17 +1520,24 @@ class HostAdapter {
   async _bindPersonaToActiveChat(personaId) {
     const { chat, charIndex, chatIndex } = await this.readActiveChat();
     if (!chat) return null;
-    const prevChat = clone(chat);
+    const hadKey = Object.hasOwn(chat, 'bindedPersona');
+    const prevBindedPersona = chat.bindedPersona;
     const nextChat = clone(chat);
     nextChat.bindedPersona = personaId;
     await this._setChat(charIndex, chatIndex, nextChat);
-    return async () => { await this._setChat(charIndex, chatIndex, prevChat); };
+    return async () => {
+      const latestChat = await this._readChatAt(charIndex, chatIndex);
+      if (!latestChat) return;
+      const restored = clone(latestChat);
+      if (hadKey) restored.bindedPersona = prevBindedPersona;
+      else delete restored.bindedPersona;
+      await this._setChat(charIndex, chatIndex, restored);
+    };
   }
 
   async _applyCreatePersona(proposal, options) {
-    const { personas, selectedPersona, permissionDenied } = await this.readPersonas();
+    const { personas, permissionDenied } = await this.readPersonas();
     if (permissionDenied) throw new Error('DB 읽기 권한(db)이 필요합니다.');
-    const prevPersonas = clone(personas);
     const nextPersonas = clone(personas);
     const newPersona = {
       name: String(proposal.name || 'New Persona'),
@@ -960,6 +1547,7 @@ class HostAdapter {
       largePortrait: Boolean(proposal.largePortrait),
       id: makeUuid(),
     };
+    const insertedIndex = nextPersonas.length;
     nextPersonas.push(newPersona);
     await this.writeDbSubset({ personas: nextPersonas });
 
@@ -969,10 +1557,14 @@ class HostAdapter {
       restoreChat = await this._bindPersonaToActiveChat(newPersona.id);
     }
 
+    const createdId = newPersona.id;
     const undoId = this._pushUndo({
       label: `새 페르소나 생성 (${newPersona.name})`,
       restore: async () => {
-        await this.writeDbSubset({ personas: prevPersonas, selectedPersona });
+        const { personas: latestPersonas } = await this.readPersonas();
+        const restored = clone(latestPersonas);
+        removeCreatedItem(restored, insertedIndex, p => p && p.id === createdId);
+        await this.writeDbSubset({ personas: restored });
         if (restoreChat) await restoreChat();
       },
     });
@@ -994,10 +1586,22 @@ class HostAdapter {
       : (Number.isInteger(target.personaIndex) ? target.personaIndex : selectedPersona);
     if (!personas[idx]) throw new Error(`페르소나 #${idx + 1}을(를) 찾을 수 없습니다.`);
 
-    const prevPersonas = clone(personas);
+    if (proposal.fieldKey !== undefined) {
+      assertAllowedFieldKey('persona', proposal.fieldKey);
+    }
+
+    const prevPersona = clone(personas[idx]);
     const nextPersonas = clone(personas);
     const cur = nextPersonas[idx];
     if (!cur.id) cur.id = makeUuid();
+
+    if (!proposal.edits && !proposal.fieldEdits) {
+      const checkKey = proposal.fieldKey || 'personaPrompt';
+      if (proposal[checkKey] !== undefined) {
+        const truncErr = checkTruncationGuard(String(cur[checkKey] ?? ''), '페르소나 전체 덮어쓰기');
+        if (truncErr) throw new Error(truncErr);
+      }
+    }
 
     if (proposal.name !== undefined) cur.name = String(proposal.name);
     if (proposal.note !== undefined) cur.note = String(proposal.note);
@@ -1018,10 +1622,17 @@ class HostAdapter {
       restoreChat = await this._bindPersonaToActiveChat(cur.id);
     }
 
+    const savedId = cur.id;
     const undoId = this._pushUndo({
       label: `페르소나 수정 (${cur.name})`,
       restore: async () => {
-        await this.writeDbSubset({ personas: prevPersonas, selectedPersona });
+        const { personas: latestPersonas } = await this.readPersonas();
+        const restored = clone(latestPersonas);
+        let targetIdx = restored.findIndex(p => p && p.id === savedId);
+        if (targetIdx === -1 && restored[idx]) targetIdx = idx;
+        if (targetIdx === -1) throw new Error('되돌릴 페르소나를 찾을 수 없습니다.');
+        restored[targetIdx] = clone(prevPersona);
+        await this.writeDbSubset({ personas: restored });
         if (restoreChat) await restoreChat();
       },
     });

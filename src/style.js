@@ -576,6 +576,48 @@ html, body {
   color: #fff;
 }
 
+.rh-meta-diff {
+  border: 1px solid var(--rh-border);
+  border-radius: 6px;
+  background: var(--rh-panel);
+  padding: 6px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11.5px;
+}
+
+.rh-meta-diff-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 5px;
+  font-family: var(--rh-mono);
+  font-size: 11px;
+  word-break: break-word;
+}
+
+.rh-meta-key {
+  font-family: var(--rh-font);
+  font-weight: 700;
+  color: var(--rh-muted);
+}
+
+.rh-meta-old {
+  background: var(--rh-diff-del-bg);
+  color: var(--rh-diff-del-text);
+  padding: 0 4px;
+  border-radius: 4px;
+  text-decoration: line-through;
+}
+
+.rh-meta-new {
+  background: var(--rh-diff-add-bg);
+  color: var(--rh-diff-add-text);
+  padding: 0 4px;
+  border-radius: 4px;
+}
+
 .rh-toast {
   position: fixed;
   left: 50%;

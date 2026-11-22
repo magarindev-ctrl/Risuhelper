@@ -61,6 +61,11 @@ const CHAR_FIELD_META = {
   virtualscript: { label: '캐릭터 스크립트 (virtualscript)', path: 'char.virtualscript', multiline: true },
 };
 
+const MAX_LLM_CONTENT_CHARS = 24000;
+const ALLOWED_CHAR_FIELDS = Object.keys(CHAR_FIELD_META);
+const ALLOWED_LORE_TEXT_FIELDS = ['comment', 'key', 'secondkey', 'content', 'insertorder'];
+const ALLOWED_PERSONA_TEXT_FIELDS = ['name', 'note', 'personaPrompt'];
+
 const SCREEN_LABELS = {
   character: '캐릭터 설정',
   lorebook: '로어북',
@@ -72,4 +77,17 @@ const SCREEN_LABELS = {
   unknown: '일반 / 수동 선택',
 };
 
-export { VERSION, PLUGIN_NAME, STORAGE_KEY, PRESET_STORAGE_KEY, ALLOWED_CONFIG_KEYS, CONFIG_KEY_TYPES, CHAR_FIELD_META, SCREEN_LABELS };
+export {
+  VERSION,
+  PLUGIN_NAME,
+  STORAGE_KEY,
+  PRESET_STORAGE_KEY,
+  MAX_LLM_CONTENT_CHARS,
+  ALLOWED_CONFIG_KEYS,
+  CONFIG_KEY_TYPES,
+  CHAR_FIELD_META,
+  ALLOWED_CHAR_FIELDS,
+  ALLOWED_LORE_TEXT_FIELDS,
+  ALLOWED_PERSONA_TEXT_FIELDS,
+  SCREEN_LABELS,
+};

@@ -98,4 +98,97 @@ test('buildConversationMessages injects targeted knowledge, snapshot, extra cont
   assert.match(msgs[0].content, /RisuAI Lua 트리거 스크립트 가이드/);
   assert.match(msgs[0].content, /function onStart\(id\) end/);
   assert.equal(msgs[3].content, '디버깅해 줘');
+
+  // Truncation warning appears when content exceeds 24,000 chars
+  const longMsgs = buildConversationMessages({
+    context: { screen: 'scripts', targetKind: 'char_lua' },
+    snapshot: { label: '긴 Lua', content: 'x'.repeat(25000), target: { targetKind: 'char_lua' } },
+    userInput: '일부만 수정해 줘',
+  });
+  assert.match(longMsgs[0].content, /원문 잘림 경고/);
+  assert.match(longMsgs[0].content, /replace_text 및 전체 code 덮어쓰기는 차단/);
 });
+
+test('parseAssistantReply supports raw delimiter body protocol for Lua, regex, edits, and embedded markdown fences', () => {
+  const luaReply = [
+    'Lua 트리거를 작성했습니다.',
+    '```risuhelper-proposal',
+    '{"action":"update_lua","title":"Lua 상태창","scope":"character"}',
+    '<<<CODE>>>',
+    'function onOutput(id)',
+    '  local s = "quotes \\" and \\\\ pattern %[HP:(%d+)%]"',
+    '  log(s)',
+    'end',
+    '<<<END>>>',
+    '```',
+  ].join('\n');
+
+  const parsedLua = parseAssistantReply(luaReply);
+  assert.equal(parsedLua.errors.length, 0);
+  assert.equal(parsedLua.proposals.length, 1);
+  assert.match(parsedLua.proposals[0].code, /local s = "quotes \\" and \\\\ pattern %\[HP:\(%d\+\)%\]"/);
+
+  const patchReply = [
+    '```risuhelper-proposal',
+    '{"action":"patch_text","title":"다중 부분 수정"}',
+    '<<<BEFORE>>>',
+    '  old("line 1")',
+    '<<<AFTER>>>',
+    '  new("line 1")',
+    '<<<BEFORE>>>',
+    'old_2 = "\\n"',
+    '<<<AFTER>>>',
+    'new_2 = "\\t"',
+    '<<<END>>>',
+    '```',
+  ].join('\n');
+
+  const parsedPatch = parseAssistantReply(patchReply);
+  assert.equal(parsedPatch.errors.length, 0);
+  assert.equal(parsedPatch.proposals[0].edits.length, 2);
+  assert.equal(parsedPatch.proposals[0].edits[0].before, '  old("line 1")');
+  assert.equal(parsedPatch.proposals[0].edits[1].after, 'new_2 = "\\t"');
+
+  const regexReply = [
+    '```risuhelper-proposal',
+    '{"action":"upsert_regex","title":"HP 표시","scope":"character","comment":"HP","type":"editdisplay","flag":"g","ableFlag":true}',
+    '<<<IN>>>',
+    '\\[HP:(\\d+)/(\\d+)\\]',
+    '<<<OUT>>>',
+    '<div class="hp">$1 / $2</div>',
+    '<<<END>>>',
+    '```',
+  ].join('\n');
+
+  const parsedRegex = parseAssistantReply(regexReply);
+  assert.equal(parsedRegex.errors.length, 0);
+  assert.equal(parsedRegex.proposals[0].in, '\\[HP:(\\d+)/(\\d+)\\]');
+  assert.equal(parsedRegex.proposals[0].out, '<div class="hp">$1 / $2</div>');
+
+  // Embedded ``` markdown code block inside <<<CONTENT>>> terminated by <<<END>>>
+  const mdReply = [
+    '안내 문구',
+    '```risuhelper-proposal',
+    '{"action":"replace_text","title":"마크다운 포함 본문"}',
+    '<<<CONTENT>>>',
+    '설명 시작',
+    '```html',
+    '<div class="box">OK</div>',
+    '```',
+    '설명 끝',
+    '<<<END>>>',
+    '```',
+  ].join('\n');
+
+  const parsedMd = parseAssistantReply(mdReply);
+  assert.equal(parsedMd.errors.length, 0);
+  assert.equal(parsedMd.proposals[0].content, '설명 시작\n```html\n<div class="box">OK</div>\n```\n설명 끝');
+  assert.equal(parsedMd.prose, '안내 문구');
+
+  // Validation rejects prompt-injected fieldKey in target
+  assert.match(
+    validateProposal({ action: 'replace_text', target: { targetKind: 'char_field', fieldKey: 'chats' }, content: 'x' }),
+    /허용되지 않는 캐릭터 필드/
+  );
+});
+

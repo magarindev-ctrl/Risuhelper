@@ -52,7 +52,21 @@ function transformModule(relPath) {
   const exportAssignments = [];
 
   for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
+    let line = lines[i];
+
+    // Accumulate multiline top-level named import/export lists
+    if (/^(?:import|export)\s+\{/.test(line) && !line.includes('}')) {
+      let combined = line;
+      while (i + 1 < lines.length && !combined.includes('}')) {
+        i++;
+        combined += ' ' + lines[i].trim();
+      }
+      if (combined.startsWith('import') && !/\bfrom\s+['"]/.test(combined) && i + 1 < lines.length) {
+        i++;
+        combined += ' ' + lines[i].trim();
+      }
+      line = combined;
+    }
 
     // Top-level named import: import { a, b as c } from './foo.js';
     const namedImport = line.match(/^import\s+\{([^}]+)\}\s+from\s+['"]([^'"]+)['"];?\s*$/);

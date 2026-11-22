@@ -219,3 +219,203 @@ test('HostAdapter validates config keys/types, Lua/regex updates, and rejects no
   assert.equal(state.character.customscript.length, 1);
   assert.equal(state.character.customscript[0].type, 'editdisplay');
 });
+
+test('Surgical Undo restores only modified fields without wiping subsequent chats or newer entries', async () => {
+  const { state, adapter } = createMockHost();
+  state.character.chaId = 'char-sera';
+  state.character.chats[0].message = [{ role: 'char', data: '안녕, 여행자.' }];
+
+  // 1. Edit char.desc, then add 2 new chat messages, then undo -> messages MUST survive
+  const descRes = await adapter.applyProposal(
+    { action: 'replace_text', content: '수정된 설명' },
+    { targetKind: 'char_field', fieldKey: 'desc' }
+  );
+  assert.equal(state.character.desc, '수정된 설명');
+  state.character.chats[0].message.push(
+    { role: 'user', data: '첫 질문' },
+    { role: 'char', data: '첫 응답' }
+  );
+  await adapter.undo(descRes.undoId);
+  assert.equal(state.character.desc, '차분한 마도사.\n별을 연구한다.');
+  assert.equal(state.character.chats[0].message.length, 3);
+
+  // 2. Edit chat.localLore, then add another chat message, then undo -> messages MUST survive
+  const chatLoreRes = await adapter.applyProposal(
+    { action: 'update_lorebook', scope: 'chat', loreIndex: 0, content: '바뀐 채팅 로어' },
+    { targetKind: 'chat_lorebook', loreScope: 'chat', loreIndex: 0 }
+  );
+  state.character.chats[0].message.push({ role: 'user', data: '로어 수정 뒤 대화' });
+  await adapter.undo(chatLoreRes.undoId);
+  assert.equal(state.character.chats[0].localLore[0].content, '초기 메모');
+  assert.equal(state.character.chats[0].message.length, 4);
+
+  // 3. Create persona + bind to chat, then add another persona & chat turn, then undo -> newer persona & chat turn survive
+  const pRes = await adapter.applyProposal(
+    { action: 'create_persona', name: '임시 페르소나', personaPrompt: '임시', bindToCurrentChat: true },
+    { targetKind: 'persona' }
+  );
+  state.db.personas.push({ name: '나중에 추가된 페르소나', personaPrompt: '유지됨', id: 'keep-me' });
+  state.character.chats[0].message.push({ role: 'char', data: '페르소나 바인딩 뒤 응답' });
+  await adapter.undo(pRes.undoId);
+  assert.equal(state.db.personas.some(p => p.id === 'keep-me'), true);
+  assert.equal(state.db.personas.some(p => p.id === pRes.personaId), false);
+  assert.equal(state.character.chats[0].bindedPersona, '');
+  assert.equal(state.character.chats[0].message.length, 5);
+});
+
+test('HostAdapter blocks apply/undo if active character changed since proposal preview', async () => {
+  const { state, adapter } = createMockHost();
+  state.character.chaId = 'char-A';
+  const target = { targetKind: 'char_field', fieldKey: 'desc' };
+  const proposal = { action: 'replace_text', content: '캐릭터 A 설명 변경' };
+
+  const preview = await adapter.previewProposal(proposal, target);
+  assert.equal(preview.ok, true);
+  assert.equal(preview.hostBinding.charId, 'char-A');
+
+  // Switch active character to B before apply
+  state.character = { ...structuredClone(state.character), chaId: 'char-B', name: '다른 캐릭터', desc: 'B 원본 설명' };
+  state.charIndex = 1;
+
+  await assert.rejects(
+    () => adapter.applyProposal(proposal, preview.target, { hostBinding: preview.hostBinding }),
+    /다른 캐릭터로 전환되어/
+  );
+  assert.equal(state.character.desc, 'B 원본 설명');
+});
+
+test('HostAdapter blocks prompt-injected fieldKey/target overrides in preview and apply', async () => {
+  const { state, adapter } = createMockHost();
+  const activeDesc = { targetKind: 'char_field', fieldKey: 'desc' };
+
+  // Injection attempt 1: fieldKey: "chats" via proposal.target
+  const injectedChats = {
+    action: 'replace_text',
+    target: { targetKind: 'char_field', fieldKey: 'chats' },
+    content: 'corrupted',
+  };
+  const prev1 = await adapter.previewProposal(injectedChats, activeDesc);
+  assert.equal(prev1.ok, false);
+  await assert.rejects(() => adapter.applyProposal(injectedChats, activeDesc), /보안상|허용되지 않는/);
+  assert.ok(Array.isArray(state.character.chats));
+
+  // Injection attempt 2: redirecting desc to firstMessage via proposal.target
+  const redirectField = {
+    action: 'replace_text',
+    target: { targetKind: 'char_field', fieldKey: 'firstMessage' },
+    content: 'hijacked greeting',
+  };
+  const prev2 = await adapter.previewProposal(redirectField, activeDesc);
+  assert.equal(prev2.ok, false);
+  assert.match(prev2.error, /보안상/);
+
+  // Defense-in-depth: invalid fieldKey directly on activeTarget
+  const badDirect = await adapter.previewProposal(
+    { action: 'replace_text', content: 'x' },
+    { targetKind: 'char_field', fieldKey: 'chats' }
+  );
+  assert.equal(badDirect.ok, false);
+  assert.match(badDirect.error, /허용되지 않는 캐릭터 필드/);
+});
+
+test('HostAdapter exposes all metadata changes in previewProposal for lorebook, persona, and regex updates', async () => {
+  const { state, adapter } = createMockHost();
+
+  const lorePreview = await adapter.previewProposal(
+    {
+      action: 'update_lorebook',
+      scope: 'character',
+      loreIndex: 0,
+      key: '왕국,제국',
+      alwaysActive: true,
+      insertorder: 250,
+      content: '북쪽의 오래된 왕국이다.',
+    },
+    { targetKind: 'char_lorebook', loreIndex: 0 }
+  );
+  assert.equal(lorePreview.ok, true);
+  assert.equal(lorePreview.metaChanges.length, 3);
+  assert.ok(lorePreview.metaChanges.some(m => m.key === 'key' && m.after === '왕국,제국'));
+  assert.ok(lorePreview.metaChanges.some(m => m.key === 'alwaysActive' && m.after === '예'));
+  assert.ok(lorePreview.metaChanges.some(m => m.key === 'insertorder' && m.after === '250'));
+
+  const personaPreview = await adapter.previewProposal(
+    { action: 'update_persona', personaIndex: 0, name: '베테랑 모험가', note: '메모 추가', personaPrompt: '길드 소속 모험가' },
+    { targetKind: 'persona', personaIndex: 0 }
+  );
+  assert.equal(personaPreview.ok, true);
+  assert.ok(personaPreview.metaChanges.some(m => m.key === 'name' && m.before === '모험가' && m.after === '베테랑 모험가'));
+  assert.ok(personaPreview.metaChanges.some(m => m.key === 'note' && m.after === '메모 추가'));
+
+  state.character.customscript.push({ comment: '기존', in: 'foo', out: 'bar', type: 'editdisplay', flag: 'g', ableFlag: false });
+  const regexPreview = await adapter.previewProposal(
+    { action: 'upsert_regex', scope: 'character', regexIndex: 0, comment: '개선', in: 'foo+', out: 'baz', type: 'editdisplay', flag: 'gi', ableFlag: true },
+    { targetKind: 'char_regex', regexIndex: 0 }
+  );
+  assert.equal(regexPreview.ok, true);
+  assert.equal(regexPreview.before, 'bar');
+  assert.equal(regexPreview.after, 'baz');
+  assert.ok(regexPreview.metaChanges.some(m => m.key === 'in' && m.before === 'foo' && m.after === 'foo+'));
+  assert.ok(regexPreview.metaChanges.some(m => m.key === 'flag' && m.after === 'gi'));
+});
+
+test('HostAdapter blocks full overwrite on >24,000-char truncated targets while allowing patch_text', async () => {
+  const { state, adapter } = createMockHost();
+  const tailMarker = 'TAIL_MUST_SURVIVE';
+  state.character.desc = 'A'.repeat(24500) + '\n' + tailMarker;
+  const target = { targetKind: 'char_field', fieldKey: 'desc' };
+
+  const replacePrev = await adapter.previewProposal({ action: 'replace_text', content: 'short' }, target);
+  assert.equal(replacePrev.ok, false);
+  assert.match(replacePrev.error, /24,000자/);
+
+  await assert.rejects(
+    () => adapter.applyProposal({ action: 'replace_text', content: 'short' }, target),
+    /24,000자/
+  );
+
+  // Partial edit still works and preserves tail
+  const patchRes = await adapter.applyProposal(
+    { action: 'patch_text', edits: [{ before: 'AAAAA\n' + tailMarker, after: 'BBBBB\n' + tailMarker }] },
+    target
+  );
+  assert.equal(patchRes.ok, true);
+  assert.ok(state.character.desc.endsWith('BBBBB\n' + tailMarker));
+});
+
+test('HostAdapter warns explicitly and requires confirmation when Lua replaces existing V1/V2 triggers', async () => {
+  const { state, adapter } = createMockHost();
+  state.character.triggerscript = [
+    { comment: 'V1 trigger 1', type: 'start', conditions: [], effect: [{ type: 'setvar', var: 'a', value: '1' }] },
+    { comment: 'V1 trigger 2', type: 'output', conditions: [], effect: [{ type: 'setvar', var: 'b', value: '2' }] },
+  ];
+  const proposal = { action: 'update_lua', scope: 'character', code: 'function onStart(id) end' };
+
+  const preview = await adapter.previewProposal(proposal, { targetKind: 'char_lua' });
+  assert.equal(preview.ok, true);
+  assert.equal(preview.requiresConfirm, true);
+  assert.match(preview.destructiveWarning, /2개의/);
+  assert.match(preview.destructiveWarning, /병합되지 않고 모두 삭제/);
+
+  await assert.rejects(
+    () => adapter.applyProposal(proposal, preview.target, {
+      hostBinding: preview.hostBinding,
+      requireDestructiveConfirm: true,
+      destructiveConfirmed: false,
+    }),
+    /삭제 확인/
+  );
+  assert.equal(state.character.triggerscript.length, 2);
+
+  const applied = await adapter.applyProposal(proposal, preview.target, {
+    hostBinding: preview.hostBinding,
+    requireDestructiveConfirm: true,
+    destructiveConfirmed: true,
+  });
+  assert.equal(extractLuaFromTriggers(state.character.triggerscript).isLua, true);
+
+  await adapter.undo(applied.undoId);
+  assert.equal(state.character.triggerscript.length, 2);
+  assert.equal(state.character.triggerscript[0].comment, 'V1 trigger 1');
+});
+

@@ -419,16 +419,20 @@ class RisuHelperApp {
       assistantMsg.content = parsed.prose || (parsed.proposals.length > 0 ? '아래 수정·생성 제안을 확인한 뒤 적용해 주세요.' : rawReply);
       assistantMsg.parseErrors = parsed.errors;
 
-      // Dry-run each proposal so Diff Preview is immediately ready
+      // Dry-run each proposal and pin the target + host binding at generation time
+      const pinnedCtx = JSON.parse(JSON.stringify(ctx));
       assistantMsg.proposals = [];
       for (const prop of parsed.proposals) {
-        const preview = await this.adapter.previewProposal(prop, ctx);
+        const preview = await this.adapter.previewProposal(prop, pinnedCtx);
         assistantMsg.proposals.push({
           proposal: prop,
           preview,
+          pinnedTarget: preview.target ? JSON.parse(JSON.stringify(preview.target)) : pinnedCtx,
+          hostBinding: preview.hostBinding ? JSON.parse(JSON.stringify(preview.hostBinding)) : null,
           applied: false,
           undoId: null,
           bindToCurrentChat: Boolean(prop.bindToCurrentChat),
+          destructiveConfirmed: false,
           statusMessage: '',
         });
       }
@@ -445,10 +449,13 @@ class RisuHelperApp {
   }
 
   async applyProposalItem(item) {
-    const ctx = this.getEffectiveContext();
+    const pinnedTarget = item.pinnedTarget || item.preview?.target;
     try {
-      const res = await this.adapter.applyProposal(item.proposal, ctx, {
+      const res = await this.adapter.applyProposal(item.proposal, pinnedTarget, {
         bindToCurrentChat: item.bindToCurrentChat,
+        hostBinding: item.hostBinding || item.preview?.hostBinding || null,
+        requireDestructiveConfirm: Boolean(item.preview?.requiresConfirm),
+        destructiveConfirmed: Boolean(item.destructiveConfirmed),
       });
       item.applied = true;
       item.undoId = res.undoId;
@@ -576,30 +583,46 @@ class RisuHelperApp {
     const actionLabel = ACTION_LABELS[proposal.action] || proposal.action;
     const bodyChildren = [];
 
+    if (preview.label) {
+      bodyChildren.push(
+        h(doc, 'div', { style: 'font-size:11.5px;color:var(--rh-muted);' }, `적용 대상(고정): ${preview.label}`)
+      );
+    }
+
     if (!preview.ok) {
       bodyChildren.push(h(doc, 'div', { class: 'rh-banner error' }, preview.error));
     } else {
-      if (preview.warning) {
+      if (preview.destructiveWarning) {
+        bodyChildren.push(h(doc, 'div', { class: 'rh-banner error' }, preview.destructiveWarning));
+      }
+      if (preview.warning && preview.warning !== preview.destructiveWarning) {
         bodyChildren.push(h(doc, 'div', { class: 'rh-banner' }, preview.warning));
       }
 
-      if (proposal.action === 'create_lorebook' || proposal.action === 'create_persona' || proposal.action === 'upsert_regex') {
-        const metaLines = [];
-        if (proposal.scope) metaLines.push(`범위: ${proposal.scope}`);
-        if (proposal.comment) metaLines.push(`이름: ${proposal.comment}`);
-        if (proposal.name) metaLines.push(`이름: ${proposal.name}`);
-        if (proposal.key) metaLines.push(`활성화 키: ${proposal.key}`);
-        if (proposal.type) metaLines.push(`타입: ${proposal.type}`);
-        if (proposal.in) metaLines.push(`IN: ${proposal.in}`);
-        if (metaLines.length > 0) {
-          bodyChildren.push(h(doc, 'div', { style: 'font-size:11.5px;color:var(--rh-muted);' }, metaLines.join(' · ')));
-        }
+      const metaChanges = Array.isArray(preview.metaChanges) ? preview.metaChanges : [];
+      if (metaChanges.length > 0) {
+        bodyChildren.push(
+          h(doc, 'div', { class: 'rh-meta-diff' },
+            ...metaChanges.map(mc =>
+              h(doc, 'div', { class: 'rh-meta-diff-row' },
+                h(doc, 'span', { class: 'rh-meta-key' }, `${mc.label}:`),
+                h(doc, 'span', { class: 'rh-meta-old' }, mc.before),
+                h(doc, 'span', {}, '→'),
+                h(doc, 'span', { class: 'rh-meta-new' }, mc.after)
+              )
+            )
+          )
+        );
       }
 
       const diff = buildDiffPreview(preview.before, preview.after, 140);
       const diffEl = h(doc, 'div', { class: 'rh-diff' });
       if (diff.lines.length === 0) {
-        diffEl.appendChild(h(doc, 'div', { class: 'rh-diff-line meta' }, '(변경 사항 없음)'));
+        diffEl.appendChild(
+          h(doc, 'div', { class: 'rh-diff-line meta' },
+            metaChanges.length > 0 ? '(본문 변경 없음 · 위 메타데이터 변경만 적용됨)' : '(변경 사항 없음)'
+          )
+        );
       } else {
         for (const line of diff.lines) {
           const prefix = line.type === 'add' ? '+ ' : line.type === 'del' ? '- ' : line.type === 'meta' ? '' : '  ';
@@ -613,7 +636,12 @@ class RisuHelperApp {
     }
 
     if (item.statusMessage) {
-      bodyChildren.push(h(doc, 'div', { style: 'font-size:11.5px;color:var(--rh-ok);font-weight:600;' }, item.statusMessage));
+      const isFailure = item.statusMessage.startsWith('적용 실패');
+      bodyChildren.push(
+        h(doc, 'div', {
+          style: `font-size:11.5px;color:${isFailure ? 'var(--rh-err-text)' : 'var(--rh-ok)'};font-weight:600;`,
+        }, item.statusMessage)
+      );
     }
 
     const leftControls = [];
@@ -626,6 +654,21 @@ class RisuHelperApp {
             onchange: (e) => { item.bindToCurrentChat = Boolean(e.target.checked); },
           }),
           '현재 채팅에 바인딩(즉시 반영)'
+        )
+      );
+    }
+    if (preview.ok && preview.requiresConfirm && !item.applied) {
+      leftControls.push(
+        h(doc, 'label', { style: 'font-size:11.5px;display:inline-flex;align-items:center;gap:4px;cursor:pointer;color:var(--rh-err-text);font-weight:600;' },
+          h(doc, 'input', {
+            type: 'checkbox',
+            checked: item.destructiveConfirmed,
+            onchange: (e) => {
+              item.destructiveConfirmed = Boolean(e.target.checked);
+              this.render();
+            },
+          }),
+          preview.confirmLabel || '파괴적 변경 내용을 확인했습니다'
         )
       );
     }
@@ -658,6 +701,7 @@ class RisuHelperApp {
       rightControls.push(
         h(doc, 'button', {
           class: 'rh-btn primary',
+          disabled: Boolean(preview.requiresConfirm && !item.destructiveConfirmed),
           onclick: () => this.applyProposalItem(item),
         }, '적용')
       );
