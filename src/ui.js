@@ -13,6 +13,7 @@ const DEFAULT_SETTINGS = {
   timeoutSeconds: 120,
   maxHistoryTurns: 12,
   showFloatingChip: true,
+  floatingChipPos: null,
   includeCharSummary: true,
   includeLoreSummary: true,
   includeConfigSummary: false,
@@ -38,7 +39,7 @@ function h(doc, tag, props = {}, ...children) {
     if (k === 'class') el.className = v;
     else if (k === 'style') el.setAttribute('style', v);
     else if (k.startsWith('on') && typeof v === 'function') el.addEventListener(k.slice(2).toLowerCase(), v);
-    else if (k === 'checked' || k === 'disabled' || k === 'value' || k === 'selected') el[k] = v;
+    else if (k === 'checked' || k === 'disabled' || k === 'value' || k === 'selected' || k === 'open') el[k] = v;
     else el.setAttribute(k, String(v));
   }
   for (const child of children.flat()) {
@@ -76,11 +77,16 @@ class RisuHelperApp {
     this.settings = { ...DEFAULT_SETTINGS };
     this.tracker = new FocusTracker(api, {
       showFloatingChip: this.settings.showFloatingChip,
+      chipPos: this.settings.floatingChipPos,
       onChange: (ctx) => {
         this.detectedContext = ctx;
       },
       onChipClick: () => {
         this.open();
+      },
+      onChipMove: (pos) => {
+        this.settings.floatingChipPos = pos;
+        this.saveSettings();
       },
     });
 
@@ -136,6 +142,9 @@ class RisuHelperApp {
 
     // Start cursor focus tracker asynchronously (gracefully continues in manual mode if mainDom is declined)
     this.tracker.showFloatingChip = this.settings.showFloatingChip;
+    if (this.settings.floatingChipPos && Number.isFinite(this.settings.floatingChipPos.left) && Number.isFinite(this.settings.floatingChipPos.top)) {
+      this.tracker.chipPos = { left: this.settings.floatingChipPos.left, top: this.settings.floatingChipPos.top };
+    }
     this.tracker.start().catch(() => {});
 
     this.render();
@@ -229,6 +238,9 @@ class RisuHelperApp {
   async open() {
     this.isOpen = true;
     await this.syncHostTheme();
+    if (this.tracker.enabled && (!this.detectedContext || this.detectedContext.screen === 'unknown')) {
+      await this.tracker.scanNow({ allowScreenFallback: true });
+    }
     if (typeof this.api.showContainer === 'function') {
       await this.api.showContainer('fullscreen');
     }
@@ -821,19 +833,30 @@ class RisuHelperApp {
           })
         )
       ),
-      h(doc, 'div', { class: 'rh-checks' },
-        h(doc, 'label', {},
-          h(doc, 'input', {
-            type: 'checkbox',
-            checked: this.settings.showFloatingChip,
-            onchange: async (e) => {
-              this.settings.showFloatingChip = Boolean(e.target.checked);
-              await this.saveSettings();
-              await this.tracker.setChipVisible(this.settings.showFloatingChip);
-            },
-          }),
-          '화면에 현재 포커스 플로팅 칩 표시 (mainDom 필요)'
-        )
+      h(doc, 'div', { class: 'rh-row', style: 'justify-content:space-between;' },
+        h(doc, 'div', { class: 'rh-checks' },
+          h(doc, 'label', {},
+            h(doc, 'input', {
+              type: 'checkbox',
+              checked: this.settings.showFloatingChip,
+              onchange: async (e) => {
+                this.settings.showFloatingChip = Boolean(e.target.checked);
+                await this.saveSettings();
+                await this.tracker.setChipVisible(this.settings.showFloatingChip);
+              },
+            }),
+            '화면에 플로팅 버튼 표시 (드래그 이동 가능 · mainDom 필요)'
+          )
+        ),
+        this.settings.showFloatingChip && h(doc, 'button', {
+          class: 'rh-btn',
+          onclick: async () => {
+            this.settings.floatingChipPos = null;
+            await this.saveSettings();
+            await this.tracker.setChipPosition(null);
+            this.showToast('플로팅 버튼 위치를 기본값으로 초기화했습니다.');
+          },
+        }, '버튼 위치 초기화')
       )
     );
   }
@@ -841,6 +864,15 @@ class RisuHelperApp {
   render() {
     const doc = this.doc;
     const prevInput = doc.querySelector('.rh-composer-input')?.value ?? '';
+    const prevPresetScroll = doc.querySelector('.rh-preset-body')?.scrollTop ?? null;
+    const prevChatScroll = doc.querySelector('.rh-chat')?.scrollTop ?? null;
+    const prevDetailsOpen = new Map();
+    if (typeof doc.querySelectorAll === 'function') {
+      for (const el of doc.querySelectorAll('details[data-rh-details-key]')) {
+        const key = el.getAttribute('data-rh-details-key');
+        if (key) prevDetailsOpen.set(key, Boolean(el.open));
+      }
+    }
     doc.body.textContent = '';
 
     const ctx = this.getEffectiveContext();
@@ -850,34 +882,20 @@ class RisuHelperApp {
     const quickPrompts = getQuickPromptsForContext(ctx);
 
     const header = h(doc, 'header', { class: 'rh-header' },
-      h(doc, 'div', { class: 'rh-brand' },
-        h(doc, 'div', { class: 'rh-logo' }, 'RH'),
-        h(doc, 'div', { class: 'rh-title-wrap' },
-          h(doc, 'div', { class: 'rh-title' }, `RisuHelper v${VERSION}`),
-          h(doc, 'div', { class: 'rh-subtitle' }, `${flavor.name} · ${this.tracker.enabled ? '커서 자동감지 활성' : '수동 대상 모드'}`)
-        )
+      h(doc, 'div', { class: 'rh-header-top' },
+        h(doc, 'div', { class: 'rh-brand' },
+          h(doc, 'div', { class: 'rh-logo' }, 'RH'),
+          h(doc, 'div', { class: 'rh-title-wrap' },
+            h(doc, 'div', { class: 'rh-title' }, `RisuHelper v${VERSION}`),
+            h(doc, 'div', { class: 'rh-subtitle' }, `${flavor.name} · ${this.tracker.enabled ? '커서 자동감지 활성' : '수동 대상 모드'}`)
+          )
+        ),
+        h(doc, 'button', {
+          class: 'rh-btn',
+          onclick: () => this.close(),
+        }, '닫기')
       ),
       h(doc, 'div', { class: 'rh-actions' },
-        this.adapter.undoStack.length > 0 && h(doc, 'button', {
-          class: 'rh-btn',
-          onclick: async () => {
-            try {
-              const res = await this.adapter.undo();
-              await this.refreshContextSnapshot();
-              this.showToast(`되돌림: ${res.label}`);
-            } catch (err) {
-              this.showToast(err.message);
-            }
-          },
-        }, `되돌리기 (${this.adapter.undoStack.length})`),
-        h(doc, 'button', {
-          class: 'rh-btn ghost',
-          onclick: async () => {
-            this.settings.wideMode = !this.settings.wideMode;
-            await this.saveSettings();
-            this.render();
-          },
-        }, this.settings.wideMode ? '좁게' : '넓게'),
         h(doc, 'button', {
           class: `rh-btn${this.presetPanelOpen ? ' primary' : ' ghost'}`,
           onclick: async () => {
@@ -905,9 +923,25 @@ class RisuHelperApp {
           },
         }, '대화 비우기'),
         h(doc, 'button', {
+          class: 'rh-btn ghost rh-hide-mobile',
+          onclick: async () => {
+            this.settings.wideMode = !this.settings.wideMode;
+            await this.saveSettings();
+            this.render();
+          },
+        }, this.settings.wideMode ? '좁게' : '넓게'),
+        this.adapter.undoStack.length > 0 && h(doc, 'button', {
           class: 'rh-btn',
-          onclick: () => this.close(),
-        }, '닫기')
+          onclick: async () => {
+            try {
+              const res = await this.adapter.undo();
+              await this.refreshContextSnapshot();
+              this.showToast(`되돌림: ${res.label}`);
+            } catch (err) {
+              this.showToast(err.message);
+            }
+          },
+        }, `되돌리기 (${this.adapter.undoStack.length})`)
       )
     );
 
@@ -953,7 +987,7 @@ class RisuHelperApp {
           class: 'rh-btn',
           onclick: async () => {
             if (!this.tracker.enabled) await this.tracker.start();
-            await this.tracker.scanNow();
+            await this.tracker.scanNow({ allowScreenFallback: true });
             this.manualTarget = null;
             await this.refreshContextSnapshot();
             this.showToast(this.detectedContext ? `감지됨: ${this.detectedContext.labelText}` : '현재 포커스된 입력칸이 없습니다.');
@@ -1007,7 +1041,7 @@ class RisuHelperApp {
       const content = this.activeSnapshot.content;
       const lineCount = content.split('\n').length;
       contextBarChildren.push(
-        h(doc, 'details', { class: 'rh-preview-details' },
+        h(doc, 'details', { class: 'rh-preview-details', 'data-rh-details-key': 'active-source-preview' },
           h(doc, 'summary', {}, `현재 원문 보기 (${this.activeSnapshot.label} · ${content.length.toLocaleString()}자 / ${lineCount}줄)`),
           h(doc, 'pre', { class: 'rh-preview-pre' }, content.slice(0, 4000) + (content.length > 4000 ? '\n... (일부 생략)' : ''))
         )
@@ -1108,6 +1142,24 @@ class RisuHelperApp {
 
     if (this.toastText) {
       doc.body.appendChild(h(doc, 'div', { class: 'rh-toast' }, this.toastText));
+    }
+
+    // Restore collapsible details states and scroll positions so toggles/toasts never jump to top
+    if (prevDetailsOpen.size > 0 && typeof doc.querySelectorAll === 'function') {
+      for (const el of doc.querySelectorAll('details[data-rh-details-key]')) {
+        const key = el.getAttribute('data-rh-details-key');
+        if (key && prevDetailsOpen.has(key)) {
+          el.open = prevDetailsOpen.get(key);
+        }
+      }
+    }
+    if (prevPresetScroll !== null) {
+      const presetBody = doc.querySelector('.rh-preset-body');
+      if (presetBody) presetBody.scrollTop = prevPresetScroll;
+    }
+    if (prevChatScroll !== null) {
+      const nextChat = doc.querySelector('.rh-chat');
+      if (nextChat) nextChat.scrollTop = prevChatScroll;
     }
   }
 

@@ -214,12 +214,14 @@
         border-radius: 16px 16px 0 0;
         box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.4);
       }
+      .rh-hide-mobile {
+        display: none !important;
+      }
     }
 
     .rh-header {
       display: flex;
-      align-items: center;
-      justify-content: space-between;
+      flex-direction: column;
       gap: 8px;
       padding: 10px 14px;
       background: var(--rh-bg);
@@ -227,11 +229,20 @@
       flex-shrink: 0;
     }
 
+    .rh-header-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      min-width: 0;
+    }
+
     .rh-brand {
       display: flex;
       align-items: center;
       gap: 8px;
       min-width: 0;
+      flex: 1;
     }
 
     .rh-logo {
@@ -274,7 +285,15 @@
       display: flex;
       align-items: center;
       gap: 6px;
-      flex-shrink: 0;
+      flex-wrap: wrap;
+    }
+
+    .rh-preset-body {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      max-height: 320px;
+      overflow-y: auto;
     }
 
     .rh-btn {
@@ -286,6 +305,7 @@
       padding: 5px 10px;
       font-size: 12px;
       font-weight: 600;
+      white-space: nowrap;
       cursor: pointer;
       display: inline-flex;
       align-items: center;
@@ -753,7 +773,9 @@
     const { SCREEN_LABELS, CHAR_FIELD_META } = __require("src/version.js");
 
     const FOCUS_SELECTOR = 'textarea:focus, input:focus, [contenteditable="true"]:focus, [contenteditable=""]:focus';
+    const CHAT_INPUT_SELECTOR = 'textarea.text-input-area, textarea#messageInputTranslate, .text-input-area, .chat-input textarea';
     const CHIP_ATTR = 'x-risuhelper-chip';
+    const DRAG_THRESHOLD_PX = 6;
 
     /**
      * Safely parses attributes from the opening HTML tag string returned by SafeElement.getOuterHTML().
@@ -798,6 +820,16 @@
       return keywords.some(kw => norm === kw || norm.startsWith(kw + ' ') || norm.includes(kw));
     }
 
+    function isChatElementAttrs(attrs) {
+      const cls = String(attrs?.class || '');
+      const id = String(attrs?.id || '');
+      return (
+        cls.includes('text-input-area') ||
+        cls.includes('chat-input') ||
+        id === 'messageInputTranslate'
+      );
+    }
+
     /**
      * Pure classification logic: takes DOM snapshot signals gathered from SafeElement traversal
      * and resolves a structured FocusContext suitable for RisuHelper's host adapter & LLM.
@@ -822,6 +854,23 @@
       const headingText = headings.join(' | ');
       const activeTabText = activeTabs.join(' | ');
       const warnings = [];
+
+      // 0. Explicit chat input textarea (DefaultChatScreen.svelte: textarea.text-input-area / #messageInputTranslate)
+      // Checked first so random <h2> tags inside chat messages/sidebars never misclassify the chat composer.
+      if (isChatInput) {
+        return {
+          detectedAt: Date.now(),
+          screen: 'chat',
+          targetKind: 'general',
+          fieldKey: null,
+          loreIndex: null,
+          loreScope: null,
+          labelText: '채팅 입력 화면',
+          placeholder,
+          liveTextPreview,
+          warnings,
+        };
+      }
 
       // 1. Persona settings screen
       const isPersonaScreen =
@@ -1032,22 +1081,6 @@
         }
       }
 
-      // 10. Chat screen fallback
-      if (isChatInput) {
-        return {
-          detectedAt: Date.now(),
-          screen: 'chat',
-          targetKind: 'general',
-          fieldKey: null,
-          loreIndex: null,
-          loreScope: null,
-          labelText: '채팅 입력 화면',
-          placeholder,
-          liveTextPreview,
-          warnings,
-        };
-      }
-
       return {
         detectedAt: Date.now(),
         screen: 'unknown',
@@ -1101,7 +1134,8 @@
         let luaButtonActive = false;
         let hasRegexContainer = false;
         let hasTriggerContainer = false;
-        let isChatInput = false;
+        // Check the focused element itself first (DefaultChatScreen puts `text-input-area` directly on <textarea>)
+        let isChatInput = isChatElementAttrs(attrs);
 
         // Walk up ancestors (bounded to 8 hops to stay fast over iframe RPC)
         let cur = el;
@@ -1122,7 +1156,7 @@
           if (depth <= 4) {
             const children = await parent.getChildren();
             const len = children ? await children.length() : 0;
-            const limit = Math.min(len, 24);
+            const limit = Math.min(len, 64);
             let prevSpanText = '';
             for (let i = 0; i < limit; i++) {
               const child = await children.at(i);
@@ -1168,8 +1202,7 @@
             } catch {}
           }
 
-          const pClass = String(pAttrs.class || '');
-          if (pClass.includes('text-input-area') || pClass.includes('chat-input')) {
+          if (!isChatInput && isChatElementAttrs(pAttrs)) {
             isChatInput = true;
           }
           if (pOuter.includes('triggerScript') || pOuter.includes('Trigger')) {
@@ -1184,7 +1217,7 @@
         }
 
         // Also look at top-level headings in rootDoc if none found locally
-        if (headings.length === 0) {
+        if (!isChatInput && headings.length === 0) {
           try {
             const allH2 = await rootDoc.querySelectorAll('h2');
             const count = allH2 ? Math.min(await allH2.length(), 4) : 0;
@@ -1217,22 +1250,129 @@
     }
 
     /**
-     * Manages allowed Plugin v3 rootDoc listeners (pointerup, click, keyup) to cache the latest
-     * focused context BEFORE a user clicks the plugin button (which naturally blurs the input).
+     * Fallback screen detector when no editable input currently holds `:focus`
+     * (for example, opening RisuHelper directly from the chat screen or after mobile blur).
+     */
+    async function inspectVisibleScreen(rootDoc) {
+      if (!rootDoc) return null;
+      try {
+        const headings = [];
+        try {
+          const allH2 = await rootDoc.querySelectorAll('h2');
+          const count = allH2 ? Math.min(await allH2.length(), 6) : 0;
+          for (let i = 0; i < count; i++) {
+            const node = await allH2.at(i);
+            const txt = node ? String((await node.textContent()) || '').trim() : '';
+            if (txt && !headings.includes(txt)) headings.push(txt);
+          }
+        } catch {}
+
+        // Check explicit chat input presence first; if present and no settings/persona/module modal heading is active, it's the chat screen.
+        let chatInputEl = null;
+        try {
+          chatInputEl = await rootDoc.querySelector(CHAT_INPUT_SELECTOR);
+        } catch {}
+
+        const headingText = headings.join(' | ');
+        const modalHeadings = [
+          '페르소나', 'persona',
+          '모듈 수정', 'edit module', '모듈 생성', 'create module', '모듈', 'modules',
+          '채팅 봇', 'chat bot', '기타 봇', 'other bots', '소리 및 디스플레이', 'display',
+          '고급 설정', 'advanced settings', '프롬프트 템플릿', 'prompt template', '접근성', 'accessibility',
+          '로어북', 'lorebook',
+        ];
+        if (matchAny(headingText, modalHeadings)) {
+          const classified = classifyDomSignals({ headings });
+          if (classified.screen !== 'unknown') return classified;
+        }
+
+        if (chatInputEl) {
+          return {
+            detectedAt: Date.now(),
+            screen: 'chat',
+            targetKind: 'general',
+            fieldKey: null,
+            loreIndex: null,
+            loreScope: null,
+            labelText: '채팅 입력 화면',
+            placeholder: '',
+            liveTextPreview: '',
+            warnings: [],
+          };
+        }
+
+        if (headings.length > 0) {
+          const classified = classifyDomSignals({ headings });
+          if (classified.screen !== 'unknown') return classified;
+        }
+        return null;
+      } catch {
+        return null;
+      }
+    }
+
+    function buildChipStyle({ left = null, top = null, dragging = false } = {}) {
+      const posCss = (Number.isFinite(left) && Number.isFinite(top))
+        ? `left:${Math.round(left)}px;top:${Math.round(top)}px;`
+        : 'right:14px;bottom:74px;';
+      return (
+        `position:fixed;${posCss}z-index:940;padding:7px 12px;border-radius:999px;` +
+        'background:rgba(24,24,27,0.92);color:#f4f4f5;border:1px solid rgba(161,161,170,0.45);' +
+        'font-size:12px;font-weight:600;box-shadow:0 6px 20px rgba(0,0,0,0.32);' +
+        `cursor:${dragging ? 'grabbing' : 'grab'};touch-action:none;user-select:none;-webkit-user-select:none;` +
+        'max-width:240px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;backdrop-filter:blur(6px);'
+      );
+    }
+
+    function clampChipPos(left, top, chipW, chipH, viewW, viewH) {
+      const maxLeft = Math.max(8, Math.round(viewW - chipW - 8));
+      const maxTop = Math.max(8, Math.round(viewH - chipH - 8));
+      return {
+        left: Math.max(8, Math.min(maxLeft, Math.round(left))),
+        top: Math.max(8, Math.min(maxTop, Math.round(top))),
+      };
+    }
+
+    /**
+     * Manages allowed Plugin v3 rootDoc listeners (pointerdown/pointerup/click/keyup) to cache the latest
+     * focused context BEFORE a user clicks the plugin button, and renders a draggable floating chip.
      */
     class FocusTracker {
       constructor(api, options = {}) {
         this.api = api;
         this.onChange = options.onChange || (() => {});
         this.onChipClick = options.onChipClick || (() => {});
+        this.onChipMove = options.onChipMove || (() => {});
         this.showFloatingChip = options.showFloatingChip ?? true;
+        this.chipPos = options.chipPos && Number.isFinite(options.chipPos.left) && Number.isFinite(options.chipPos.top)
+          ? { left: options.chipPos.left, top: options.chipPos.top }
+          : null;
         this.rootDoc = null;
         this.listenerIds = [];
         this.chipEl = null;
-        this.chipClickId = null;
+        this.chipListenerIds = [];
         this.lastContext = null;
         this.enabled = false;
         this._scanPending = false;
+        this._drag = null;
+        this._movePending = false;
+        this._suppressClickUntil = 0;
+      }
+
+      async _getViewportSize() {
+        try {
+          const html = await this.rootDoc?.querySelector('html');
+          if (html && typeof html.getBoundingClientRect === 'function') {
+            const rect = await html.getBoundingClientRect();
+            if (rect && rect.width > 0 && rect.height > 0) {
+              return { width: rect.width, height: rect.height };
+            }
+          }
+        } catch {}
+        if (typeof globalThis.innerWidth === 'number' && globalThis.innerWidth > 0) {
+          return { width: globalThis.innerWidth, height: globalThis.innerHeight || 768 };
+        }
+        return { width: 1024, height: 768 };
       }
 
       async start() {
@@ -1246,10 +1386,28 @@
 
           for (const evt of ['pointerup', 'click', 'keyup']) {
             const id = await rootDoc.addEventListener(evt, () => {
+              if (this._drag?.moved || Date.now() < this._suppressClickUntil) return;
               this.scheduleScan();
             });
             if (id) this.listenerIds.push({ type: evt, id });
           }
+
+          // Drag listeners on rootDoc (Plugin v3 allows pointermove/pointerup/pointercancel with clientX/clientY)
+          const moveId = await rootDoc.addEventListener('pointermove', (e) => {
+            this._handlePointerMove(e);
+          });
+          if (moveId) this.listenerIds.push({ type: 'pointermove', id: moveId });
+
+          const upId = await rootDoc.addEventListener('pointerup', () => {
+            this._handlePointerEnd();
+          });
+          if (upId) this.listenerIds.push({ type: 'pointerup', id: upId });
+
+          const cancelId = await rootDoc.addEventListener('pointercancel', () => {
+            this._handlePointerEnd();
+          });
+          if (cancelId) this.listenerIds.push({ type: 'pointercancel', id: cancelId });
+
           if (this.showFloatingChip) {
             await this.mountFloatingChip();
           }
@@ -1266,18 +1424,153 @@
         setTimeout(async () => {
           this._scanPending = false;
           await this.scanNow();
-        }, 60);
+        }, 45);
       }
 
-      async scanNow() {
+      async scanNow({ allowScreenFallback = false } = {}) {
         if (!this.rootDoc) return this.lastContext;
-        const ctx = await inspectFocusedElement(this.rootDoc);
+        let ctx = await inspectFocusedElement(this.rootDoc);
+        if (!ctx && allowScreenFallback) {
+          ctx = await inspectVisibleScreen(this.rootDoc);
+        }
         if (ctx) {
           this.lastContext = ctx;
           this.onChange(ctx);
           await this.updateChipLabel(ctx);
         }
         return this.lastContext;
+      }
+
+      async _applyChipStyle(pos, dragging = false) {
+        if (!this.chipEl) return;
+        try {
+          await this.chipEl.setStyleAttribute(buildChipStyle({
+            left: pos?.left,
+            top: pos?.top,
+            dragging,
+          }));
+        } catch {}
+      }
+
+      async _handleChipPointerDown(e) {
+        if (!this.chipEl) return;
+        if (typeof e?.button === 'number' && e.button !== 0) return;
+        const startX = Number(e?.clientX);
+        const startY = Number(e?.clientY);
+        if (!Number.isFinite(startX) || !Number.isFinite(startY)) return;
+
+        const drag = {
+          active: true,
+          ready: false,
+          moved: false,
+          startX,
+          startY,
+          lastX: startX,
+          lastY: startY,
+          originLeft: this.chipPos?.left ?? 14,
+          originTop: this.chipPos?.top ?? 14,
+          chipW: 140,
+          chipH: 36,
+          viewW: 1024,
+          viewH: 768,
+          currentPos: null,
+        };
+        this._drag = drag;
+
+        try {
+          const [rect, view] = await Promise.all([
+            typeof this.chipEl.getBoundingClientRect === 'function' ? this.chipEl.getBoundingClientRect() : null,
+            this._getViewportSize(),
+          ]);
+          if (this._drag !== drag || !drag.active) return;
+          if (rect && Number.isFinite(rect.left) && Number.isFinite(rect.top)) {
+            drag.originLeft = rect.left;
+            drag.originTop = rect.top;
+            if (rect.width > 0) drag.chipW = rect.width;
+            if (rect.height > 0) drag.chipH = rect.height;
+          }
+          drag.viewW = view.width;
+          drag.viewH = view.height;
+          drag.ready = true;
+          if (drag.moved) {
+            this._flushDragMove();
+          }
+        } catch {
+          if (this._drag === drag) drag.ready = true;
+        }
+      }
+
+      _handlePointerMove(e) {
+        const drag = this._drag;
+        if (!drag || !drag.active) return;
+        const x = Number(e?.clientX);
+        const y = Number(e?.clientY);
+        if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+
+        drag.lastX = x;
+        drag.lastY = y;
+        const dist = Math.hypot(x - drag.startX, y - drag.startY);
+        if (!drag.moved && dist < DRAG_THRESHOLD_PX) return;
+        drag.moved = true;
+
+        if (!drag.ready || this._movePending) return;
+        this._movePending = true;
+        setTimeout(() => {
+          this._movePending = false;
+          this._flushDragMove();
+        }, 16);
+      }
+
+      _flushDragMove() {
+        const drag = this._drag;
+        if (!drag || !drag.active || !drag.ready || !drag.moved) return;
+        const nextPos = clampChipPos(
+          drag.originLeft + (drag.lastX - drag.startX),
+          drag.originTop + (drag.lastY - drag.startY),
+          drag.chipW,
+          drag.chipH,
+          drag.viewW,
+          drag.viewH
+        );
+        drag.currentPos = nextPos;
+        this._applyChipStyle(nextPos, true);
+      }
+
+      async _handlePointerEnd() {
+        const drag = this._drag;
+        if (!drag || !drag.active) return;
+        drag.active = false;
+        this._drag = null;
+
+        if (!drag.moved) return;
+
+        const finalPos = drag.currentPos || (drag.ready
+          ? clampChipPos(
+              drag.originLeft + (drag.lastX - drag.startX),
+              drag.originTop + (drag.lastY - drag.startY),
+              drag.chipW,
+              drag.chipH,
+              drag.viewW,
+              drag.viewH
+            )
+          : null);
+
+        this._suppressClickUntil = Date.now() + 350;
+        if (finalPos) {
+          this.chipPos = finalPos;
+          await this._applyChipStyle(finalPos, false);
+          this.onChipMove(finalPos);
+        }
+      }
+
+      async setChipPosition(pos) {
+        if (pos && Number.isFinite(pos.left) && Number.isFinite(pos.top)) {
+          const view = await this._getViewportSize();
+          this.chipPos = clampChipPos(pos.left, pos.top, 140, 36, view.width, view.height);
+        } else {
+          this.chipPos = null;
+        }
+        await this._applyChipStyle(this.chipPos, false);
       }
 
       async mountFloatingChip() {
@@ -1287,19 +1580,30 @@
           if (!body) return;
           const chip = await this.rootDoc.createElement('button');
           await chip.setAttribute(CHIP_ATTR, '1');
-          await chip.setStyleAttribute(
-            'position:fixed;right:14px;bottom:74px;z-index:940;padding:7px 12px;border-radius:999px;' +
-            'background:rgba(24,24,27,0.92);color:#f4f4f5;border:1px solid rgba(161,161,170,0.45);' +
-            'font-size:12px;font-weight:600;box-shadow:0 6px 20px rgba(0,0,0,0.32);cursor:pointer;' +
-            'max-width:240px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;backdrop-filter:blur(6px);'
-          );
-          await chip.setTextContent('✨ RisuHelper');
+          if (this.chipPos) {
+            const view = await this._getViewportSize();
+            this.chipPos = clampChipPos(this.chipPos.left, this.chipPos.top, 140, 36, view.width, view.height);
+          }
+          await chip.setStyleAttribute(buildChipStyle({
+            left: this.chipPos?.left,
+            top: this.chipPos?.top,
+            dragging: false,
+          }));
+          await chip.setTextContent('⋮⋮ ✨ RisuHelper');
+
+          const downId = await chip.addEventListener('pointerdown', (e) => {
+            this._handleChipPointerDown(e);
+          });
+          if (downId) this.chipListenerIds.push({ type: 'pointerdown', id: downId });
+
           const clickId = await chip.addEventListener('click', () => {
+            if (Date.now() < this._suppressClickUntil) return;
             this.onChipClick(this.lastContext);
           });
+          if (clickId) this.chipListenerIds.push({ type: 'click', id: clickId });
+
           await body.appendChild(chip);
           this.chipEl = chip;
-          this.chipClickId = clickId;
         } catch {}
       }
 
@@ -1317,25 +1621,29 @@
       async updateChipLabel(ctx) {
         if (!this.chipEl || !ctx) return;
         try {
-          const text = ctx.labelText ? `✨ ${ctx.labelText}` : '✨ RisuHelper';
-          await this.chipEl.setTextContent(text.slice(0, 34));
+          const text = ctx.labelText ? `⋮⋮ ✨ ${ctx.labelText}` : '⋮⋮ ✨ RisuHelper';
+          await this.chipEl.setTextContent(text.slice(0, 36));
         } catch {}
       }
 
       async unmountFloatingChip() {
+        this._drag = null;
         if (!this.chipEl) return;
         try {
-          if (this.chipClickId) {
-            await this.chipEl.removeEventListener('click', this.chipClickId);
+          for (const entry of this.chipListenerIds) {
+            try {
+              await this.chipEl.removeEventListener(entry.type, entry.id);
+            } catch {}
           }
           await this.chipEl.remove();
         } catch {}
         this.chipEl = null;
-        this.chipClickId = null;
+        this.chipListenerIds = [];
       }
 
       async stop() {
         this.enabled = false;
+        this._drag = null;
         await this.unmountFloatingChip();
         if (this.rootDoc) {
           for (const entry of this.listenerIds) {
@@ -1352,6 +1660,7 @@
       __exports.parseOpeningTagAttrs = parseOpeningTagAttrs;
       __exports.classifyDomSignals = classifyDomSignals;
       __exports.inspectFocusedElement = inspectFocusedElement;
+      __exports.inspectVisibleScreen = inspectVisibleScreen;
       __exports.FocusTracker = FocusTracker;
 
   },
@@ -2272,6 +2581,22 @@
             content: fieldKey ? String(cfg[fieldKey] ?? '') : JSON.stringify(cfg, null, 2),
             config: cfg,
           };
+        }
+
+        if (t.screen === 'chat') {
+          try {
+            const { char } = await this.readActiveCharacter();
+            if (char) {
+              return {
+                ok: true,
+                target: t,
+                label: `채팅 화면 (${char.name || '이름 없음'})`,
+                content: '',
+                charName: char.name || '',
+              };
+            }
+          } catch {}
+          return { ok: true, target: t, label: '채팅 입력 화면', content: '' };
         }
 
         return { ok: true, target: t, label: '일반 대화 / 질문', content: '' };
@@ -3921,6 +4246,10 @@
         ? `\n⚠️ [원문 잘림 경고] 현재 원문(${currentText.length.toLocaleString()}자)은 앞 ${MAX_LLM_CONTENT_CHARS.toLocaleString()}자만 제공되었습니다. 뒷부분 유실을 막기 위해 replace_text 및 전체 code 덮어쓰기는 차단됩니다. 반드시 patch_text 또는 edits로 보이는 구간만 부분 편집하세요.`
         : '';
 
+      const screenNote = context?.screen === 'chat'
+        ? '\n- 안내: 사용자는 현재 채팅 화면(대화 입력창)에 있습니다. 특정 편집 필드를 열지 않았더라도 아래 [현재 캐릭터 요약]/[로어북 목록 요약] 등을 바탕으로 질문에 답하거나, 새 로어북·페르소나·정규식·Lua 생성 및 설정 변경을 바로 제안할 수 있습니다.'
+        : '';
+
       const systemPrompt = `당신은 RisuAI(및 PocketRisu, RisuBard, 해적리스, RisuNest 등 포크) 안에 내장된 소통형 어시스턴트 "RisuHelper"입니다.
     사용자의 질문(설정 의미, 사용법, 디버깅, 프롬프트/로어북/Lua/정규식/페르소나 작성)에 친절하고 정확하게 한국어로 답합니다.
 
@@ -3930,7 +4259,7 @@
     - 화면: ${context?.screen || 'unknown'}
     - 대상 종류(targetKind): ${snapshot?.target?.targetKind || context?.targetKind || 'general'}
     - 필드(fieldKey): ${snapshot?.target?.fieldKey || context?.fieldKey || '없음'}
-    - 대상 설명: ${targetLabel}
+    - 대상 설명: ${targetLabel}${screenNote}
     ${snapshot?.target?.loreIndex !== null && snapshot?.target?.loreIndex !== undefined ? `- 로어북 인덱스(0-based): ${snapshot.target.loreIndex}` : ''}
     ${snapshot?.target?.personaIndex !== null && snapshot?.target?.personaIndex !== undefined ? `- 페르소나 인덱스(0-based): ${snapshot.target.personaIndex}` : ''}
     ${snapshot?.target?.moduleIndex !== null && snapshot?.target?.moduleIndex !== undefined ? `- 모듈 인덱스(0-based): ${snapshot.target.moduleIndex}` : ''}
@@ -5557,19 +5886,21 @@
       });
     }
 
-    function renderToggleNodes(doc, nodes, state, onChange) {
+    function renderToggleNodes(doc, nodes, state, onChange, keyPrefix = 'tg') {
       const out = [];
-      for (const node of nodes) {
+      for (let i = 0; i < nodes.length; i++) {
+        const node = nodes[i];
         if (node.type === 'divider') {
           out.push(h(doc, 'hr', { style: 'border:none;border-top:1px solid var(--rh-border);margin:6px 0;' }));
         } else if (node.type === 'caption') {
           out.push(h(doc, 'div', { style: 'font-size:11px;color:var(--rh-muted);' }, node.label));
         } else if (node.type === 'group') {
+          const groupKey = `${keyPrefix}:${i}:${node.label || 'group'}`;
           out.push(
-            h(doc, 'details', { class: 'rh-preview-details', open: true },
+            h(doc, 'details', { class: 'rh-preview-details', open: true, 'data-rh-details-key': groupKey },
               h(doc, 'summary', {}, node.label || '그룹'),
               h(doc, 'div', { style: 'display:flex;flex-direction:column;gap:6px;margin-top:6px;' },
-                ...renderToggleNodes(doc, node.children || [], state, onChange)
+                ...renderToggleNodes(doc, node.children || [], state, onChange, groupKey)
               )
             )
           );
@@ -5759,7 +6090,7 @@
         )
       );
 
-      const body = h(doc, 'div', { style: 'display:flex;flex-direction:column;gap:8px;max-height:320px;overflow-y:auto;' });
+      const body = h(doc, 'div', { class: 'rh-preset-body' });
 
       if (state.pane === 'blocks') {
         if (!p) {
@@ -5852,7 +6183,12 @@
           if (definitions.length === 0) {
             body.appendChild(h(doc, 'div', { style: 'font-size:12px;color:var(--rh-muted);' }, '정의된 프리셋·모듈 토글이 없습니다.'));
           } else {
-            for (const nodeEl of renderToggleNodes(doc, items, state, () => { persistAndRender(); })) {
+            const persistToggleOnly = () => {
+              app.savePresetState().catch((err) => {
+                app.showToast(`토글 저장 실패: ${err.message}`);
+              });
+            };
+            for (const nodeEl of renderToggleNodes(doc, items, state, persistToggleOnly)) {
               body.appendChild(nodeEl);
             }
           }
@@ -5886,7 +6222,7 @@
         if (Array.isArray(app.hostModuleCatalog) && app.hostModuleCatalog.length > 0) {
           const selectedIds = new Set(state.modules.map(m => m.id));
           body.appendChild(
-            h(doc, 'details', { class: 'rh-preview-details', open: true },
+            h(doc, 'details', { class: 'rh-preview-details', open: true, 'data-rh-details-key': 'host-module-catalog' },
               h(doc, 'summary', {}, `설치된 호스트 모듈 선택 (${app.hostModuleCatalog.length}개)`),
               h(doc, 'div', { style: 'display:flex;flex-direction:column;gap:4px;margin-top:6px;' },
                 ...app.hostModuleCatalog.map(mod =>
@@ -6008,6 +6344,7 @@
       timeoutSeconds: 120,
       maxHistoryTurns: 12,
       showFloatingChip: true,
+      floatingChipPos: null,
       includeCharSummary: true,
       includeLoreSummary: true,
       includeConfigSummary: false,
@@ -6033,7 +6370,7 @@
         if (k === 'class') el.className = v;
         else if (k === 'style') el.setAttribute('style', v);
         else if (k.startsWith('on') && typeof v === 'function') el.addEventListener(k.slice(2).toLowerCase(), v);
-        else if (k === 'checked' || k === 'disabled' || k === 'value' || k === 'selected') el[k] = v;
+        else if (k === 'checked' || k === 'disabled' || k === 'value' || k === 'selected' || k === 'open') el[k] = v;
         else el.setAttribute(k, String(v));
       }
       for (const child of children.flat()) {
@@ -6071,11 +6408,16 @@
         this.settings = { ...DEFAULT_SETTINGS };
         this.tracker = new FocusTracker(api, {
           showFloatingChip: this.settings.showFloatingChip,
+          chipPos: this.settings.floatingChipPos,
           onChange: (ctx) => {
             this.detectedContext = ctx;
           },
           onChipClick: () => {
             this.open();
+          },
+          onChipMove: (pos) => {
+            this.settings.floatingChipPos = pos;
+            this.saveSettings();
           },
         });
 
@@ -6131,6 +6473,9 @@
 
         // Start cursor focus tracker asynchronously (gracefully continues in manual mode if mainDom is declined)
         this.tracker.showFloatingChip = this.settings.showFloatingChip;
+        if (this.settings.floatingChipPos && Number.isFinite(this.settings.floatingChipPos.left) && Number.isFinite(this.settings.floatingChipPos.top)) {
+          this.tracker.chipPos = { left: this.settings.floatingChipPos.left, top: this.settings.floatingChipPos.top };
+        }
         this.tracker.start().catch(() => {});
 
         this.render();
@@ -6224,6 +6569,9 @@
       async open() {
         this.isOpen = true;
         await this.syncHostTheme();
+        if (this.tracker.enabled && (!this.detectedContext || this.detectedContext.screen === 'unknown')) {
+          await this.tracker.scanNow({ allowScreenFallback: true });
+        }
         if (typeof this.api.showContainer === 'function') {
           await this.api.showContainer('fullscreen');
         }
@@ -6816,19 +7164,30 @@
               })
             )
           ),
-          h(doc, 'div', { class: 'rh-checks' },
-            h(doc, 'label', {},
-              h(doc, 'input', {
-                type: 'checkbox',
-                checked: this.settings.showFloatingChip,
-                onchange: async (e) => {
-                  this.settings.showFloatingChip = Boolean(e.target.checked);
-                  await this.saveSettings();
-                  await this.tracker.setChipVisible(this.settings.showFloatingChip);
-                },
-              }),
-              '화면에 현재 포커스 플로팅 칩 표시 (mainDom 필요)'
-            )
+          h(doc, 'div', { class: 'rh-row', style: 'justify-content:space-between;' },
+            h(doc, 'div', { class: 'rh-checks' },
+              h(doc, 'label', {},
+                h(doc, 'input', {
+                  type: 'checkbox',
+                  checked: this.settings.showFloatingChip,
+                  onchange: async (e) => {
+                    this.settings.showFloatingChip = Boolean(e.target.checked);
+                    await this.saveSettings();
+                    await this.tracker.setChipVisible(this.settings.showFloatingChip);
+                  },
+                }),
+                '화면에 플로팅 버튼 표시 (드래그 이동 가능 · mainDom 필요)'
+              )
+            ),
+            this.settings.showFloatingChip && h(doc, 'button', {
+              class: 'rh-btn',
+              onclick: async () => {
+                this.settings.floatingChipPos = null;
+                await this.saveSettings();
+                await this.tracker.setChipPosition(null);
+                this.showToast('플로팅 버튼 위치를 기본값으로 초기화했습니다.');
+              },
+            }, '버튼 위치 초기화')
           )
         );
       }
@@ -6836,6 +7195,15 @@
       render() {
         const doc = this.doc;
         const prevInput = doc.querySelector('.rh-composer-input')?.value ?? '';
+        const prevPresetScroll = doc.querySelector('.rh-preset-body')?.scrollTop ?? null;
+        const prevChatScroll = doc.querySelector('.rh-chat')?.scrollTop ?? null;
+        const prevDetailsOpen = new Map();
+        if (typeof doc.querySelectorAll === 'function') {
+          for (const el of doc.querySelectorAll('details[data-rh-details-key]')) {
+            const key = el.getAttribute('data-rh-details-key');
+            if (key) prevDetailsOpen.set(key, Boolean(el.open));
+          }
+        }
         doc.body.textContent = '';
 
         const ctx = this.getEffectiveContext();
@@ -6845,34 +7213,20 @@
         const quickPrompts = getQuickPromptsForContext(ctx);
 
         const header = h(doc, 'header', { class: 'rh-header' },
-          h(doc, 'div', { class: 'rh-brand' },
-            h(doc, 'div', { class: 'rh-logo' }, 'RH'),
-            h(doc, 'div', { class: 'rh-title-wrap' },
-              h(doc, 'div', { class: 'rh-title' }, `RisuHelper v${VERSION}`),
-              h(doc, 'div', { class: 'rh-subtitle' }, `${flavor.name} · ${this.tracker.enabled ? '커서 자동감지 활성' : '수동 대상 모드'}`)
-            )
+          h(doc, 'div', { class: 'rh-header-top' },
+            h(doc, 'div', { class: 'rh-brand' },
+              h(doc, 'div', { class: 'rh-logo' }, 'RH'),
+              h(doc, 'div', { class: 'rh-title-wrap' },
+                h(doc, 'div', { class: 'rh-title' }, `RisuHelper v${VERSION}`),
+                h(doc, 'div', { class: 'rh-subtitle' }, `${flavor.name} · ${this.tracker.enabled ? '커서 자동감지 활성' : '수동 대상 모드'}`)
+              )
+            ),
+            h(doc, 'button', {
+              class: 'rh-btn',
+              onclick: () => this.close(),
+            }, '닫기')
           ),
           h(doc, 'div', { class: 'rh-actions' },
-            this.adapter.undoStack.length > 0 && h(doc, 'button', {
-              class: 'rh-btn',
-              onclick: async () => {
-                try {
-                  const res = await this.adapter.undo();
-                  await this.refreshContextSnapshot();
-                  this.showToast(`되돌림: ${res.label}`);
-                } catch (err) {
-                  this.showToast(err.message);
-                }
-              },
-            }, `되돌리기 (${this.adapter.undoStack.length})`),
-            h(doc, 'button', {
-              class: 'rh-btn ghost',
-              onclick: async () => {
-                this.settings.wideMode = !this.settings.wideMode;
-                await this.saveSettings();
-                this.render();
-              },
-            }, this.settings.wideMode ? '좁게' : '넓게'),
             h(doc, 'button', {
               class: `rh-btn${this.presetPanelOpen ? ' primary' : ' ghost'}`,
               onclick: async () => {
@@ -6900,9 +7254,25 @@
               },
             }, '대화 비우기'),
             h(doc, 'button', {
+              class: 'rh-btn ghost rh-hide-mobile',
+              onclick: async () => {
+                this.settings.wideMode = !this.settings.wideMode;
+                await this.saveSettings();
+                this.render();
+              },
+            }, this.settings.wideMode ? '좁게' : '넓게'),
+            this.adapter.undoStack.length > 0 && h(doc, 'button', {
               class: 'rh-btn',
-              onclick: () => this.close(),
-            }, '닫기')
+              onclick: async () => {
+                try {
+                  const res = await this.adapter.undo();
+                  await this.refreshContextSnapshot();
+                  this.showToast(`되돌림: ${res.label}`);
+                } catch (err) {
+                  this.showToast(err.message);
+                }
+              },
+            }, `되돌리기 (${this.adapter.undoStack.length})`)
           )
         );
 
@@ -6948,7 +7318,7 @@
               class: 'rh-btn',
               onclick: async () => {
                 if (!this.tracker.enabled) await this.tracker.start();
-                await this.tracker.scanNow();
+                await this.tracker.scanNow({ allowScreenFallback: true });
                 this.manualTarget = null;
                 await this.refreshContextSnapshot();
                 this.showToast(this.detectedContext ? `감지됨: ${this.detectedContext.labelText}` : '현재 포커스된 입력칸이 없습니다.');
@@ -7002,7 +7372,7 @@
           const content = this.activeSnapshot.content;
           const lineCount = content.split('\n').length;
           contextBarChildren.push(
-            h(doc, 'details', { class: 'rh-preview-details' },
+            h(doc, 'details', { class: 'rh-preview-details', 'data-rh-details-key': 'active-source-preview' },
               h(doc, 'summary', {}, `현재 원문 보기 (${this.activeSnapshot.label} · ${content.length.toLocaleString()}자 / ${lineCount}줄)`),
               h(doc, 'pre', { class: 'rh-preview-pre' }, content.slice(0, 4000) + (content.length > 4000 ? '\n... (일부 생략)' : ''))
             )
@@ -7103,6 +7473,24 @@
 
         if (this.toastText) {
           doc.body.appendChild(h(doc, 'div', { class: 'rh-toast' }, this.toastText));
+        }
+
+        // Restore collapsible details states and scroll positions so toggles/toasts never jump to top
+        if (prevDetailsOpen.size > 0 && typeof doc.querySelectorAll === 'function') {
+          for (const el of doc.querySelectorAll('details[data-rh-details-key]')) {
+            const key = el.getAttribute('data-rh-details-key');
+            if (key && prevDetailsOpen.has(key)) {
+              el.open = prevDetailsOpen.get(key);
+            }
+          }
+        }
+        if (prevPresetScroll !== null) {
+          const presetBody = doc.querySelector('.rh-preset-body');
+          if (presetBody) presetBody.scrollTop = prevPresetScroll;
+        }
+        if (prevChatScroll !== null) {
+          const nextChat = doc.querySelector('.rh-chat');
+          if (nextChat) nextChat.scrollTop = prevChatScroll;
         }
       }
 

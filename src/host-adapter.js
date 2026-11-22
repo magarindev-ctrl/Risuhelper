@@ -687,6 +687,22 @@ class HostAdapter {
       };
     }
 
+    if (t.screen === 'chat') {
+      try {
+        const { char } = await this.readActiveCharacter();
+        if (char) {
+          return {
+            ok: true,
+            target: t,
+            label: `채팅 화면 (${char.name || '이름 없음'})`,
+            content: '',
+            charName: char.name || '',
+          };
+        }
+      } catch {}
+      return { ok: true, target: t, label: '채팅 입력 화면', content: '' };
+    }
+
     return { ok: true, target: t, label: '일반 대화 / 질문', content: '' };
   }
 

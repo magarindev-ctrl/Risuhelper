@@ -1,7 +1,9 @@
 import { SCREEN_LABELS, CHAR_FIELD_META } from './version.js';
 
 const FOCUS_SELECTOR = 'textarea:focus, input:focus, [contenteditable="true"]:focus, [contenteditable=""]:focus';
+const CHAT_INPUT_SELECTOR = 'textarea.text-input-area, textarea#messageInputTranslate, .text-input-area, .chat-input textarea';
 const CHIP_ATTR = 'x-risuhelper-chip';
+const DRAG_THRESHOLD_PX = 6;
 
 /**
  * Safely parses attributes from the opening HTML tag string returned by SafeElement.getOuterHTML().
@@ -46,6 +48,16 @@ function matchAny(text, keywords) {
   return keywords.some(kw => norm === kw || norm.startsWith(kw + ' ') || norm.includes(kw));
 }
 
+function isChatElementAttrs(attrs) {
+  const cls = String(attrs?.class || '');
+  const id = String(attrs?.id || '');
+  return (
+    cls.includes('text-input-area') ||
+    cls.includes('chat-input') ||
+    id === 'messageInputTranslate'
+  );
+}
+
 /**
  * Pure classification logic: takes DOM snapshot signals gathered from SafeElement traversal
  * and resolves a structured FocusContext suitable for RisuHelper's host adapter & LLM.
@@ -70,6 +82,23 @@ function classifyDomSignals(signals) {
   const headingText = headings.join(' | ');
   const activeTabText = activeTabs.join(' | ');
   const warnings = [];
+
+  // 0. Explicit chat input textarea (DefaultChatScreen.svelte: textarea.text-input-area / #messageInputTranslate)
+  // Checked first so random <h2> tags inside chat messages/sidebars never misclassify the chat composer.
+  if (isChatInput) {
+    return {
+      detectedAt: Date.now(),
+      screen: 'chat',
+      targetKind: 'general',
+      fieldKey: null,
+      loreIndex: null,
+      loreScope: null,
+      labelText: '채팅 입력 화면',
+      placeholder,
+      liveTextPreview,
+      warnings,
+    };
+  }
 
   // 1. Persona settings screen
   const isPersonaScreen =
@@ -280,22 +309,6 @@ function classifyDomSignals(signals) {
     }
   }
 
-  // 10. Chat screen fallback
-  if (isChatInput) {
-    return {
-      detectedAt: Date.now(),
-      screen: 'chat',
-      targetKind: 'general',
-      fieldKey: null,
-      loreIndex: null,
-      loreScope: null,
-      labelText: '채팅 입력 화면',
-      placeholder,
-      liveTextPreview,
-      warnings,
-    };
-  }
-
   return {
     detectedAt: Date.now(),
     screen: 'unknown',
@@ -349,7 +362,8 @@ async function inspectFocusedElement(rootDoc) {
     let luaButtonActive = false;
     let hasRegexContainer = false;
     let hasTriggerContainer = false;
-    let isChatInput = false;
+    // Check the focused element itself first (DefaultChatScreen puts `text-input-area` directly on <textarea>)
+    let isChatInput = isChatElementAttrs(attrs);
 
     // Walk up ancestors (bounded to 8 hops to stay fast over iframe RPC)
     let cur = el;
@@ -370,7 +384,7 @@ async function inspectFocusedElement(rootDoc) {
       if (depth <= 4) {
         const children = await parent.getChildren();
         const len = children ? await children.length() : 0;
-        const limit = Math.min(len, 24);
+        const limit = Math.min(len, 64);
         let prevSpanText = '';
         for (let i = 0; i < limit; i++) {
           const child = await children.at(i);
@@ -416,8 +430,7 @@ async function inspectFocusedElement(rootDoc) {
         } catch {}
       }
 
-      const pClass = String(pAttrs.class || '');
-      if (pClass.includes('text-input-area') || pClass.includes('chat-input')) {
+      if (!isChatInput && isChatElementAttrs(pAttrs)) {
         isChatInput = true;
       }
       if (pOuter.includes('triggerScript') || pOuter.includes('Trigger')) {
@@ -432,7 +445,7 @@ async function inspectFocusedElement(rootDoc) {
     }
 
     // Also look at top-level headings in rootDoc if none found locally
-    if (headings.length === 0) {
+    if (!isChatInput && headings.length === 0) {
       try {
         const allH2 = await rootDoc.querySelectorAll('h2');
         const count = allH2 ? Math.min(await allH2.length(), 4) : 0;
@@ -465,22 +478,129 @@ async function inspectFocusedElement(rootDoc) {
 }
 
 /**
- * Manages allowed Plugin v3 rootDoc listeners (pointerup, click, keyup) to cache the latest
- * focused context BEFORE a user clicks the plugin button (which naturally blurs the input).
+ * Fallback screen detector when no editable input currently holds `:focus`
+ * (for example, opening RisuHelper directly from the chat screen or after mobile blur).
+ */
+async function inspectVisibleScreen(rootDoc) {
+  if (!rootDoc) return null;
+  try {
+    const headings = [];
+    try {
+      const allH2 = await rootDoc.querySelectorAll('h2');
+      const count = allH2 ? Math.min(await allH2.length(), 6) : 0;
+      for (let i = 0; i < count; i++) {
+        const node = await allH2.at(i);
+        const txt = node ? String((await node.textContent()) || '').trim() : '';
+        if (txt && !headings.includes(txt)) headings.push(txt);
+      }
+    } catch {}
+
+    // Check explicit chat input presence first; if present and no settings/persona/module modal heading is active, it's the chat screen.
+    let chatInputEl = null;
+    try {
+      chatInputEl = await rootDoc.querySelector(CHAT_INPUT_SELECTOR);
+    } catch {}
+
+    const headingText = headings.join(' | ');
+    const modalHeadings = [
+      '페르소나', 'persona',
+      '모듈 수정', 'edit module', '모듈 생성', 'create module', '모듈', 'modules',
+      '채팅 봇', 'chat bot', '기타 봇', 'other bots', '소리 및 디스플레이', 'display',
+      '고급 설정', 'advanced settings', '프롬프트 템플릿', 'prompt template', '접근성', 'accessibility',
+      '로어북', 'lorebook',
+    ];
+    if (matchAny(headingText, modalHeadings)) {
+      const classified = classifyDomSignals({ headings });
+      if (classified.screen !== 'unknown') return classified;
+    }
+
+    if (chatInputEl) {
+      return {
+        detectedAt: Date.now(),
+        screen: 'chat',
+        targetKind: 'general',
+        fieldKey: null,
+        loreIndex: null,
+        loreScope: null,
+        labelText: '채팅 입력 화면',
+        placeholder: '',
+        liveTextPreview: '',
+        warnings: [],
+      };
+    }
+
+    if (headings.length > 0) {
+      const classified = classifyDomSignals({ headings });
+      if (classified.screen !== 'unknown') return classified;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function buildChipStyle({ left = null, top = null, dragging = false } = {}) {
+  const posCss = (Number.isFinite(left) && Number.isFinite(top))
+    ? `left:${Math.round(left)}px;top:${Math.round(top)}px;`
+    : 'right:14px;bottom:74px;';
+  return (
+    `position:fixed;${posCss}z-index:940;padding:7px 12px;border-radius:999px;` +
+    'background:rgba(24,24,27,0.92);color:#f4f4f5;border:1px solid rgba(161,161,170,0.45);' +
+    'font-size:12px;font-weight:600;box-shadow:0 6px 20px rgba(0,0,0,0.32);' +
+    `cursor:${dragging ? 'grabbing' : 'grab'};touch-action:none;user-select:none;-webkit-user-select:none;` +
+    'max-width:240px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;backdrop-filter:blur(6px);'
+  );
+}
+
+function clampChipPos(left, top, chipW, chipH, viewW, viewH) {
+  const maxLeft = Math.max(8, Math.round(viewW - chipW - 8));
+  const maxTop = Math.max(8, Math.round(viewH - chipH - 8));
+  return {
+    left: Math.max(8, Math.min(maxLeft, Math.round(left))),
+    top: Math.max(8, Math.min(maxTop, Math.round(top))),
+  };
+}
+
+/**
+ * Manages allowed Plugin v3 rootDoc listeners (pointerdown/pointerup/click/keyup) to cache the latest
+ * focused context BEFORE a user clicks the plugin button, and renders a draggable floating chip.
  */
 class FocusTracker {
   constructor(api, options = {}) {
     this.api = api;
     this.onChange = options.onChange || (() => {});
     this.onChipClick = options.onChipClick || (() => {});
+    this.onChipMove = options.onChipMove || (() => {});
     this.showFloatingChip = options.showFloatingChip ?? true;
+    this.chipPos = options.chipPos && Number.isFinite(options.chipPos.left) && Number.isFinite(options.chipPos.top)
+      ? { left: options.chipPos.left, top: options.chipPos.top }
+      : null;
     this.rootDoc = null;
     this.listenerIds = [];
     this.chipEl = null;
-    this.chipClickId = null;
+    this.chipListenerIds = [];
     this.lastContext = null;
     this.enabled = false;
     this._scanPending = false;
+    this._drag = null;
+    this._movePending = false;
+    this._suppressClickUntil = 0;
+  }
+
+  async _getViewportSize() {
+    try {
+      const html = await this.rootDoc?.querySelector('html');
+      if (html && typeof html.getBoundingClientRect === 'function') {
+        const rect = await html.getBoundingClientRect();
+        if (rect && rect.width > 0 && rect.height > 0) {
+          return { width: rect.width, height: rect.height };
+        }
+      }
+    } catch {}
+    if (typeof globalThis.innerWidth === 'number' && globalThis.innerWidth > 0) {
+      return { width: globalThis.innerWidth, height: globalThis.innerHeight || 768 };
+    }
+    return { width: 1024, height: 768 };
   }
 
   async start() {
@@ -494,10 +614,28 @@ class FocusTracker {
 
       for (const evt of ['pointerup', 'click', 'keyup']) {
         const id = await rootDoc.addEventListener(evt, () => {
+          if (this._drag?.moved || Date.now() < this._suppressClickUntil) return;
           this.scheduleScan();
         });
         if (id) this.listenerIds.push({ type: evt, id });
       }
+
+      // Drag listeners on rootDoc (Plugin v3 allows pointermove/pointerup/pointercancel with clientX/clientY)
+      const moveId = await rootDoc.addEventListener('pointermove', (e) => {
+        this._handlePointerMove(e);
+      });
+      if (moveId) this.listenerIds.push({ type: 'pointermove', id: moveId });
+
+      const upId = await rootDoc.addEventListener('pointerup', () => {
+        this._handlePointerEnd();
+      });
+      if (upId) this.listenerIds.push({ type: 'pointerup', id: upId });
+
+      const cancelId = await rootDoc.addEventListener('pointercancel', () => {
+        this._handlePointerEnd();
+      });
+      if (cancelId) this.listenerIds.push({ type: 'pointercancel', id: cancelId });
+
       if (this.showFloatingChip) {
         await this.mountFloatingChip();
       }
@@ -514,18 +652,153 @@ class FocusTracker {
     setTimeout(async () => {
       this._scanPending = false;
       await this.scanNow();
-    }, 60);
+    }, 45);
   }
 
-  async scanNow() {
+  async scanNow({ allowScreenFallback = false } = {}) {
     if (!this.rootDoc) return this.lastContext;
-    const ctx = await inspectFocusedElement(this.rootDoc);
+    let ctx = await inspectFocusedElement(this.rootDoc);
+    if (!ctx && allowScreenFallback) {
+      ctx = await inspectVisibleScreen(this.rootDoc);
+    }
     if (ctx) {
       this.lastContext = ctx;
       this.onChange(ctx);
       await this.updateChipLabel(ctx);
     }
     return this.lastContext;
+  }
+
+  async _applyChipStyle(pos, dragging = false) {
+    if (!this.chipEl) return;
+    try {
+      await this.chipEl.setStyleAttribute(buildChipStyle({
+        left: pos?.left,
+        top: pos?.top,
+        dragging,
+      }));
+    } catch {}
+  }
+
+  async _handleChipPointerDown(e) {
+    if (!this.chipEl) return;
+    if (typeof e?.button === 'number' && e.button !== 0) return;
+    const startX = Number(e?.clientX);
+    const startY = Number(e?.clientY);
+    if (!Number.isFinite(startX) || !Number.isFinite(startY)) return;
+
+    const drag = {
+      active: true,
+      ready: false,
+      moved: false,
+      startX,
+      startY,
+      lastX: startX,
+      lastY: startY,
+      originLeft: this.chipPos?.left ?? 14,
+      originTop: this.chipPos?.top ?? 14,
+      chipW: 140,
+      chipH: 36,
+      viewW: 1024,
+      viewH: 768,
+      currentPos: null,
+    };
+    this._drag = drag;
+
+    try {
+      const [rect, view] = await Promise.all([
+        typeof this.chipEl.getBoundingClientRect === 'function' ? this.chipEl.getBoundingClientRect() : null,
+        this._getViewportSize(),
+      ]);
+      if (this._drag !== drag || !drag.active) return;
+      if (rect && Number.isFinite(rect.left) && Number.isFinite(rect.top)) {
+        drag.originLeft = rect.left;
+        drag.originTop = rect.top;
+        if (rect.width > 0) drag.chipW = rect.width;
+        if (rect.height > 0) drag.chipH = rect.height;
+      }
+      drag.viewW = view.width;
+      drag.viewH = view.height;
+      drag.ready = true;
+      if (drag.moved) {
+        this._flushDragMove();
+      }
+    } catch {
+      if (this._drag === drag) drag.ready = true;
+    }
+  }
+
+  _handlePointerMove(e) {
+    const drag = this._drag;
+    if (!drag || !drag.active) return;
+    const x = Number(e?.clientX);
+    const y = Number(e?.clientY);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+
+    drag.lastX = x;
+    drag.lastY = y;
+    const dist = Math.hypot(x - drag.startX, y - drag.startY);
+    if (!drag.moved && dist < DRAG_THRESHOLD_PX) return;
+    drag.moved = true;
+
+    if (!drag.ready || this._movePending) return;
+    this._movePending = true;
+    setTimeout(() => {
+      this._movePending = false;
+      this._flushDragMove();
+    }, 16);
+  }
+
+  _flushDragMove() {
+    const drag = this._drag;
+    if (!drag || !drag.active || !drag.ready || !drag.moved) return;
+    const nextPos = clampChipPos(
+      drag.originLeft + (drag.lastX - drag.startX),
+      drag.originTop + (drag.lastY - drag.startY),
+      drag.chipW,
+      drag.chipH,
+      drag.viewW,
+      drag.viewH
+    );
+    drag.currentPos = nextPos;
+    this._applyChipStyle(nextPos, true);
+  }
+
+  async _handlePointerEnd() {
+    const drag = this._drag;
+    if (!drag || !drag.active) return;
+    drag.active = false;
+    this._drag = null;
+
+    if (!drag.moved) return;
+
+    const finalPos = drag.currentPos || (drag.ready
+      ? clampChipPos(
+          drag.originLeft + (drag.lastX - drag.startX),
+          drag.originTop + (drag.lastY - drag.startY),
+          drag.chipW,
+          drag.chipH,
+          drag.viewW,
+          drag.viewH
+        )
+      : null);
+
+    this._suppressClickUntil = Date.now() + 350;
+    if (finalPos) {
+      this.chipPos = finalPos;
+      await this._applyChipStyle(finalPos, false);
+      this.onChipMove(finalPos);
+    }
+  }
+
+  async setChipPosition(pos) {
+    if (pos && Number.isFinite(pos.left) && Number.isFinite(pos.top)) {
+      const view = await this._getViewportSize();
+      this.chipPos = clampChipPos(pos.left, pos.top, 140, 36, view.width, view.height);
+    } else {
+      this.chipPos = null;
+    }
+    await this._applyChipStyle(this.chipPos, false);
   }
 
   async mountFloatingChip() {
@@ -535,19 +808,30 @@ class FocusTracker {
       if (!body) return;
       const chip = await this.rootDoc.createElement('button');
       await chip.setAttribute(CHIP_ATTR, '1');
-      await chip.setStyleAttribute(
-        'position:fixed;right:14px;bottom:74px;z-index:940;padding:7px 12px;border-radius:999px;' +
-        'background:rgba(24,24,27,0.92);color:#f4f4f5;border:1px solid rgba(161,161,170,0.45);' +
-        'font-size:12px;font-weight:600;box-shadow:0 6px 20px rgba(0,0,0,0.32);cursor:pointer;' +
-        'max-width:240px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;backdrop-filter:blur(6px);'
-      );
-      await chip.setTextContent('✨ RisuHelper');
+      if (this.chipPos) {
+        const view = await this._getViewportSize();
+        this.chipPos = clampChipPos(this.chipPos.left, this.chipPos.top, 140, 36, view.width, view.height);
+      }
+      await chip.setStyleAttribute(buildChipStyle({
+        left: this.chipPos?.left,
+        top: this.chipPos?.top,
+        dragging: false,
+      }));
+      await chip.setTextContent('⋮⋮ ✨ RisuHelper');
+
+      const downId = await chip.addEventListener('pointerdown', (e) => {
+        this._handleChipPointerDown(e);
+      });
+      if (downId) this.chipListenerIds.push({ type: 'pointerdown', id: downId });
+
       const clickId = await chip.addEventListener('click', () => {
+        if (Date.now() < this._suppressClickUntil) return;
         this.onChipClick(this.lastContext);
       });
+      if (clickId) this.chipListenerIds.push({ type: 'click', id: clickId });
+
       await body.appendChild(chip);
       this.chipEl = chip;
-      this.chipClickId = clickId;
     } catch {}
   }
 
@@ -565,25 +849,29 @@ class FocusTracker {
   async updateChipLabel(ctx) {
     if (!this.chipEl || !ctx) return;
     try {
-      const text = ctx.labelText ? `✨ ${ctx.labelText}` : '✨ RisuHelper';
-      await this.chipEl.setTextContent(text.slice(0, 34));
+      const text = ctx.labelText ? `⋮⋮ ✨ ${ctx.labelText}` : '⋮⋮ ✨ RisuHelper';
+      await this.chipEl.setTextContent(text.slice(0, 36));
     } catch {}
   }
 
   async unmountFloatingChip() {
+    this._drag = null;
     if (!this.chipEl) return;
     try {
-      if (this.chipClickId) {
-        await this.chipEl.removeEventListener('click', this.chipClickId);
+      for (const entry of this.chipListenerIds) {
+        try {
+          await this.chipEl.removeEventListener(entry.type, entry.id);
+        } catch {}
       }
       await this.chipEl.remove();
     } catch {}
     this.chipEl = null;
-    this.chipClickId = null;
+    this.chipListenerIds = [];
   }
 
   async stop() {
     this.enabled = false;
+    this._drag = null;
     await this.unmountFloatingChip();
     if (this.rootDoc) {
       for (const entry of this.listenerIds) {
@@ -597,4 +885,10 @@ class FocusTracker {
   }
 }
 
-export { parseOpeningTagAttrs, classifyDomSignals, inspectFocusedElement, FocusTracker };
+export {
+  parseOpeningTagAttrs,
+  classifyDomSignals,
+  inspectFocusedElement,
+  inspectVisibleScreen,
+  FocusTracker,
+};

@@ -103,12 +103,14 @@ html, body {
     border-radius: 16px 16px 0 0;
     box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.4);
   }
+  .rh-hide-mobile {
+    display: none !important;
+  }
 }
 
 .rh-header {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
+  flex-direction: column;
   gap: 8px;
   padding: 10px 14px;
   background: var(--rh-bg);
@@ -116,11 +118,20 @@ html, body {
   flex-shrink: 0;
 }
 
+.rh-header-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
 .rh-brand {
   display: flex;
   align-items: center;
   gap: 8px;
   min-width: 0;
+  flex: 1;
 }
 
 .rh-logo {
@@ -163,7 +174,15 @@ html, body {
   display: flex;
   align-items: center;
   gap: 6px;
-  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+
+.rh-preset-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 320px;
+  overflow-y: auto;
 }
 
 .rh-btn {
@@ -175,6 +194,7 @@ html, body {
   padding: 5px 10px;
   font-size: 12px;
   font-weight: 600;
+  white-space: nowrap;
   cursor: pointer;
   display: inline-flex;
   align-items: center;

@@ -305,3 +305,118 @@ test('dist/risuhelper.js applies a proposal to its pinned target even if user sw
   assert.equal(state.character.firstMessage, '원본 첫 메시지');
 });
 
+test('dist/risuhelper.js preserves preset panel scrollTop on toggle click and renders Clear Chat inside wrapping header actions', async () => {
+  const code = fs.readFileSync(BUNDLE_PATH, 'utf8');
+  const doc = createMockDocument();
+  const registeredButtons = [];
+  const storage = new Map();
+
+  // Seed preset with toggles so toggles pane renders checkboxes
+  storage.set('risuhelper_preset_v1', JSON.stringify({
+    schemaVersion: 1,
+    mode: 'preset',
+    pane: 'toggles',
+    preset: {
+      name: '토글 테스트 프리셋',
+      customPromptTemplateToggle: 't1=첫번째 토글=switch\nt2=두번째 토글=switch',
+      promptTemplate: [{ type: 'chat', rangeStart: 0, rangeEnd: 'end' }],
+    },
+    modules: [],
+    moduleOptions: {},
+    values: { toggle_t1: '0', toggle_t2: '0' },
+    selectedBlock: 0,
+    environment: { userName: '사용자', persona: '', authorNote: '', memory: '', globals: {} },
+    excluded: { regex: false, modules: false, overlay: false },
+  }));
+
+  const mockRisuai = {
+    pluginStorage: {
+      async getItem(k) { return storage.get(k) ?? null; },
+      async setItem(k, v) { storage.set(k, v); },
+    },
+    async getColorScheme() { return { scheme: { type: 'dark' } }; },
+    async registerButton(meta, cb) { registeredButtons.push({ meta, cb }); return { id: meta.id }; },
+    async registerSetting() { return { id: 's1' }; },
+    async unregisterUIPart() {},
+    async onUnload() {},
+    async showContainer() {},
+    async hideContainer() {},
+    async getCharacter() { return { name: '테스트봇', desc: '', globalLore: [], customscript: [], triggerscript: [], chats: [{}] }; },
+    async getCurrentCharacterIndex() { return 0; },
+    async getCurrentChatIndex() { return 0; },
+    async getRootDocument() { return null; },
+  };
+
+  const sandbox = {
+    risuai: mockRisuai,
+    document: doc,
+    console,
+    setTimeout,
+    clearTimeout,
+    TextEncoder,
+    TextDecoder,
+    Uint8Array,
+    Int32Array,
+    DataView,
+    URL,
+    Blob,
+    atob,
+    crypto,
+    DecompressionStream,
+    structuredClone,
+  };
+  sandbox.globalThis = sandbox;
+  vm.runInNewContext(code, sandbox, { filename: 'dist/risuhelper.js' });
+  await new Promise(r => setTimeout(r, 30));
+
+  registeredButtons[0].cb();
+  await new Promise(r => setTimeout(r, 20));
+
+  const findAll = (pred) => {
+    const out = [];
+    const walk = (node) => {
+      if (pred(node)) out.push(node);
+      for (const c of node.children || []) walk(c);
+    };
+    walk(doc.body);
+    return out;
+  };
+
+  // Verify responsive header has .rh-header-top with Close and .rh-actions with Clear Chat
+  const headerTop = doc.querySelector('.rh-header-top');
+  assert.ok(headerTop, 'header should have dedicated .rh-header-top row');
+  const actionsBar = doc.querySelector('.rh-actions');
+  assert.ok(actionsBar, 'header should have wrapping .rh-actions toolbar');
+  assert.ok(findAll(n => n.tagName === 'BUTTON' && n.textContent === '대화 비우기').length === 1);
+  assert.ok(findAll(n => n.tagName === 'BUTTON' && n.textContent === '닫기').length === 1);
+
+  // Open preset panel -> toggles pane
+  const presetBtn = findAll(n => n.tagName === 'BUTTON' && n.textContent.startsWith('프리셋'))[0];
+  presetBtn.click();
+  await new Promise(r => setTimeout(r, 20));
+
+  const presetBody = doc.querySelector('.rh-preset-body');
+  assert.ok(presetBody, 'preset panel body should have .rh-preset-body class');
+  presetBody.scrollTop = 240;
+
+  // Toggle checkbox inside preset panel -> must save WITHOUT resetting scrollTop!
+  const toggleCheckboxes = findAll(n => n.tagName === 'INPUT' && n.attributes.type === 'checkbox');
+  assert.ok(toggleCheckboxes.length >= 2);
+  toggleCheckboxes[0].checked = true;
+  for (const fn of toggleCheckboxes[0].listeners.get('change') || []) {
+    await fn({ target: toggleCheckboxes[0] });
+  }
+  await new Promise(r => setTimeout(r, 20));
+
+  assert.equal(doc.querySelector('.rh-preset-body').scrollTop, 240);
+  const saved = JSON.parse(storage.get('risuhelper_preset_v1'));
+  assert.equal(saved.values.toggle_t1, '1');
+
+  // Even a full re-render (e.g. clicking '넓게') preserves .rh-preset-body.scrollTop
+  const wideBtn = findAll(n => n.tagName === 'BUTTON' && (n.textContent === '넓게' || n.textContent === '좁게'))[0];
+  wideBtn.click();
+  await new Promise(r => setTimeout(r, 20));
+  assert.equal(doc.querySelector('.rh-preset-body').scrollTop, 240);
+});
+
+

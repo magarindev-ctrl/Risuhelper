@@ -140,18 +140,27 @@ test('inspectFocusedElement tracks curOuter across ancestor depth so preceding l
   assert.equal(form._children.length, 3);
 });
 
-test('FocusTracker starts, mounts floating chip, scans on events, and cleans up on stop', async () => {
+test('FocusTracker starts, mounts draggable floating chip, scans on events, and cleans up on stop', async () => {
   const listeners = new Map();
+  let nextId = 1;
   let removedChip = false;
   let chipText = '';
+  let chipStyle = '';
   let chipClicked = 0;
+  let movedPos = null;
 
+  const chipListeners = new Map();
   const chipNode = {
     attrs: {},
     async setAttribute(k, v) { this.attrs[k] = v; },
-    async setStyleAttribute() {},
+    async setStyleAttribute(s) { chipStyle = s; },
     async setTextContent(t) { chipText = t; },
-    async addEventListener(evt, fn) { this._click = fn; return 'chip-click-1'; },
+    async getBoundingClientRect() { return { left: 860, top: 650, width: 140, height: 36 }; },
+    async addEventListener(evt, fn) {
+      const id = `chip-${evt}-${nextId++}`;
+      chipListeners.set(evt, fn);
+      return id;
+    },
     async removeEventListener() {},
     async remove() { removedChip = true; },
   };
@@ -165,13 +174,14 @@ test('FocusTracker starts, mounts floating chip, scans on events, and cleans up 
   const rootDoc = {
     async querySelector(sel) {
       if (sel === 'body') return { async appendChild() {} };
+      if (sel === 'html') return { async getBoundingClientRect() { return { width: 1024, height: 768 }; } };
       if (sel.includes(':focus')) return focusedEl;
       return null;
     },
     async querySelectorAll() { return { async length() { return 0; }, async at() { return null; } }; },
     async createElement() { return chipNode; },
     async addEventListener(type, fn) {
-      const id = `${type}-id`;
+      const id = `${type}-${nextId++}`;
       listeners.set(id, { type, fn });
       return id;
     },
@@ -187,19 +197,92 @@ test('FocusTracker starts, mounts floating chip, scans on events, and cleans up 
       showFloatingChip: true,
       onChange: (ctx) => { detected = ctx; },
       onChipClick: () => { chipClicked++; },
+      onChipMove: (pos) => { movedPos = pos; },
     }
   );
 
   assert.equal(await tracker.start(), true);
-  assert.equal(listeners.size, 3);
+  assert.ok(listeners.size >= 6);
   await tracker.scanNow();
   assert.equal(detected.fieldKey, 'firstMessage');
   assert.ok(chipText.includes('첫 메시지'));
 
-  chipNode._click();
+  // Plain click opens drawer
+  chipListeners.get('click')();
   assert.equal(chipClicked, 1);
+
+  // Dragging moves chip, clamps within viewport, persists position, and suppresses trailing click
+  chipListeners.get('pointerdown')({ clientX: 900, clientY: 660, button: 0 });
+  await new Promise(r => setTimeout(r, 10));
+  for (const entry of listeners.values()) {
+    if (entry.type === 'pointermove') entry.fn({ clientX: 200, clientY: 160 });
+  }
+  await new Promise(r => setTimeout(r, 30));
+  for (const entry of listeners.values()) {
+    if (entry.type === 'pointerup') entry.fn({ clientX: 200, clientY: 160 });
+  }
+  await new Promise(r => setTimeout(r, 10));
+
+  assert.ok(movedPos, 'onChipMove should fire with final dragged position');
+  assert.equal(movedPos.left, 160);
+  assert.equal(movedPos.top, 150);
+  assert.match(chipStyle, /left:160px;top:150px;/);
+
+  // Trailing click right after drag MUST NOT open drawer
+  chipListeners.get('click')();
+  assert.equal(chipClicked, 1);
+
+  // Reset position returns to default bottom-right anchoring
+  await tracker.setChipPosition(null);
+  assert.match(chipStyle, /right:14px;bottom:74px;/);
 
   await tracker.stop();
   assert.equal(removedChip, true);
   assert.equal(listeners.size, 0);
 });
+
+test('inspectFocusedElement detects DefaultChatScreen textarea.text-input-area even with page <h2> tags, and inspectVisibleScreen detects chat without focus', async () => {
+  const { inspectVisibleScreen } = await import('../src/focus-detector.js');
+
+  const chatTextarea = createSafeNode({
+    tag: 'textarea',
+    outerHtml: '<textarea class="peer text-input-area focus:border-textcolor input-text"></textarea>',
+  });
+  createSafeNode({ tag: 'div', outerHtml: '<div class="flex mt-2"></div>', children: [chatTextarea] });
+
+  const randomChatH2 = createSafeNode({ tag: 'h2', outerHtml: '<h2>페르소나 상태창</h2>', text: '페르소나 상태창' });
+  const rootDocFocused = {
+    async querySelector(sel) {
+      if (sel.includes(':focus')) return chatTextarea;
+      if (sel.includes('text-input-area')) return chatTextarea;
+      return null;
+    },
+    async querySelectorAll(sel) {
+      if (sel === 'h2') return { async length() { return 1; }, async at() { return randomChatH2; } };
+      return { async length() { return 0; }, async at() { return null; } };
+    },
+  };
+
+  const focusedCtx = await inspectFocusedElement(rootDocFocused);
+  assert.ok(focusedCtx);
+  assert.equal(focusedCtx.screen, 'chat');
+  assert.equal(focusedCtx.labelText, '채팅 입력 화면');
+
+  // When nothing is focused (e.g. FAB tapped directly on chat screen), inspectVisibleScreen detects chat
+  const rootDocNoFocus = {
+    async querySelector(sel) {
+      if (sel.includes(':focus')) return null;
+      if (sel.includes('text-input-area')) return chatTextarea;
+      return null;
+    },
+    async querySelectorAll() {
+      return { async length() { return 0; }, async at() { return null; } };
+    },
+  };
+
+  assert.equal(await inspectFocusedElement(rootDocNoFocus), null);
+  const screenCtx = await inspectVisibleScreen(rootDocNoFocus);
+  assert.ok(screenCtx);
+  assert.equal(screenCtx.screen, 'chat');
+});
+

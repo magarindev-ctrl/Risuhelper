@@ -446,6 +446,10 @@ function buildConversationMessages({ context, snapshot, extraContext, history, u
     ? `\n⚠️ [원문 잘림 경고] 현재 원문(${currentText.length.toLocaleString()}자)은 앞 ${MAX_LLM_CONTENT_CHARS.toLocaleString()}자만 제공되었습니다. 뒷부분 유실을 막기 위해 replace_text 및 전체 code 덮어쓰기는 차단됩니다. 반드시 patch_text 또는 edits로 보이는 구간만 부분 편집하세요.`
     : '';
 
+  const screenNote = context?.screen === 'chat'
+    ? '\n- 안내: 사용자는 현재 채팅 화면(대화 입력창)에 있습니다. 특정 편집 필드를 열지 않았더라도 아래 [현재 캐릭터 요약]/[로어북 목록 요약] 등을 바탕으로 질문에 답하거나, 새 로어북·페르소나·정규식·Lua 생성 및 설정 변경을 바로 제안할 수 있습니다.'
+    : '';
+
   const systemPrompt = `당신은 RisuAI(및 PocketRisu, RisuBard, 해적리스, RisuNest 등 포크) 안에 내장된 소통형 어시스턴트 "RisuHelper"입니다.
 사용자의 질문(설정 의미, 사용법, 디버깅, 프롬프트/로어북/Lua/정규식/페르소나 작성)에 친절하고 정확하게 한국어로 답합니다.
 
@@ -455,7 +459,7 @@ ${knowledge}
 - 화면: ${context?.screen || 'unknown'}
 - 대상 종류(targetKind): ${snapshot?.target?.targetKind || context?.targetKind || 'general'}
 - 필드(fieldKey): ${snapshot?.target?.fieldKey || context?.fieldKey || '없음'}
-- 대상 설명: ${targetLabel}
+- 대상 설명: ${targetLabel}${screenNote}
 ${snapshot?.target?.loreIndex !== null && snapshot?.target?.loreIndex !== undefined ? `- 로어북 인덱스(0-based): ${snapshot.target.loreIndex}` : ''}
 ${snapshot?.target?.personaIndex !== null && snapshot?.target?.personaIndex !== undefined ? `- 페르소나 인덱스(0-based): ${snapshot.target.personaIndex}` : ''}
 ${snapshot?.target?.moduleIndex !== null && snapshot?.target?.moduleIndex !== undefined ? `- 모듈 인덱스(0-based): ${snapshot.target.moduleIndex}` : ''}

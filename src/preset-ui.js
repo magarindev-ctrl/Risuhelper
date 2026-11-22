@@ -49,19 +49,21 @@ function pickLocalFile(doc, accept) {
   });
 }
 
-function renderToggleNodes(doc, nodes, state, onChange) {
+function renderToggleNodes(doc, nodes, state, onChange, keyPrefix = 'tg') {
   const out = [];
-  for (const node of nodes) {
+  for (let i = 0; i < nodes.length; i++) {
+    const node = nodes[i];
     if (node.type === 'divider') {
       out.push(h(doc, 'hr', { style: 'border:none;border-top:1px solid var(--rh-border);margin:6px 0;' }));
     } else if (node.type === 'caption') {
       out.push(h(doc, 'div', { style: 'font-size:11px;color:var(--rh-muted);' }, node.label));
     } else if (node.type === 'group') {
+      const groupKey = `${keyPrefix}:${i}:${node.label || 'group'}`;
       out.push(
-        h(doc, 'details', { class: 'rh-preview-details', open: true },
+        h(doc, 'details', { class: 'rh-preview-details', open: true, 'data-rh-details-key': groupKey },
           h(doc, 'summary', {}, node.label || '그룹'),
           h(doc, 'div', { style: 'display:flex;flex-direction:column;gap:6px;margin-top:6px;' },
-            ...renderToggleNodes(doc, node.children || [], state, onChange)
+            ...renderToggleNodes(doc, node.children || [], state, onChange, groupKey)
           )
         )
       );
@@ -251,7 +253,7 @@ function renderPresetPanel(app) {
     )
   );
 
-  const body = h(doc, 'div', { style: 'display:flex;flex-direction:column;gap:8px;max-height:320px;overflow-y:auto;' });
+  const body = h(doc, 'div', { class: 'rh-preset-body' });
 
   if (state.pane === 'blocks') {
     if (!p) {
@@ -344,7 +346,12 @@ function renderPresetPanel(app) {
       if (definitions.length === 0) {
         body.appendChild(h(doc, 'div', { style: 'font-size:12px;color:var(--rh-muted);' }, '정의된 프리셋·모듈 토글이 없습니다.'));
       } else {
-        for (const nodeEl of renderToggleNodes(doc, items, state, () => { persistAndRender(); })) {
+        const persistToggleOnly = () => {
+          app.savePresetState().catch((err) => {
+            app.showToast(`토글 저장 실패: ${err.message}`);
+          });
+        };
+        for (const nodeEl of renderToggleNodes(doc, items, state, persistToggleOnly)) {
           body.appendChild(nodeEl);
         }
       }
@@ -378,7 +385,7 @@ function renderPresetPanel(app) {
     if (Array.isArray(app.hostModuleCatalog) && app.hostModuleCatalog.length > 0) {
       const selectedIds = new Set(state.modules.map(m => m.id));
       body.appendChild(
-        h(doc, 'details', { class: 'rh-preview-details', open: true },
+        h(doc, 'details', { class: 'rh-preview-details', open: true, 'data-rh-details-key': 'host-module-catalog' },
           h(doc, 'summary', {}, `설치된 호스트 모듈 선택 (${app.hostModuleCatalog.length}개)`),
           h(doc, 'div', { style: 'display:flex;flex-direction:column;gap:4px;margin-top:6px;' },
             ...app.hostModuleCatalog.map(mod =>
