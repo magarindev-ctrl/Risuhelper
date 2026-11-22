@@ -1,0 +1,20 @@
+{
+  "name": "risuhelper",
+  "version": "0.2.0",
+  "description": "RisuAI Plugin API v3 context-aware assistant for editing descriptions, lorebooks, Lua triggers, regex scripts, personas, config, and prompt presets.",
+  "type": "module",
+  "license": "GPL-3.0-only",
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/magarindev-ctrl/Risuhelper.git"
+  },
+  "homepage": "https://github.com/magarindev-ctrl/Risuhelper#readme",
+  "scripts": {
+    "build": "node tools/build.mjs",
+    "test": "node --test tests/*.test.mjs",
+    "check": "npm run build && npm test"
+  }
+}
