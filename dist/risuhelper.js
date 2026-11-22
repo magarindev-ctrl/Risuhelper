@@ -1505,15 +1505,59 @@
       }
     }
 
-    function buildChipStyle({ left = null, top = null, dragging = false } = {}) {
-      const posCss = (Number.isFinite(left) && Number.isFinite(top))
-        ? `left:${Math.round(left)}px;top:${Math.round(top)}px;`
-        : 'right:14px;bottom:74px;';
+    const CHIP_ANCHORS = {
+      tl: 'left:14px;top:64px;',
+      tr: 'right:14px;top:64px;',
+      bl: 'left:14px;bottom:74px;',
+      br: 'right:14px;bottom:74px;',
+      ml: 'left:14px;top:50%;transform:translateY(-50%);',
+      mr: 'right:14px;top:50%;transform:translateY(-50%);',
+    };
+
+    function normalizeChipPos(pos) {
+      if (!pos || typeof pos !== 'object') return null;
+      if (typeof pos.anchor === 'string' && Object.hasOwn(CHIP_ANCHORS, pos.anchor)) {
+        return { anchor: pos.anchor };
+      }
+      if (Number.isFinite(pos.left) && Number.isFinite(pos.top)) {
+        return { left: Math.round(pos.left), top: Math.round(pos.top) };
+      }
+      return null;
+    }
+
+    function estimateChipOrigin(pos, chipW, chipH, viewW, viewH) {
+      const norm = normalizeChipPos(pos);
+      if (norm && Number.isFinite(norm.left) && Number.isFinite(norm.top)) {
+        return { left: norm.left, top: norm.top };
+      }
+      const anchor = norm?.anchor || 'br';
+      switch (anchor) {
+        case 'tl': return { left: 14, top: 64 };
+        case 'tr': return { left: Math.max(8, viewW - chipW - 14), top: 64 };
+        case 'bl': return { left: 14, top: Math.max(8, viewH - chipH - 74) };
+        case 'ml': return { left: 14, top: Math.max(8, Math.round((viewH - chipH) / 2)) };
+        case 'mr': return { left: Math.max(8, viewW - chipW - 14), top: Math.max(8, Math.round((viewH - chipH) / 2)) };
+        case 'br':
+        default:
+          return { left: Math.max(8, viewW - chipW - 14), top: Math.max(8, viewH - chipH - 74) };
+      }
+    }
+
+    function buildChipStyle({ pos = null, left = null, top = null, dragging = false } = {}) {
+      const norm = pos
+        ? normalizeChipPos(pos)
+        : (Number.isFinite(left) && Number.isFinite(top) ? { left, top } : null);
+      let posCss = CHIP_ANCHORS.br;
+      if (norm?.anchor) {
+        posCss = CHIP_ANCHORS[norm.anchor];
+      } else if (norm && Number.isFinite(norm.left) && Number.isFinite(norm.top)) {
+        posCss = `left:${Math.round(norm.left)}px;top:${Math.round(norm.top)}px;`;
+      }
       return (
-        `position:fixed;${posCss}z-index:940;padding:7px 12px;border-radius:999px;` +
+        `position:fixed;${posCss}z-index:950;padding:7px 12px;border-radius:999px;` +
         'background:rgba(24,24,27,0.92);color:#f4f4f5;border:1px solid rgba(161,161,170,0.45);' +
         'font-size:12px;font-weight:600;box-shadow:0 6px 20px rgba(0,0,0,0.32);' +
-        `cursor:${dragging ? 'grabbing' : 'grab'};touch-action:none;user-select:none;-webkit-user-select:none;` +
+        `cursor:${dragging ? 'grabbing' : 'grab'};touch-action:none;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none;` +
         'max-width:240px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;backdrop-filter:blur(6px);'
       );
     }
@@ -1528,7 +1572,7 @@
     }
 
     /**
-     * Manages allowed Plugin v3 rootDoc listeners (pointerdown/pointerup/click/keyup) to cache the latest
+     * Manages allowed Plugin v3 rootDoc listeners (pointer/mouse/click/keyup) to cache the latest
      * focused context BEFORE a user clicks the plugin button, and renders a draggable floating chip.
      */
     class FocusTracker {
@@ -1538,9 +1582,7 @@
         this.onChipClick = options.onChipClick || (() => {});
         this.onChipMove = options.onChipMove || (() => {});
         this.showFloatingChip = options.showFloatingChip ?? true;
-        this.chipPos = options.chipPos && Number.isFinite(options.chipPos.left) && Number.isFinite(options.chipPos.top)
-          ? { left: options.chipPos.left, top: options.chipPos.top }
-          : null;
+        this.chipPos = normalizeChipPos(options.chipPos);
         this.rootDoc = null;
         this.listenerIds = [];
         this.chipEl = null;
@@ -1551,22 +1593,69 @@
         this._drag = null;
         this._movePending = false;
         this._suppressClickUntil = 0;
+        this._cachedViewport = null;
+        this._cachedChipRect = null;
       }
 
       async _getViewportSize() {
+        // 1. In RisuAI/PocketRisu, SafeDocument wraps document.documentElement (<html>) directly,
+        //    so calling getBoundingClientRect() on rootDoc itself returns the true host viewport rect.
+        try {
+          if (this.rootDoc && typeof this.rootDoc.getBoundingClientRect === 'function') {
+            const rect = await this.rootDoc.getBoundingClientRect();
+            if (rect && rect.width > 0 && rect.height > 0) {
+              this._cachedViewport = { width: rect.width, height: rect.height };
+              return this._cachedViewport;
+            }
+          }
+        } catch {}
+        // 2. Fallback: body rect (fixed 100dvh viewport in PocketRisu/RisuAI)
+        try {
+          const body = await this.rootDoc?.querySelector('body');
+          if (body && typeof body.getBoundingClientRect === 'function') {
+            const rect = await body.getBoundingClientRect();
+            if (rect && rect.width > 0 && rect.height > 0) {
+              this._cachedViewport = { width: rect.width, height: rect.height };
+              return this._cachedViewport;
+            }
+          }
+        } catch {}
+        // 3. Fallback: querySelector('html') (unit test mocks)
         try {
           const html = await this.rootDoc?.querySelector('html');
           if (html && typeof html.getBoundingClientRect === 'function') {
             const rect = await html.getBoundingClientRect();
             if (rect && rect.width > 0 && rect.height > 0) {
-              return { width: rect.width, height: rect.height };
+              this._cachedViewport = { width: rect.width, height: rect.height };
+              return this._cachedViewport;
             }
           }
         } catch {}
         if (typeof globalThis.innerWidth === 'number' && globalThis.innerWidth > 0) {
-          return { width: globalThis.innerWidth, height: globalThis.innerHeight || 768 };
+          this._cachedViewport = { width: globalThis.innerWidth, height: globalThis.innerHeight || 768 };
+          return this._cachedViewport;
         }
-        return { width: 1024, height: 768 };
+        return this._cachedViewport || { width: 1024, height: 768 };
+      }
+
+      async _refreshChipMetrics() {
+        if (!this.chipEl) return;
+        try {
+          const [rect, view] = await Promise.all([
+            typeof this.chipEl.getBoundingClientRect === 'function' ? this.chipEl.getBoundingClientRect() : null,
+            this._getViewportSize(),
+          ]);
+          if (rect) {
+            const left = rect.left ?? rect.x;
+            const top = rect.top ?? rect.y;
+            if (Number.isFinite(left) && Number.isFinite(top) && rect.width > 0 && rect.height > 0) {
+              this._cachedChipRect = { left, top, width: rect.width, height: rect.height };
+            }
+          }
+          if (view && view.width > 0 && view.height > 0) {
+            this._cachedViewport = view;
+          }
+        } catch {}
       }
 
       async start() {
@@ -1586,21 +1675,20 @@
             if (id) this.listenerIds.push({ type: evt, id });
           }
 
-          // Drag listeners on rootDoc (Plugin v3 allows pointermove/pointerup/pointercancel with clientX/clientY)
-          const moveId = await rootDoc.addEventListener('pointermove', (e) => {
-            this._handlePointerMove(e);
-          });
-          if (moveId) this.listenerIds.push({ type: 'pointermove', id: moveId });
+          // Drag listeners on rootDoc (both pointer* and mouse* are allowed in Plugin v3 with clientX/clientY)
+          for (const moveEvt of ['pointermove', 'mousemove']) {
+            const id = await rootDoc.addEventListener(moveEvt, (e) => {
+              this._handlePointerMove(e);
+            });
+            if (id) this.listenerIds.push({ type: moveEvt, id });
+          }
 
-          const upId = await rootDoc.addEventListener('pointerup', () => {
-            this._handlePointerEnd();
-          });
-          if (upId) this.listenerIds.push({ type: 'pointerup', id: upId });
-
-          const cancelId = await rootDoc.addEventListener('pointercancel', () => {
-            this._handlePointerEnd();
-          });
-          if (cancelId) this.listenerIds.push({ type: 'pointercancel', id: cancelId });
+          for (const endEvt of ['pointerup', 'pointercancel', 'mouseup']) {
+            const id = await rootDoc.addEventListener(endEvt, () => {
+              this._handlePointerEnd();
+            });
+            if (id) this.listenerIds.push({ type: endEvt, id });
+          }
 
           if (this.showFloatingChip) {
             await this.mountFloatingChip();
@@ -1639,8 +1727,7 @@
         if (!this.chipEl) return;
         try {
           await this.chipEl.setStyleAttribute(buildChipStyle({
-            left: pos?.left,
-            top: pos?.top,
+            pos,
             dragging,
           }));
         } catch {}
@@ -1648,50 +1735,65 @@
 
       async _handleChipPointerDown(e) {
         if (!this.chipEl) return;
-        if (typeof e?.button === 'number' && e.button !== 0) return;
+        if (this._drag?.active) return; // Dedupe paired pointerdown + mousedown
+        if (e?.button === 1 || e?.button === 2) return;
         const startX = Number(e?.clientX);
         const startY = Number(e?.clientY);
         if (!Number.isFinite(startX) || !Number.isFinite(startY)) return;
 
+        const view = this._cachedViewport || { width: 1024, height: 768 };
+        const cachedRect = this._cachedChipRect;
+        const chipW = cachedRect?.width > 0 ? cachedRect.width : 140;
+        const chipH = cachedRect?.height > 0 ? cachedRect.height : 36;
+        const origin = (cachedRect && Number.isFinite(cachedRect.left) && Number.isFinite(cachedRect.top))
+          ? { left: cachedRect.left, top: cachedRect.top }
+          : estimateChipOrigin(this.chipPos, chipW, chipH, view.width, view.height);
+
         const drag = {
           active: true,
-          ready: false,
+          ready: true, // Ready synchronously so quick drags never drop over async iframe RPC
           moved: false,
           startX,
           startY,
           lastX: startX,
           lastY: startY,
-          originLeft: this.chipPos?.left ?? 14,
-          originTop: this.chipPos?.top ?? 14,
-          chipW: 140,
-          chipH: 36,
-          viewW: 1024,
-          viewH: 768,
+          originLeft: origin.left,
+          originTop: origin.top,
+          chipW,
+          chipH,
+          viewW: view.width,
+          viewH: view.height,
           currentPos: null,
         };
         this._drag = drag;
 
         try {
-          const [rect, view] = await Promise.all([
+          const [rect, liveView] = await Promise.all([
             typeof this.chipEl.getBoundingClientRect === 'function' ? this.chipEl.getBoundingClientRect() : null,
             this._getViewportSize(),
           ]);
-          if (this._drag !== drag || !drag.active) return;
-          if (rect && Number.isFinite(rect.left) && Number.isFinite(rect.top)) {
-            drag.originLeft = rect.left;
-            drag.originTop = rect.top;
-            if (rect.width > 0) drag.chipW = rect.width;
-            if (rect.height > 0) drag.chipH = rect.height;
+          if (rect) {
+            const left = rect.left ?? rect.x;
+            const top = rect.top ?? rect.y;
+            if (Number.isFinite(left) && Number.isFinite(top) && rect.width > 0 && rect.height > 0) {
+              this._cachedChipRect = { left, top, width: rect.width, height: rect.height };
+              if (this._drag === drag && drag.active && !drag.moved) {
+                drag.originLeft = left;
+                drag.originTop = top;
+                drag.chipW = rect.width;
+                drag.chipH = rect.height;
+              }
+            }
           }
-          drag.viewW = view.width;
-          drag.viewH = view.height;
-          drag.ready = true;
-          if (drag.moved) {
-            this._flushDragMove();
+          if (liveView && liveView.width > 0 && liveView.height > 0) {
+            this._cachedViewport = liveView;
+            if (this._drag === drag && drag.active) {
+              drag.viewW = liveView.width;
+              drag.viewH = liveView.height;
+              if (drag.moved) this._flushDragMove();
+            }
           }
-        } catch {
-          if (this._drag === drag) drag.ready = true;
-        }
+        } catch {}
       }
 
       _handlePointerMove(e) {
@@ -1738,33 +1840,43 @@
 
         if (!drag.moved) return;
 
-        const finalPos = drag.currentPos || (drag.ready
-          ? clampChipPos(
-              drag.originLeft + (drag.lastX - drag.startX),
-              drag.originTop + (drag.lastY - drag.startY),
-              drag.chipW,
-              drag.chipH,
-              drag.viewW,
-              drag.viewH
-            )
-          : null);
+        const finalPos = clampChipPos(
+          drag.originLeft + (drag.lastX - drag.startX),
+          drag.originTop + (drag.lastY - drag.startY),
+          drag.chipW,
+          drag.chipH,
+          drag.viewW,
+          drag.viewH
+        );
 
-        this._suppressClickUntil = Date.now() + 350;
-        if (finalPos) {
-          this.chipPos = finalPos;
-          await this._applyChipStyle(finalPos, false);
-          this.onChipMove(finalPos);
-        }
+        this._suppressClickUntil = Date.now() + 450;
+        this.chipPos = finalPos;
+        this._cachedChipRect = {
+          left: finalPos.left,
+          top: finalPos.top,
+          width: drag.chipW,
+          height: drag.chipH,
+        };
+        await this._applyChipStyle(finalPos, false);
+        this.onChipMove(finalPos);
       }
 
       async setChipPosition(pos) {
-        if (pos && Number.isFinite(pos.left) && Number.isFinite(pos.top)) {
+        const norm = normalizeChipPos(pos);
+        if (norm?.anchor) {
+          this.chipPos = norm;
+          this._cachedChipRect = null;
+        } else if (norm && Number.isFinite(norm.left) && Number.isFinite(norm.top)) {
           const view = await this._getViewportSize();
-          this.chipPos = clampChipPos(pos.left, pos.top, 140, 36, view.width, view.height);
+          const chipW = this._cachedChipRect?.width || 140;
+          const chipH = this._cachedChipRect?.height || 36;
+          this.chipPos = clampChipPos(norm.left, norm.top, chipW, chipH, view.width, view.height);
         } else {
           this.chipPos = null;
+          this._cachedChipRect = null;
         }
         await this._applyChipStyle(this.chipPos, false);
+        await this._refreshChipMetrics();
       }
 
       async mountFloatingChip() {
@@ -1774,21 +1886,22 @@
           if (!body) return;
           const chip = await this.rootDoc.createElement('button');
           await chip.setAttribute(CHIP_ATTR, '1');
-          if (this.chipPos) {
+          if (this.chipPos && Number.isFinite(this.chipPos.left) && Number.isFinite(this.chipPos.top)) {
             const view = await this._getViewportSize();
             this.chipPos = clampChipPos(this.chipPos.left, this.chipPos.top, 140, 36, view.width, view.height);
           }
           await chip.setStyleAttribute(buildChipStyle({
-            left: this.chipPos?.left,
-            top: this.chipPos?.top,
+            pos: this.chipPos,
             dragging: false,
           }));
           await chip.setTextContent('⋮⋮ ✨ RisuHelper');
 
-          const downId = await chip.addEventListener('pointerdown', (e) => {
-            this._handleChipPointerDown(e);
-          });
-          if (downId) this.chipListenerIds.push({ type: 'pointerdown', id: downId });
+          for (const downEvt of ['pointerdown', 'mousedown']) {
+            const downId = await chip.addEventListener(downEvt, (e) => {
+              this._handleChipPointerDown(e);
+            });
+            if (downId) this.chipListenerIds.push({ type: downEvt, id: downId });
+          }
 
           const clickId = await chip.addEventListener('click', () => {
             if (Date.now() < this._suppressClickUntil) return;
@@ -1798,6 +1911,7 @@
 
           await body.appendChild(chip);
           this.chipEl = chip;
+          await this._refreshChipMetrics();
         } catch {}
       }
 
@@ -1817,11 +1931,13 @@
         try {
           const text = ctx.labelText ? `⋮⋮ ✨ ${ctx.labelText}` : '⋮⋮ ✨ RisuHelper';
           await this.chipEl.setTextContent(text.slice(0, 36));
+          await this._refreshChipMetrics();
         } catch {}
       }
 
       async unmountFloatingChip() {
         this._drag = null;
+        this._cachedChipRect = null;
         if (!this.chipEl) return;
         try {
           for (const entry of this.chipListenerIds) {
@@ -1838,6 +1954,7 @@
       async stop() {
         this.enabled = false;
         this._drag = null;
+        this._cachedChipRect = null;
         await this.unmountFloatingChip();
         if (this.rootDoc) {
           for (const entry of this.listenerIds) {
@@ -1855,6 +1972,7 @@
       __exports.classifyDomSignals = classifyDomSignals;
       __exports.inspectFocusedElement = inspectFocusedElement;
       __exports.inspectVisibleScreen = inspectVisibleScreen;
+      __exports.normalizeChipPos = normalizeChipPos;
       __exports.FocusTracker = FocusTracker;
 
   },
@@ -6574,7 +6692,7 @@
   "src/ui.js"(__require, __exports) {
     const { VERSION, STORAGE_KEY, PRESET_STORAGE_KEY, CHAR_FIELD_META, SCREEN_LABELS } = __require("src/version.js");
     const { STYLES } = __require("src/style.js");
-    const { FocusTracker } = __require("src/focus-detector.js");
+    const { FocusTracker, normalizeChipPos } = __require("src/focus-detector.js");
     const { HostAdapter } = __require("src/host-adapter.js");
     const { callRisuModel, parseAssistantReply, buildConversationMessages } = __require("src/llm.js");
     const { buildDiffPreview } = __require("src/text-edits.js");
@@ -6716,9 +6834,7 @@
 
         // Start cursor focus tracker asynchronously (gracefully continues in manual mode if mainDom is declined)
         this.tracker.showFloatingChip = this.settings.showFloatingChip;
-        if (this.settings.floatingChipPos && Number.isFinite(this.settings.floatingChipPos.left) && Number.isFinite(this.settings.floatingChipPos.top)) {
-          this.tracker.chipPos = { left: this.settings.floatingChipPos.left, top: this.settings.floatingChipPos.top };
-        }
+        this.tracker.chipPos = normalizeChipPos(this.settings.floatingChipPos);
         this.tracker.start().catch(() => {});
 
         this.render();
@@ -7428,20 +7544,39 @@
                     this.settings.showFloatingChip = Boolean(e.target.checked);
                     await this.saveSettings();
                     await this.tracker.setChipVisible(this.settings.showFloatingChip);
+                    this.render();
                   },
                 }),
                 '화면에 플로팅 버튼 표시 (드래그 이동 가능 · mainDom 필요)'
               )
-            ),
-            this.settings.showFloatingChip && h(doc, 'button', {
-              class: 'rh-btn',
-              onclick: async () => {
-                this.settings.floatingChipPos = null;
-                await this.saveSettings();
-                await this.tracker.setChipPosition(null);
-                this.showToast('플로팅 버튼 위치를 기본값으로 초기화했습니다.');
-              },
-            }, '버튼 위치 초기화')
+            )
+          ),
+          this.settings.showFloatingChip && h(doc, 'div', { class: 'rh-field' },
+            h(doc, 'span', {}, '플로팅 버튼 빠른 위치 이동 (다른 플러그인과 겹칠 때 · 직접 드래그도 가능)'),
+            h(doc, 'div', { class: 'rh-row', style: 'flex-wrap:wrap;gap:6px;' },
+              ...[
+                { label: '↖ 좌상', pos: { anchor: 'tl' } },
+                { label: '↗ 우상', pos: { anchor: 'tr' } },
+                { label: '← 좌중앙', pos: { anchor: 'ml' } },
+                { label: '→ 우중앙', pos: { anchor: 'mr' } },
+                { label: '↙ 좌하', pos: { anchor: 'bl' } },
+                { label: '↘ 우하 (기본)', pos: null },
+              ].map(preset => {
+                const cur = this.settings.floatingChipPos;
+                const isActive = preset.pos === null
+                  ? (!cur || cur.anchor === 'br')
+                  : (cur?.anchor === preset.pos.anchor);
+                return h(doc, 'button', {
+                  class: `rh-btn${isActive ? ' primary' : ''}`,
+                  onclick: async () => {
+                    this.settings.floatingChipPos = preset.pos;
+                    await this.saveSettings();
+                    await this.tracker.setChipPosition(preset.pos);
+                    this.showToast(`플로팅 버튼을 ${preset.label} 위치로 옮겼습니다.`);
+                  },
+                }, preset.label);
+              })
+            )
           )
         );
       }

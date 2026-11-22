@@ -592,4 +592,102 @@ test('PocketRisu CharConfig Advanced tab (<h2>고급 설정</h2>) and LoreBookDa
   assert.equal(loreCtx.loreIndex, 2);
 });
 
+test('FocusTracker reads real SafeDocument viewport rect, supports quick drags, mouse fallback, and anchor presets', async () => {
+  const listeners = new Map();
+  const chipListeners = new Map();
+  let nextId = 1;
+  let chipStyle = '';
+  let movedPos = null;
+  let delayedRectResolve = null;
+
+  const chipNode = {
+    async setAttribute() {},
+    async setStyleAttribute(s) { chipStyle = s; },
+    async setTextContent() {},
+    async getBoundingClientRect() {
+      if (delayedRectResolve) {
+        return await new Promise(resolve => { delayedRectResolve = resolve; });
+      }
+      return { left: 1740, top: 970, width: 160, height: 36 };
+    },
+    async addEventListener(evt, fn) {
+      const id = `chip-${evt}-${nextId++}`;
+      chipListeners.set(evt, fn);
+      return id;
+    },
+    async removeEventListener() {},
+    async remove() {},
+  };
+
+  // Real SafeDocument wraps <html> directly: rootDoc.querySelector('html') returns null,
+  // while rootDoc.getBoundingClientRect() returns the real host 1920x1080 viewport!
+  const rootDoc = {
+    async getBoundingClientRect() { return { width: 1920, height: 1080, top: 0, left: 0 }; },
+    async querySelector(sel) {
+      if (sel === 'body') return { async appendChild() {} };
+      return null; // querySelector('html') is null on real SafeDocument!
+    },
+    async querySelectorAll() { return { async length() { return 0; }, async at() { return null; } }; },
+    async createElement() { return chipNode; },
+    async addEventListener(type, fn) {
+      const id = `${type}-${nextId++}`;
+      listeners.set(id, { type, fn });
+      return id;
+    },
+    async removeEventListener(_type, id) { listeners.delete(id); },
+  };
+
+  const tracker = new FocusTracker(
+    { async getRootDocument() { return rootDoc; } },
+    {
+      showFloatingChip: true,
+      onChipMove: (pos) => { movedPos = pos; },
+    }
+  );
+  assert.equal(await tracker.start(), true);
+
+  // 1. Quick drag BEFORE async getBoundingClientRect resolves must STILL move & save within 1920x1080
+  delayedRectResolve = () => {};
+  chipListeners.get('pointerdown')({ clientX: 1760, clientY: 980, button: 0 });
+  // Paired mousedown immediately after pointerdown must be deduplicated cleanly
+  chipListeners.get('mousedown')({ clientX: 1760, clientY: 980, button: 0 });
+  for (const entry of listeners.values()) {
+    if (entry.type === 'pointermove') entry.fn({ clientX: 1620, clientY: 900 });
+  }
+  for (const entry of listeners.values()) {
+    if (entry.type === 'pointerup') entry.fn({ clientX: 1620, clientY: 900 });
+  }
+  await new Promise(r => setTimeout(r, 10));
+  if (typeof delayedRectResolve === 'function') delayedRectResolve({ left: 1600, top: 890, width: 160, height: 36 });
+  delayedRectResolve = null;
+
+  assert.ok(movedPos, 'quick drag must commit even before async rect resolves');
+  assert.equal(movedPos.left, 1600);
+  assert.equal(movedPos.top, 890);
+  assert.match(chipStyle, /left:1600px;top:890px;/);
+
+  // 2. Anchor preset positioning (for moving out from under overlapping plugins)
+  await tracker.setChipPosition({ anchor: 'tl' });
+  assert.match(chipStyle, /left:14px;top:64px;/);
+  await tracker.setChipPosition({ anchor: 'ml' });
+  assert.match(chipStyle, /left:14px;top:50%;transform:translateY\(-50%\);/);
+
+  // 3. Mouse-only drag fallback (mousedown -> mousemove -> mouseup)
+  movedPos = null;
+  chipListeners.get('mousedown')({ clientX: 50, clientY: 540, button: 0 });
+  for (const entry of listeners.values()) {
+    if (entry.type === 'mousemove') entry.fn({ clientX: 350, clientY: 240 });
+  }
+  for (const entry of listeners.values()) {
+    if (entry.type === 'mouseup') entry.fn({ clientX: 350, clientY: 240 });
+  }
+  await new Promise(r => setTimeout(r, 10));
+  assert.ok(movedPos, 'mouse fallback drag must commit');
+  assert.match(chipStyle, /left:\d+px;top:\d+px;/);
+
+  await tracker.stop();
+  assert.equal(listeners.size, 0);
+});
+
+
 

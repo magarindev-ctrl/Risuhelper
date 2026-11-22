@@ -1,6 +1,6 @@
 import { VERSION, STORAGE_KEY, PRESET_STORAGE_KEY, CHAR_FIELD_META, SCREEN_LABELS } from './version.js';
 import { STYLES } from './style.js';
-import { FocusTracker } from './focus-detector.js';
+import { FocusTracker, normalizeChipPos } from './focus-detector.js';
 import { HostAdapter } from './host-adapter.js';
 import { callRisuModel, parseAssistantReply, buildConversationMessages } from './llm.js';
 import { buildDiffPreview } from './text-edits.js';
@@ -142,9 +142,7 @@ class RisuHelperApp {
 
     // Start cursor focus tracker asynchronously (gracefully continues in manual mode if mainDom is declined)
     this.tracker.showFloatingChip = this.settings.showFloatingChip;
-    if (this.settings.floatingChipPos && Number.isFinite(this.settings.floatingChipPos.left) && Number.isFinite(this.settings.floatingChipPos.top)) {
-      this.tracker.chipPos = { left: this.settings.floatingChipPos.left, top: this.settings.floatingChipPos.top };
-    }
+    this.tracker.chipPos = normalizeChipPos(this.settings.floatingChipPos);
     this.tracker.start().catch(() => {});
 
     this.render();
@@ -854,20 +852,39 @@ class RisuHelperApp {
                 this.settings.showFloatingChip = Boolean(e.target.checked);
                 await this.saveSettings();
                 await this.tracker.setChipVisible(this.settings.showFloatingChip);
+                this.render();
               },
             }),
             '화면에 플로팅 버튼 표시 (드래그 이동 가능 · mainDom 필요)'
           )
-        ),
-        this.settings.showFloatingChip && h(doc, 'button', {
-          class: 'rh-btn',
-          onclick: async () => {
-            this.settings.floatingChipPos = null;
-            await this.saveSettings();
-            await this.tracker.setChipPosition(null);
-            this.showToast('플로팅 버튼 위치를 기본값으로 초기화했습니다.');
-          },
-        }, '버튼 위치 초기화')
+        )
+      ),
+      this.settings.showFloatingChip && h(doc, 'div', { class: 'rh-field' },
+        h(doc, 'span', {}, '플로팅 버튼 빠른 위치 이동 (다른 플러그인과 겹칠 때 · 직접 드래그도 가능)'),
+        h(doc, 'div', { class: 'rh-row', style: 'flex-wrap:wrap;gap:6px;' },
+          ...[
+            { label: '↖ 좌상', pos: { anchor: 'tl' } },
+            { label: '↗ 우상', pos: { anchor: 'tr' } },
+            { label: '← 좌중앙', pos: { anchor: 'ml' } },
+            { label: '→ 우중앙', pos: { anchor: 'mr' } },
+            { label: '↙ 좌하', pos: { anchor: 'bl' } },
+            { label: '↘ 우하 (기본)', pos: null },
+          ].map(preset => {
+            const cur = this.settings.floatingChipPos;
+            const isActive = preset.pos === null
+              ? (!cur || cur.anchor === 'br')
+              : (cur?.anchor === preset.pos.anchor);
+            return h(doc, 'button', {
+              class: `rh-btn${isActive ? ' primary' : ''}`,
+              onclick: async () => {
+                this.settings.floatingChipPos = preset.pos;
+                await this.saveSettings();
+                await this.tracker.setChipPosition(preset.pos);
+                this.showToast(`플로팅 버튼을 ${preset.label} 위치로 옮겼습니다.`);
+              },
+            }, preset.label);
+          })
+        )
       )
     );
   }
