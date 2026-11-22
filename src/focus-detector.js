@@ -741,6 +741,15 @@ const CHIP_ANCHORS = {
   ml: 'left:14px;top:50%;transform:translateY(-50%);',
   mr: 'right:14px;top:50%;transform:translateY(-50%);',
 };
+const CHIP_CYCLE_ORDER = ['br', 'mr', 'tr', 'tl', 'ml', 'bl'];
+const LONG_PRESS_MS = 600;
+
+function extractPointerXY(ev) {
+  const src = ev?.touches?.[0] ?? ev?.changedTouches?.[0] ?? ev;
+  const x = Number(src?.clientX);
+  const y = Number(src?.clientY);
+  return Number.isFinite(x) && Number.isFinite(y) ? [x, y] : null;
+}
 
 function normalizeChipPos(pos) {
   if (!pos || typeof pos !== 'object') return null;
@@ -782,11 +791,12 @@ function buildChipStyle({ pos = null, left = null, top = null, dragging = false 
     posCss = `left:${Math.round(norm.left)}px;top:${Math.round(norm.top)}px;`;
   }
   return (
-    `position:fixed;${posCss}z-index:950;padding:7px 12px;border-radius:999px;` +
+    `position:fixed;${posCss}z-index:999;display:inline-flex;align-items:center;box-sizing:border-box;` +
+    'padding:7px 12px;border-radius:999px;' +
     'background:rgba(24,24,27,0.92);color:#f4f4f5;border:1px solid rgba(161,161,170,0.45);' +
-    'font-size:12px;font-weight:600;box-shadow:0 6px 20px rgba(0,0,0,0.32);' +
-    `cursor:${dragging ? 'grabbing' : 'grab'};touch-action:none;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none;` +
-    'max-width:240px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;backdrop-filter:blur(6px);'
+    'font-size:12px;font-weight:600;line-height:1.2;box-shadow:0 6px 20px rgba(0,0,0,0.32);' +
+    `cursor:${dragging ? 'grabbing' : 'grab'};touch-action:none;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none;-webkit-tap-highlight-color:transparent;` +
+    'max-width:240px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);'
   );
 }
 
@@ -800,7 +810,7 @@ function clampChipPos(left, top, chipW, chipH, viewW, viewH) {
 }
 
 /**
- * Manages allowed Plugin v3 rootDoc listeners (pointer/mouse/click/keyup) to cache the latest
+ * Manages allowed Plugin v3 rootDoc listeners (pointer/touch/mouse/click/keyup) to cache the latest
  * focused context BEFORE a user clicks the plugin button, and renders a draggable floating chip.
  */
 class FocusTracker {
@@ -819,10 +829,15 @@ class FocusTracker {
     this.enabled = false;
     this._scanPending = false;
     this._drag = null;
-    this._movePending = false;
+    this._dragHandled = false;
+    this._lastDragStart = 0;
+    this._lastDownType = '';
+    this._longPressTimer = null;
     this._suppressClickUntil = 0;
     this._cachedViewport = null;
     this._cachedChipRect = null;
+    this._styleInFlight = false;
+    this._pendingStyleUpdate = null;
   }
 
   async _getViewportSize() {
@@ -895,27 +910,34 @@ class FocusTracker {
       this.rootDoc = rootDoc;
       this.enabled = true;
 
+      // Register drag move/end listeners BEFORE focus-scan listeners so drag state resolves first.
+      // Each event is wrapped individually so forks without specific event types never abort startup.
+      for (const moveEvt of ['pointermove', 'touchmove', 'mousemove']) {
+        try {
+          const id = await rootDoc.addEventListener(moveEvt, (e) => {
+            this._handlePointerMove(e);
+          });
+          if (id) this.listenerIds.push({ type: moveEvt, id });
+        } catch {}
+      }
+
+      for (const endEvt of ['pointerup', 'touchend', 'mouseup', 'pointercancel', 'touchcancel']) {
+        try {
+          const id = await rootDoc.addEventListener(endEvt, () => {
+            this._handlePointerEnd();
+          });
+          if (id) this.listenerIds.push({ type: endEvt, id });
+        } catch {}
+      }
+
       for (const evt of ['pointerup', 'click', 'keyup']) {
-        const id = await rootDoc.addEventListener(evt, () => {
-          if (this._drag?.moved || Date.now() < this._suppressClickUntil) return;
-          this.scheduleScan();
-        });
-        if (id) this.listenerIds.push({ type: evt, id });
-      }
-
-      // Drag listeners on rootDoc (both pointer* and mouse* are allowed in Plugin v3 with clientX/clientY)
-      for (const moveEvt of ['pointermove', 'mousemove']) {
-        const id = await rootDoc.addEventListener(moveEvt, (e) => {
-          this._handlePointerMove(e);
-        });
-        if (id) this.listenerIds.push({ type: moveEvt, id });
-      }
-
-      for (const endEvt of ['pointerup', 'pointercancel', 'mouseup']) {
-        const id = await rootDoc.addEventListener(endEvt, () => {
-          this._handlePointerEnd();
-        });
-        if (id) this.listenerIds.push({ type: endEvt, id });
+        try {
+          const id = await rootDoc.addEventListener(evt, () => {
+            if (this._drag?.moved || this._dragHandled || Date.now() < this._suppressClickUntil) return;
+            this.scheduleScan();
+          });
+          if (id) this.listenerIds.push({ type: evt, id });
+        } catch {}
       }
 
       if (this.showFloatingChip) {
@@ -961,14 +983,71 @@ class FocusTracker {
     } catch {}
   }
 
+  /**
+   * Coalesces in-flight style RPC calls so the very first drag frame fires with 0ms latency
+   * while never backing up the iframe postMessage bridge during rapid mouse movement.
+   */
+  _queueChipStyle(pos, dragging) {
+    this._pendingStyleUpdate = { pos, dragging };
+    if (this._styleInFlight) return;
+    this._drainChipStyleQueue();
+  }
+
+  async _drainChipStyleQueue() {
+    this._styleInFlight = true;
+    try {
+      while (this._pendingStyleUpdate) {
+        const next = this._pendingStyleUpdate;
+        this._pendingStyleUpdate = null;
+        await this._applyChipStyle(next.pos, next.dragging);
+      }
+    } finally {
+      this._styleInFlight = false;
+    }
+  }
+
+  async _cycleChipSpot() {
+    const view = this._cachedViewport || await this._getViewportSize();
+    const chipW = this._cachedChipRect?.width || 140;
+    const chipH = this._cachedChipRect?.height || 36;
+    const curOrigin = this._cachedChipRect
+      ? { left: this._cachedChipRect.left, top: this._cachedChipRect.top }
+      : estimateChipOrigin(this.chipPos, chipW, chipH, view.width, view.height);
+
+    let nextIdx = 0;
+    if (this.chipPos?.anchor) {
+      const idx = CHIP_CYCLE_ORDER.indexOf(this.chipPos.anchor);
+      nextIdx = idx >= 0 ? (idx + 1) % CHIP_CYCLE_ORDER.length : 1;
+    } else {
+      const nearest = CHIP_CYCLE_ORDER.findIndex(anchor => {
+        const spot = estimateChipOrigin({ anchor }, chipW, chipH, view.width, view.height);
+        return Math.abs(spot.left - curOrigin.left) < 40 && Math.abs(spot.top - curOrigin.top) < 40;
+      });
+      nextIdx = nearest >= 0 ? (nearest + 1) % CHIP_CYCLE_ORDER.length : 1;
+    }
+
+    const nextAnchor = CHIP_CYCLE_ORDER[nextIdx];
+    const nextPos = nextAnchor === 'br' ? null : { anchor: nextAnchor };
+    this._suppressClickUntil = Date.now() + 500;
+    await this.setChipPosition(nextPos);
+    this.onChipMove(nextPos);
+  }
+
   async _handleChipPointerDown(e) {
     if (!this.chipEl) return;
-    if (this._drag?.active) return; // Dedupe paired pointerdown + mousedown
     if (e?.button === 1 || e?.button === 2) return;
-    const startX = Number(e?.clientX);
-    const startY = Number(e?.clientY);
-    if (!Number.isFinite(startX) || !Number.isFinite(startY)) return;
+    if (this._drag?.active) return; // Dedupe paired pointerdown + touchstart + mousedown
 
+    const now = Date.now();
+    const evType = String(e?.type || '');
+    if (evType && this._lastDownType && this._lastDownType !== evType && now - this._lastDragStart < 120) {
+      return;
+    }
+    this._lastDragStart = now;
+    this._lastDownType = evType;
+    this._dragHandled = false;
+
+    const xy = extractPointerXY(e);
     const view = this._cachedViewport || { width: 1024, height: 768 };
     const cachedRect = this._cachedChipRect;
     const chipW = cachedRect?.width > 0 ? cachedRect.width : 140;
@@ -979,21 +1058,33 @@ class FocusTracker {
 
     const drag = {
       active: true,
-      ready: true, // Ready synchronously so quick drags never drop over async iframe RPC
+      startedAt: now,
       moved: false,
-      startX,
-      startY,
-      lastX: startX,
-      lastY: startY,
+      hasCoords: Boolean(xy),
+      startX: xy ? xy[0] : 0,
+      startY: xy ? xy[1] : 0,
+      lastX: xy ? xy[0] : 0,
+      lastY: xy ? xy[1] : 0,
       originLeft: origin.left,
       originTop: origin.top,
       chipW,
       chipH,
       viewW: view.width,
       viewH: view.height,
-      currentPos: null,
     };
     this._drag = drag;
+
+    // Long-press fallback (600ms): even on hosts that strip pointer coordinates,
+    // holding the button cleanly cycles it to the next screen edge spot.
+    clearTimeout(this._longPressTimer);
+    this._longPressTimer = setTimeout(() => {
+      if (this._drag === drag && drag.active && !drag.moved) {
+        drag.active = false;
+        this._drag = null;
+        this._dragHandled = true;
+        this._cycleChipSpot();
+      }
+    }, LONG_PRESS_MS);
 
     try {
       const [rect, liveView] = await Promise.all([
@@ -1018,7 +1109,17 @@ class FocusTracker {
         if (this._drag === drag && drag.active) {
           drag.viewW = liveView.width;
           drag.viewH = liveView.height;
-          if (drag.moved) this._flushDragMove();
+          if (drag.moved && drag.hasCoords) {
+            const nextPos = clampChipPos(
+              drag.originLeft + (drag.lastX - drag.startX),
+              drag.originTop + (drag.lastY - drag.startY),
+              drag.chipW,
+              drag.chipH,
+              drag.viewW,
+              drag.viewH
+            );
+            this._queueChipStyle(nextPos, true);
+          }
         }
       }
     } catch {}
@@ -1026,70 +1127,85 @@ class FocusTracker {
 
   _handlePointerMove(e) {
     const drag = this._drag;
-    if (!drag || !drag.active) return;
-    const x = Number(e?.clientX);
-    const y = Number(e?.clientY);
-    if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+    if (!drag || !drag.active || !drag.hasCoords) return;
 
+    // If mouse button was released outside the window, end drag immediately when cursor returns
+    if ((e?.type === 'mousemove' || e?.type === 'pointermove') && typeof e?.buttons === 'number' && e.buttons === 0) {
+      this._handlePointerEnd();
+      return;
+    }
+
+    const xy = extractPointerXY(e);
+    if (!xy) return;
+
+    const [x, y] = xy;
     drag.lastX = x;
     drag.lastY = y;
-    const dist = Math.hypot(x - drag.startX, y - drag.startY);
-    if (!drag.moved && dist < DRAG_THRESHOLD_PX) return;
-    drag.moved = true;
+    const dx = x - drag.startX;
+    const dy = y - drag.startY;
+    if (!drag.moved && Math.hypot(dx, dy) < DRAG_THRESHOLD_PX) return;
 
-    if (!drag.ready || this._movePending) return;
-    this._movePending = true;
-    setTimeout(() => {
-      this._movePending = false;
-      this._flushDragMove();
-    }, 16);
-  }
+    if (!drag.moved) {
+      drag.moved = true;
+      clearTimeout(this._longPressTimer);
+    }
 
-  _flushDragMove() {
-    const drag = this._drag;
-    if (!drag || !drag.active || !drag.ready || !drag.moved) return;
     const nextPos = clampChipPos(
-      drag.originLeft + (drag.lastX - drag.startX),
-      drag.originTop + (drag.lastY - drag.startY),
+      drag.originLeft + dx,
+      drag.originTop + dy,
       drag.chipW,
       drag.chipH,
       drag.viewW,
       drag.viewH
     );
-    drag.currentPos = nextPos;
-    this._applyChipStyle(nextPos, true);
+    this._queueChipStyle(nextPos, true);
   }
 
   async _handlePointerEnd() {
+    clearTimeout(this._longPressTimer);
     const drag = this._drag;
     if (!drag || !drag.active) return;
     drag.active = false;
     this._drag = null;
 
-    if (!drag.moved) return;
+    if (drag.moved && drag.hasCoords) {
+      const finalPos = clampChipPos(
+        drag.originLeft + (drag.lastX - drag.startX),
+        drag.originTop + (drag.lastY - drag.startY),
+        drag.chipW,
+        drag.chipH,
+        drag.viewW,
+        drag.viewH
+      );
 
-    const finalPos = clampChipPos(
-      drag.originLeft + (drag.lastX - drag.startX),
-      drag.originTop + (drag.lastY - drag.startY),
-      drag.chipW,
-      drag.chipH,
-      drag.viewW,
-      drag.viewH
-    );
+      this._dragHandled = true;
+      this._suppressClickUntil = Date.now() + 450;
+      this.chipPos = finalPos;
+      this._cachedChipRect = {
+        left: finalPos.left,
+        top: finalPos.top,
+        width: drag.chipW,
+        height: drag.chipH,
+      };
+      this._pendingStyleUpdate = null;
+      await this._applyChipStyle(finalPos, false);
+      this.onChipMove(finalPos);
+      return;
+    }
 
+    const held = Date.now() - drag.startedAt;
+    this._dragHandled = true;
     this._suppressClickUntil = Date.now() + 450;
-    this.chipPos = finalPos;
-    this._cachedChipRect = {
-      left: finalPos.left,
-      top: finalPos.top,
-      width: drag.chipW,
-      height: drag.chipH,
-    };
-    await this._applyChipStyle(finalPos, false);
-    this.onChipMove(finalPos);
+    if (held >= LONG_PRESS_MS) {
+      await this._cycleChipSpot();
+      return;
+    }
+    this.onChipClick(this.lastContext);
   }
 
   async setChipPosition(pos) {
+    this._lastDragStart = 0;
+    this._lastDownType = '';
     const norm = normalizeChipPos(pos);
     if (norm?.anchor) {
       this.chipPos = norm;
@@ -1103,6 +1219,7 @@ class FocusTracker {
       this.chipPos = null;
       this._cachedChipRect = null;
     }
+    this._pendingStyleUpdate = null;
     await this._applyChipStyle(this.chipPos, false);
     await this._refreshChipMetrics();
   }
@@ -1112,7 +1229,15 @@ class FocusTracker {
     try {
       const body = await this.rootDoc.querySelector('body');
       if (!body) return;
-      const chip = await this.rootDoc.createElement('button');
+
+      // Remove any orphaned chip left behind from a prior plugin reload
+      try {
+        const stale = await this.rootDoc.querySelector(`[${CHIP_ATTR}="1"]`);
+        if (stale) await stale.remove();
+      } catch {}
+
+      // Use <div> instead of <button> so grabbing/dragging never steals :focus from the active editor
+      const chip = await this.rootDoc.createElement('div');
       await chip.setAttribute(CHIP_ATTR, '1');
       if (this.chipPos && Number.isFinite(this.chipPos.left) && Number.isFinite(this.chipPos.top)) {
         const view = await this._getViewportSize();
@@ -1124,18 +1249,25 @@ class FocusTracker {
       }));
       await chip.setTextContent('⋮⋮ ✨ RisuHelper');
 
-      for (const downEvt of ['pointerdown', 'mousedown']) {
-        const downId = await chip.addEventListener(downEvt, (e) => {
-          this._handleChipPointerDown(e);
-        });
-        if (downId) this.chipListenerIds.push({ type: downEvt, id: downId });
+      for (const downEvt of ['pointerdown', 'touchstart', 'mousedown']) {
+        try {
+          const downId = await chip.addEventListener(downEvt, (e) => {
+            this._handleChipPointerDown(e);
+          });
+          if (downId) this.chipListenerIds.push({ type: downEvt, id: downId });
+        } catch {}
       }
 
-      const clickId = await chip.addEventListener('click', () => {
-        if (Date.now() < this._suppressClickUntil) return;
-        this.onChipClick(this.lastContext);
-      });
-      if (clickId) this.chipListenerIds.push({ type: 'click', id: clickId });
+      try {
+        const clickId = await chip.addEventListener('click', () => {
+          if (this._dragHandled || this._drag?.active || Date.now() < this._suppressClickUntil) {
+            this._dragHandled = false;
+            return;
+          }
+          this.onChipClick(this.lastContext);
+        });
+        if (clickId) this.chipListenerIds.push({ type: 'click', id: clickId });
+      } catch {}
 
       await body.appendChild(chip);
       this.chipEl = chip;
@@ -1164,7 +1296,10 @@ class FocusTracker {
   }
 
   async unmountFloatingChip() {
+    clearTimeout(this._longPressTimer);
     this._drag = null;
+    this._dragHandled = false;
+    this._pendingStyleUpdate = null;
     this._cachedChipRect = null;
     if (!this.chipEl) return;
     try {
@@ -1181,7 +1316,10 @@ class FocusTracker {
 
   async stop() {
     this.enabled = false;
+    clearTimeout(this._longPressTimer);
     this._drag = null;
+    this._dragHandled = false;
+    this._pendingStyleUpdate = null;
     this._cachedChipRect = null;
     await this.unmountFloatingChip();
     if (this.rootDoc) {

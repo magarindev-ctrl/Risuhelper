@@ -674,12 +674,12 @@ test('FocusTracker reads real SafeDocument viewport rect, supports quick drags, 
 
   // 3. Mouse-only drag fallback (mousedown -> mousemove -> mouseup)
   movedPos = null;
-  chipListeners.get('mousedown')({ clientX: 50, clientY: 540, button: 0 });
+  chipListeners.get('mousedown')({ type: 'mousedown', clientX: 50, clientY: 540, button: 0 });
   for (const entry of listeners.values()) {
-    if (entry.type === 'mousemove') entry.fn({ clientX: 350, clientY: 240 });
+    if (entry.type === 'mousemove') entry.fn({ type: 'mousemove', clientX: 350, clientY: 240, buttons: 1 });
   }
   for (const entry of listeners.values()) {
-    if (entry.type === 'mouseup') entry.fn({ clientX: 350, clientY: 240 });
+    if (entry.type === 'mouseup') entry.fn({ type: 'mouseup', clientX: 350, clientY: 240 });
   }
   await new Promise(r => setTimeout(r, 10));
   assert.ok(movedPos, 'mouse fallback drag must commit');
@@ -688,6 +688,97 @@ test('FocusTracker reads real SafeDocument viewport rect, supports quick drags, 
   await tracker.stop();
   assert.equal(listeners.size, 0);
 });
+
+test('FocusTracker survives disallowed touch* events like real PocketRisu, removes stale chip, uses <div>, deduplicates tap+click, and cycles on long-press without coords', async () => {
+  const disallowed = new Set(['touchstart', 'touchmove', 'touchend', 'touchcancel']);
+  const listeners = new Map();
+  const chipListeners = new Map();
+  let nextId = 1;
+  let createdTag = '';
+  let staleRemoved = false;
+  let chipStyle = '';
+  let openedCount = 0;
+  let movedPos = null;
+
+  const staleChip = { async remove() { staleRemoved = true; } };
+  const chipNode = {
+    async setAttribute() {},
+    async setStyleAttribute(s) { chipStyle = s; },
+    async setTextContent() {},
+    async getBoundingClientRect() { return { left: 800, top: 650, width: 160, height: 36 }; },
+    async addEventListener(evt, fn) {
+      if (disallowed.has(evt)) throw new Error(`Event listener of type '${evt}' is not allowed`);
+      const id = `chip-${evt}-${nextId++}`;
+      chipListeners.set(evt, fn);
+      return id;
+    },
+    async removeEventListener() {},
+    async remove() {},
+  };
+
+  const rootDoc = {
+    async getBoundingClientRect() { return { width: 1024, height: 768, top: 0, left: 0 }; },
+    async querySelector(sel) {
+      if (sel === 'body') return { async appendChild() {} };
+      if (sel.includes('x-risuhelper-chip')) return staleChip;
+      return null;
+    },
+    async querySelectorAll() { return { async length() { return 0; }, async at() { return null; } }; },
+    async createElement(tag) { createdTag = tag; return chipNode; },
+    async addEventListener(type, fn) {
+      if (disallowed.has(type)) throw new Error(`Event listener of type '${type}' is not allowed`);
+      const id = `${type}-${nextId++}`;
+      listeners.set(id, { type, fn });
+      return id;
+    },
+    async removeEventListener(_type, id) { listeners.delete(id); },
+  };
+
+  const tracker = new FocusTracker(
+    { async getRootDocument() { return rootDoc; } },
+    {
+      showFloatingChip: true,
+      onChipClick: () => { openedCount++; },
+      onChipMove: (pos) => { movedPos = pos; },
+    }
+  );
+
+  assert.equal(await tracker.start(), true);
+  assert.equal(staleRemoved, true, 'stale chip from prior reload must be removed');
+  assert.equal(createdTag, 'div', 'chip must be a <div> so grabbing does not steal editor focus');
+
+  // Short tap (pointerdown -> pointerup -> click) must open drawer ONCE
+  chipListeners.get('pointerdown')({ type: 'pointerdown', clientX: 840, clientY: 660, button: 0 });
+  for (const entry of listeners.values()) {
+    if (entry.type === 'pointerup') entry.fn({ type: 'pointerup', clientX: 840, clientY: 660 });
+  }
+  chipListeners.get('click')();
+  assert.equal(openedCount, 1);
+
+  // Release outside window (mousemove with buttons === 0) ends drag cleanly
+  movedPos = null;
+  chipListeners.get('pointerdown')({ type: 'pointerdown', clientX: 840, clientY: 660, button: 0 });
+  for (const entry of listeners.values()) {
+    if (entry.type === 'pointermove') entry.fn({ type: 'pointermove', clientX: 500, clientY: 300, buttons: 1 });
+  }
+  for (const entry of listeners.values()) {
+    if (entry.type === 'mousemove') entry.fn({ type: 'mousemove', clientX: 500, clientY: 300, buttons: 0 });
+  }
+  await new Promise(r => setTimeout(r, 10));
+  assert.ok(movedPos, 'buttons===0 must finalize drag');
+  assert.equal(movedPos.left, 460);
+  assert.equal(movedPos.top, 290);
+
+  // Long-press fallback when host strips coordinates ({ type: 'pointerdown' } with no clientX/Y)
+  movedPos = null;
+  chipListeners.get('pointerdown')({ type: 'pointerdown' });
+  await new Promise(r => setTimeout(r, 650));
+  assert.ok(movedPos && movedPos.anchor, 'long-press without coords must cycle to next edge anchor');
+  assert.match(chipStyle, /right:14px;top:50%;transform:translateY\(-50%\);|left:14px;top:64px;|right:14px;top:64px;/);
+
+  await tracker.stop();
+});
+
 
 
 
