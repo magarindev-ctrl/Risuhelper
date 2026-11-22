@@ -11,6 +11,7 @@ const KNOWLEDGE_SECTIONS = {
 - systemPrompt (시스템 프롬프트): 비어 있지 않으면 전역 메인 프롬프트를 대체합니다.
 - replaceGlobalNote (글로벌 노트 덮어쓰기): 비어 있지 않으면 전역 UJB/글로벌 노트를 대체합니다.
 - backgroundHTML (백그라운드 임베딩): 채팅 배경에 삽입되는 HTML/CSS/마크다운. {{bg::에셋명}}, {{audio::에셋명}} 등을 사용할 수 있습니다.
+- chat.note (작가의 노트): 현재 채팅 세션에만 주입되는 방향성·문체·전개 지시 메모입니다.
 - creatorNotes (제작자 코멘트): 프롬프트에 직접 들어가지 않는 제작자 안내 메모입니다.`,
 
   lorebook: `[로어북 (Lorebook) 가이드]

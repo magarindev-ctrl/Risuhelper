@@ -419,3 +419,46 @@ test('HostAdapter warns explicitly and requires confirmation when Lua replaces e
   assert.equal(state.character.triggerscript[0].comment, 'V1 trigger 1');
 });
 
+test('HostAdapter supports chat_note (Author\'s Note) preview, apply, validation, and surgical Undo preserving newer messages', async () => {
+  const { state, adapter } = createMockHost();
+  state.character.chaId = 'char-sera';
+  state.character.chats[0].note = '기존 작가의 노트: 3인칭 시점 유지';
+  state.character.chats[0].message = [{ role: 'char', data: '안녕, 여행자.' }];
+
+  const target = { targetKind: 'chat_note', fieldKey: 'note' };
+
+  // Invalid fieldKey on chat_note is rejected
+  const badField = await adapter.previewProposal(
+    { action: 'replace_text', content: 'hack' },
+    { targetKind: 'chat_note', fieldKey: 'message' }
+  );
+  assert.equal(badField.ok, false);
+  assert.match(badField.error, /허용되지 않는 작가의 노트 필드/);
+
+  // Preview and apply patch_text
+  const proposal = {
+    action: 'patch_text',
+    title: '문체 지시 보강',
+    edits: [{ before: '3인칭 시점 유지', after: '3인칭 관찰자 시점과 잔잔한 문체 유지' }],
+  };
+  const preview = await adapter.previewProposal(proposal, target);
+  assert.equal(preview.ok, true);
+  assert.equal(preview.label, '작가의 노트 (현재 채팅)');
+  assert.equal(preview.after, '기존 작가의 노트: 3인칭 관찰자 시점과 잔잔한 문체 유지');
+
+  const applied = await adapter.applyProposal(proposal, preview.target, { hostBinding: preview.hostBinding });
+  assert.equal(applied.ok, true);
+  assert.equal(state.character.chats[0].note, '기존 작가의 노트: 3인칭 관찰자 시점과 잔잔한 문체 유지');
+
+  // Subsequent chat turns MUST survive Undo of chat_note
+  state.character.chats[0].message.push(
+    { role: 'user', data: '노트 바꾼 뒤 유저 메시지' },
+    { role: 'char', data: '노트 바꾼 뒤 캐릭터 응답' }
+  );
+
+  await adapter.undo(applied.undoId);
+  assert.equal(state.character.chats[0].note, '기존 작가의 노트: 3인칭 시점 유지');
+  assert.equal(state.character.chats[0].message.length, 3);
+});
+
+

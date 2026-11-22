@@ -93,6 +93,9 @@ function validateAllowedFieldKey(kind, fieldKey) {
   if (kind === 'persona' && !ALLOWED_PERSONA_TEXT_FIELDS.includes(fieldKey)) {
     return `허용되지 않는 페르소나 필드입니다: ${fieldKey}`;
   }
+  if (kind === 'chat_note' && fieldKey !== 'note') {
+    return `허용되지 않는 작가의 노트 필드입니다: ${fieldKey}`;
+  }
   if (kind === 'config' && !ALLOWED_CONFIG_KEYS.includes(fieldKey)) {
     return `허용되지 않는 설정 키입니다: ${fieldKey}`;
   }
@@ -497,6 +500,22 @@ class HostAdapter {
         label: CHAR_FIELD_META[fieldKey]?.label || fieldKey,
         content,
         charName: char.name || '(이름 없음)',
+      };
+    }
+
+    if (t.targetKind === 'chat_note') {
+      const { chat, char, charIndex, chatIndex } = await this.readActiveChat();
+      if (!chat) return { ok: false, reason: '활성 채팅을 찾을 수 없습니다.', content: '' };
+      const fieldKey = t.fieldKey || 'note';
+      const fieldErr = validateAllowedFieldKey('chat_note', fieldKey);
+      if (fieldErr) return { ok: false, reason: fieldErr, content: '' };
+      return {
+        ok: true,
+        target: { ...t, fieldKey: 'note' },
+        hostBinding: { charIndex, chatIndex, ...getCharIdentity(char) },
+        label: '작가의 노트 (현재 채팅)',
+        content: String(chat.note ?? ''),
+        charName: char?.name || '(이름 없음)',
       };
     }
 
@@ -1091,6 +1110,31 @@ class HostAdapter {
         },
       });
       return { ok: true, undoId, summary: `캐릭터 ${CHAR_FIELD_META[fieldKey]?.label || fieldKey}에 적용했습니다.` };
+    }
+
+    if (kind === 'chat_note') {
+      const fieldKey = target.fieldKey || 'note';
+      assertAllowedFieldKey('chat_note', fieldKey);
+      const { chat, charIndex, chatIndex } = await this._requireSameActiveChat(options.hostBinding, '적용');
+      const hadKey = Object.hasOwn(chat, 'note');
+      const prevValue = clone(chat.note);
+
+      const nextChat = clone(chat);
+      nextChat.note = compute(String(nextChat.note ?? ''), '작가의 노트');
+      await this._setChat(charIndex, chatIndex, nextChat);
+
+      const undoId = this._pushUndo({
+        label: '작가의 노트 수정',
+        restore: async () => {
+          const latestChat = await this._readChatAt(charIndex, chatIndex);
+          if (!latestChat) throw new Error('되돌릴 채팅을 찾을 수 없습니다.');
+          const restored = clone(latestChat);
+          if (hadKey) restored.note = clone(prevValue);
+          else delete restored.note;
+          await this._setChat(charIndex, chatIndex, restored);
+        },
+      });
+      return { ok: true, undoId, summary: '현재 채팅의 작가의 노트에 적용했습니다.' };
     }
 
     if (kind === 'char_lorebook') {

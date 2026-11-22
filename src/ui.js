@@ -529,6 +529,7 @@ class RisuHelperApp {
       { value: 'auto', label: this.detectedContext ? `📍 자동 감지: ${this.detectedContext.labelText}` : '📍 자동 감지 (미감지 · 일반)' },
       { value: 'char_field:desc', label: '캐릭터 · 설명 (Description)' },
       { value: 'char_field:firstMessage', label: '캐릭터 · 첫 메시지 (First Message)' },
+      { value: 'chat_note:', label: "채팅 · 작가의 노트 (Author's Note)" },
       { value: 'char_field:systemPrompt', label: '캐릭터 · 시스템 프롬프트' },
       { value: 'char_field:replaceGlobalNote', label: '캐릭터 · 글로벌 노트 덮어쓰기' },
       { value: 'char_field:creatorNotes', label: '캐릭터 · 제작자 코멘트' },
@@ -564,6 +565,7 @@ class RisuHelperApp {
       const [kind, field] = val.split(':');
       const screenMap = {
         char_field: 'character',
+        chat_note: 'character',
         char_lorebook: 'lorebook',
         chat_lorebook: 'lorebook',
         char_lua: 'scripts',
@@ -578,10 +580,19 @@ class RisuHelperApp {
       this.manualTarget = {
         screen: screenMap[kind] || 'unknown',
         targetKind: kind,
-        fieldKey: field || (kind === 'char_lorebook' || kind === 'chat_lorebook' || kind === 'module_lorebook' ? 'content' : kind === 'persona' ? 'personaPrompt' : null),
+        fieldKey: field || (
+          kind === 'chat_note' ? 'note' :
+          kind === 'char_lorebook' || kind === 'chat_lorebook' || kind === 'module_lorebook' ? 'content' :
+          kind === 'persona' ? 'personaPrompt' :
+          null
+        ),
         loreIndex: null,
         loreScope: kind === 'chat_lorebook' ? 'chat' : kind === 'module_lorebook' ? 'module' : kind === 'char_lorebook' ? 'character' : null,
-        labelText: kind === 'char_field' ? (CHAR_FIELD_META[field]?.label || field) : (SCREEN_LABELS[screenMap[kind]] || kind),
+        labelText: kind === 'char_field'
+          ? (CHAR_FIELD_META[field]?.label || field)
+          : kind === 'chat_note'
+            ? '작가의 노트 (현재 채팅)'
+            : (SCREEN_LABELS[screenMap[kind]] || kind),
         warnings: [],
       };
     }

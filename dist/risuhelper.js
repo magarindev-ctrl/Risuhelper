@@ -830,6 +830,69 @@
       );
     }
 
+    function hasUsableRect(rect) {
+      return Boolean(
+        rect &&
+        Number.isFinite(rect.top) &&
+        Number.isFinite(rect.left) &&
+        Number.isFinite(rect.width) &&
+        Number.isFinite(rect.height) &&
+        (rect.width > 0 || rect.height > 0)
+      );
+    }
+
+    function rectsMatch(a, b) {
+      if (!hasUsableRect(a) || !hasUsableRect(b)) return false;
+      return (
+        Math.abs(a.top - b.top) < 0.5 &&
+        Math.abs(a.left - b.left) < 0.5 &&
+        Math.abs(a.width - b.width) < 0.5 &&
+        Math.abs(a.height - b.height) < 0.5
+      );
+    }
+
+    function isTokenCountText(text) {
+      return /^\d+\s*(토큰|tokens?)$/.test(normalizeLabel(text));
+    }
+
+    function isMutedHelperSpan(className, text) {
+      const cls = String(className || '');
+      if (cls.includes('text-textcolor2') || cls.includes('text-xs') || cls.includes('text-draculared')) {
+        return true;
+      }
+      return isTokenCountText(text);
+    }
+
+    /**
+     * Checks whether a sibling <div> is TriggerList.svelte's V1/V2/Lua mode bar
+     * with the Lua button active (`<button class="... ring-1">Lua</button>`).
+     * Inspects only direct button children of small (<=4 child) containers to avoid
+     * false positives from unrelated page subtrees.
+     */
+    async function isLuaModeBar(el, className) {
+      const cls = String(className || '');
+      if (cls.includes('n-scroll') || cls.includes('border-darkborderc') || cls.includes('seperator')) {
+        return false;
+      }
+      try {
+        const kids = await el.getChildren();
+        const len = kids ? await kids.length() : 0;
+        if (len === 0 || len > 4) return false;
+        for (let k = 0; k < len; k++) {
+          const btn = await kids.at(k);
+          if (!btn) continue;
+          const bName = String(await btn.nodeName()).toLowerCase();
+          if (bName !== 'button') continue;
+          const bCls = String((await btn.getClassName()) || '');
+          const bText = String((await btn.textContent()) || '').trim();
+          if (bText === 'Lua' && bCls.includes('ring-1')) {
+            return true;
+          }
+        }
+      } catch {}
+      return false;
+    }
+
     /**
      * Pure classification logic: takes DOM snapshot signals gathered from SafeElement traversal
      * and resolves a structured FocusContext suitable for RisuHelper's host adapter & LLM.
@@ -909,7 +972,50 @@
         warnings.push('모듈 편집 화면(tempModule)이 열려 있습니다. 플러그인에서 모듈을 저장한 뒤 하단 "모듈 수정" 버튼을 누르면 플러그인 변경이 덮어써질 수 있으니, 편집창을 닫고 다시 확인하세요.');
       }
 
-      // 3. Lorebook item (identified by data-risu-idx inside LoreBookData)
+      // 3. Lua trigger script editor (strictly verified via adjacent Lua mode bar or explicit trigger script label)
+      if (
+        luaButtonActive ||
+        hasTriggerContainer ||
+        matchAny(nearbyLabel, ['트리거 스크립트', 'trigger script'])
+      ) {
+        const targetKind = isModuleScreen ? 'module_lua' : 'char_lua';
+        return {
+          detectedAt: Date.now(),
+          screen: isModuleScreen ? 'module' : 'scripts',
+          targetKind,
+          fieldKey: 'code',
+          loreIndex: null,
+          loreScope: null,
+          labelText: `${isModuleScreen ? '모듈' : '캐릭터'} Lua 트리거 스크립트`,
+          placeholder,
+          liveTextPreview,
+          warnings,
+        };
+      }
+
+      // 4. Regex script editor (checked BEFORE lorebook because RegexData.svelte also carries data-risu-idx)
+      if (hasRegexContainer || matchAny(nearbyLabel, ['정규식 스크립트', 'regex script'])) {
+        const targetKind = isModuleScreen ? 'module_regex' : 'char_regex';
+        const regexIdx = loreIdx !== null && Number.isInteger(loreIdx) && loreIdx >= 0 ? loreIdx : null;
+        let fieldKey = 'in';
+        if (matchAny(nearbyLabel, ['out', '출력', '치환'])) fieldKey = 'out';
+        else if (matchAny(nearbyLabel, ['이름', 'name', 'comment'])) fieldKey = 'comment';
+        return {
+          detectedAt: Date.now(),
+          screen: isModuleScreen ? 'module' : 'scripts',
+          targetKind,
+          fieldKey,
+          loreIndex: null,
+          loreScope: null,
+          regexIndex: regexIdx,
+          labelText: `${isModuleScreen ? '모듈' : '캐릭터'} 정규식 스크립트${regexIdx !== null ? ` #${regexIdx + 1}` : ''}`,
+          placeholder,
+          liveTextPreview,
+          warnings,
+        };
+      }
+
+      // 5. Lorebook item (identified by data-risu-idx inside LoreBookData)
       if (loreIdx !== null && Number.isInteger(loreIdx) && loreIdx >= 0) {
         let loreScope = 'character';
         let targetKind = 'char_lorebook';
@@ -944,47 +1050,6 @@
         };
       }
 
-      // 4. Lua trigger script editor
-      if (
-        luaButtonActive ||
-        hasTriggerContainer ||
-        matchAny(nearbyLabel, ['트리거 스크립트', 'trigger script'])
-      ) {
-        const targetKind = isModuleScreen ? 'module_lua' : 'char_lua';
-        return {
-          detectedAt: Date.now(),
-          screen: isModuleScreen ? 'module' : 'scripts',
-          targetKind,
-          fieldKey: 'code',
-          loreIndex: null,
-          loreScope: null,
-          labelText: `${isModuleScreen ? '모듈' : '캐릭터'} Lua 트리거 스크립트`,
-          placeholder,
-          liveTextPreview,
-          warnings,
-        };
-      }
-
-      // 5. Regex script editor
-      if (hasRegexContainer || matchAny(nearbyLabel, ['정규식 스크립트', 'regex script'])) {
-        const targetKind = isModuleScreen ? 'module_regex' : 'char_regex';
-        let fieldKey = 'in';
-        if (matchAny(nearbyLabel, ['out', '출력', '치환'])) fieldKey = 'out';
-        else if (matchAny(nearbyLabel, ['이름', 'name', 'comment'])) fieldKey = 'comment';
-        return {
-          detectedAt: Date.now(),
-          screen: isModuleScreen ? 'module' : 'scripts',
-          targetKind,
-          fieldKey,
-          loreIndex: null,
-          loreScope: null,
-          labelText: `${isModuleScreen ? '모듈' : '캐릭터'} 정규식 스크립트`,
-          placeholder,
-          liveTextPreview,
-          warnings,
-        };
-      }
-
       // 6. Module screen non-lorebook fields
       if (isModuleScreen) {
         let fieldKey = 'description';
@@ -1005,18 +1070,9 @@
         };
       }
 
-      // 7. Settings / Config screens
-      const isSettingsScreen =
-        matchAny(headingText, [
-          '채팅 봇', 'chat bot', '기타 봇', 'other bots', '소리 및 디스플레이', 'display',
-          '고급 설정', 'advanced settings', '프롬프트 템플릿', 'prompt template', '접근성', 'accessibility',
-        ]) ||
-        matchAny(nearbyLabel, ['커스텀 css', 'custom css', 'gui html']);
-
-      if (isSettingsScreen) {
-        let fieldKey = null;
-        if (matchAny(nearbyLabel, ['커스텀 css', 'custom css'])) fieldKey = 'customCSS';
-        else if (matchAny(nearbyLabel, ['gui html'])) fieldKey = 'guiHTML';
+      // 7. Explicit config CSS/HTML fields
+      if (matchAny(nearbyLabel, ['커스텀 css', 'custom css', 'gui html'])) {
+        const fieldKey = matchAny(nearbyLabel, ['gui html']) ? 'guiHTML' : 'customCSS';
         return {
           detectedAt: Date.now(),
           screen: 'settings',
@@ -1024,14 +1080,86 @@
           fieldKey,
           loreIndex: null,
           loreScope: null,
-          labelText: fieldKey ? `설정 · ${fieldKey}` : `설정 / 컨피그 (${headings[0] || '일반'})`,
+          labelText: `설정 · ${fieldKey}`,
           placeholder,
           liveTextPreview,
           warnings,
         };
       }
 
-      // 8. Lorebook heading open without specific item focused
+      // 8. Chat Author's Note (CharConfig.svelte -> char.chats[chatPage].note)
+      if (matchAny(nearbyLabel, ['작가의 노트', "author's note", 'author note'])) {
+        return {
+          detectedAt: Date.now(),
+          screen: 'character',
+          targetKind: 'chat_note',
+          fieldKey: 'note',
+          loreIndex: null,
+          loreScope: null,
+          labelText: '작가의 노트 (현재 채팅)',
+          placeholder,
+          liveTextPreview,
+          warnings,
+        };
+      }
+
+      // 9. Character config fields (CharConfig.svelte — checked BEFORE generic Settings headings
+      //    because CharConfig's Advanced tab also renders <h2>고급 설정</h2>)
+      const charFieldChecks = [
+        ['name', ['character name', 'group name', '캐릭터 이름', '그룹 이름']],
+        ['desc', ['설명', 'description', '캐릭터 설명']],
+        ['firstMessage', ['첫 메시지', 'first message']],
+        ['creatorNotes', ['제작자 코멘트', "creator's comment", 'creator notes']],
+        ['systemPrompt', ['시스템 프롬프트', 'system prompt']],
+        ['replaceGlobalNote', ['글로벌 노트 덮어쓰기', 'global note replacement']],
+        ['postHistoryInstructions', ['히스토리 이후', 'post history', 'post-history']],
+        ['exampleMessage', ['예시 대화', 'example message']],
+        ['personality', ['성격', 'personality']],
+        ['scenario', ['시나리오', 'scenario']],
+        ['backgroundHTML', ['백그라운드 임베딩', 'background embedding', 'background html']],
+        ['virtualscript', ['캐릭터js', '캐릭터 js', 'charjs', 'character js']],
+      ];
+
+      for (const [key, terms] of charFieldChecks) {
+        if (matchAny(nearbyLabel, terms) || matchAny(placeholder, terms)) {
+          const meta = CHAR_FIELD_META[key];
+          return {
+            detectedAt: Date.now(),
+            screen: key === 'backgroundHTML' || key === 'virtualscript' ? 'scripts' : 'character',
+            targetKind: 'char_field',
+            fieldKey: key,
+            loreIndex: null,
+            loreScope: null,
+            labelText: meta ? meta.label : key,
+            placeholder,
+            liveTextPreview,
+            warnings,
+          };
+        }
+      }
+
+      // 10. Settings / Config screens
+      const isSettingsScreen = matchAny(headingText, [
+        '채팅 봇', 'chat bot', '기타 봇', 'other bots', '소리 및 디스플레이', 'display',
+        '고급 설정', 'advanced settings', '프롬프트 템플릿', 'prompt template', '접근성', 'accessibility',
+      ]);
+
+      if (isSettingsScreen) {
+        return {
+          detectedAt: Date.now(),
+          screen: 'settings',
+          targetKind: 'config',
+          fieldKey: null,
+          loreIndex: null,
+          loreScope: null,
+          labelText: `설정 / 컨피그 (${headings[0] || '일반'})`,
+          placeholder,
+          liveTextPreview,
+          warnings,
+        };
+      }
+
+      // 11. Lorebook heading open without specific item focused
       if (matchAny(headingText, ['로어북', 'lorebook'])) {
         const isChat = matchAny(activeTabText, ['채팅', 'chat']);
         return {
@@ -1046,39 +1174,6 @@
           liveTextPreview,
           warnings,
         };
-      }
-
-      // 9. Character config fields (CharConfig.svelte)
-      const charFieldChecks = [
-        ['name', ['character name', 'group name', '캐릭터 이름', '그룹 이름']],
-        ['desc', ['설명', 'description', '캐릭터 설명']],
-        ['firstMessage', ['첫 메시지', 'first message']],
-        ['creatorNotes', ['제작자 코멘트', "creator's comment", 'creator notes']],
-        ['systemPrompt', ['시스템 프롬프트', 'system prompt']],
-        ['replaceGlobalNote', ['글로벌 노트 덮어쓰기', 'global note replacement']],
-        ['postHistoryInstructions', ['히스토리 이후', 'post history', 'post-history']],
-        ['exampleMessage', ['예시 대화', 'example message']],
-        ['personality', ['성격', 'personality']],
-        ['scenario', ['시나리오', 'scenario']],
-        ['backgroundHTML', ['백그라운드 임베딩', 'background embedding', 'background html']],
-      ];
-
-      for (const [key, terms] of charFieldChecks) {
-        if (matchAny(nearbyLabel, terms) || matchAny(placeholder, terms)) {
-          const meta = CHAR_FIELD_META[key];
-          return {
-            detectedAt: Date.now(),
-            screen: key === 'backgroundHTML' ? 'scripts' : 'character',
-            targetKind: 'char_field',
-            fieldKey: key,
-            loreIndex: null,
-            loreScope: null,
-            labelText: meta ? meta.label : key,
-            placeholder,
-            liveTextPreview,
-            warnings,
-          };
-        }
       }
 
       return {
@@ -1127,6 +1222,14 @@
           } catch {}
         }
 
+        let elRect = null;
+        try {
+          if (typeof el.getBoundingClientRect === 'function') {
+            const rect = await el.getBoundingClientRect();
+            if (hasUsableRect(rect)) elRect = rect;
+          }
+        } catch {}
+
         const headings = [];
         const activeTabs = [];
         let nearbyLabel = '';
@@ -1140,6 +1243,7 @@
         // Walk up ancestors (bounded to 8 hops to stay fast over iframe RPC)
         let cur = el;
         let curOuter = outerHtml;
+        let curTag = tag;
         for (let depth = 0; depth < 8 && cur; depth++) {
           const parent = await cur.getParent();
           if (!parent) break;
@@ -1152,43 +1256,138 @@
             if (!Number.isNaN(parsed)) loreIdx = parsed;
           }
 
-          // Inspect direct children of close ancestors for labels, headings, and Lua/tab markers
+          // Inspect direct children of close ancestors for labels, headings, and Lua/Regex/tab markers
           if (depth <= 4) {
             const children = await parent.getChildren();
             const len = children ? await children.length() : 0;
             const limit = Math.min(len, 64);
-            let prevSpanText = '';
+            const checkLocalContext = depth <= 3;
+
+            // When depth > 0, check if SafeElement.querySelector(':focus') resolves the exact descendant branch.
+            // This disambiguates sibling TextAreaInput wrappers that share identical outerHTML (e.g. PocketRisu).
+            let focusQueryWorks = false;
+            if (checkLocalContext && depth > 0 && typeof parent.querySelector === 'function') {
+              try {
+                focusQueryWorks = Boolean(await parent.querySelector(FOCUS_SELECTOR));
+              } catch {}
+            }
+
+            let prevPrimarySpan = '';
+            let prevFallbackSpan = '';
+            let prevSiblingWasLuaBar = false;
+            let foundCur = false;
+            const containerSpanLabels = [];
+
             for (let i = 0; i < limit; i++) {
               const child = await children.at(i);
               if (!child) continue;
               const cName = String(await child.nodeName()).toLowerCase();
+
+              // 1. Identify the exact sibling matching `cur`
+              let isCur = false;
+              if (checkLocalContext && !foundCur && (!curTag || cName === curTag)) {
+                if (depth > 0 && focusQueryWorks) {
+                  try {
+                    isCur = Boolean(await child.querySelector(FOCUS_SELECTOR));
+                  } catch {}
+                } else if (depth === 0 && elRect && typeof child.getBoundingClientRect === 'function') {
+                  try {
+                    const cRect = await child.getBoundingClientRect();
+                    isCur = rectsMatch(elRect, cRect);
+                  } catch {}
+                }
+                if (!isCur && !focusQueryWorks && !(depth === 0 && elRect)) {
+                  try {
+                    const cOuter = await child.getOuterHTML();
+                    isCur = cOuter === outerHtml || (depth > 0 && cOuter === curOuter);
+                  } catch {}
+                }
+              }
+
+              if (isCur) {
+                foundCur = true;
+                const candidateLabel = prevPrimarySpan || prevFallbackSpan;
+                if (!nearbyLabel && candidateLabel) {
+                  nearbyLabel = candidateLabel;
+                }
+                if (prevSiblingWasLuaBar) {
+                  luaButtonActive = true;
+                  hasTriggerContainer = true;
+                }
+                continue;
+              }
+
+              // 2. Gather headings, labels, RegexData markers, active tabs, and immediate Lua mode bars
               if (cName === 'h2' || cName === 'h3') {
                 const ht = String((await child.textContent()) || '').trim();
                 if (ht && !headings.includes(ht)) headings.push(ht);
+                if (!foundCur) prevSiblingWasLuaBar = false;
               } else if (cName === 'span' || cName === 'label') {
                 const st = String((await child.textContent()) || '').trim();
-                if (st && st.length <= 60) prevSpanText = st;
+                const cClass = String((await child.getClassName()) || '');
+                if (st && st.length <= 60) {
+                  if (checkLocalContext) {
+                    containerSpanLabels.push(normalizeLabel(st));
+                  }
+                  if (!foundCur) {
+                    if (isMutedHelperSpan(cClass, st)) {
+                      if (!isTokenCountText(st)) {
+                        prevFallbackSpan = st;
+                      }
+                    } else {
+                      prevPrimarySpan = st;
+                      prevFallbackSpan = '';
+                      prevSiblingWasLuaBar = false;
+                    }
+                  }
+                }
               } else if (cName === 'button') {
                 const cls = String((await child.getClassName()) || '');
                 const bt = String((await child.textContent()) || '').trim();
-                if (bt === 'Lua' && cls.includes('ring-1')) {
-                  luaButtonActive = true;
-                  hasTriggerContainer = true;
+                if (checkLocalContext && !foundCur) {
+                  if (bt === 'Lua' && cls.includes('ring-1')) {
+                    prevSiblingWasLuaBar = true;
+                  } else {
+                    prevSiblingWasLuaBar = false;
+                  }
                 }
                 if ((cls.includes('bg-selected') || cls.includes('bg-darkbutton')) && bt && bt.length <= 32) {
                   if (!activeTabs.includes(bt)) activeTabs.push(bt);
                 }
-              }
-              // Check if we reached `cur` via outerHTML match to keep the closest preceding label
-              if (!nearbyLabel && prevSpanText && depth <= 2) {
-                const cOuter = await child.getOuterHTML();
-                if (cOuter === outerHtml || (depth > 0 && cOuter === curOuter)) {
-                  nearbyLabel = prevSpanText;
+              } else if (checkLocalContext && !foundCur) {
+                if (cName === 'div') {
+                  const cClass = String((await child.getClassName()) || '');
+                  if (await isLuaModeBar(child, cClass)) {
+                    prevSiblingWasLuaBar = true;
+                  } else {
+                    prevSiblingWasLuaBar = false;
+                    if (
+                      cClass.includes('border-darkborderc') ||
+                      cClass.includes('n-scroll') ||
+                      cClass.includes('border-selected')
+                    ) {
+                      prevPrimarySpan = '';
+                      prevFallbackSpan = '';
+                    }
+                  }
+                } else if (cName === 'input' || cName === 'textarea' || cName === 'select' || cName === 'table') {
+                  prevPrimarySpan = '';
+                  prevFallbackSpan = '';
+                  prevSiblingWasLuaBar = false;
+                } else if (cName !== 'p') {
+                  prevSiblingWasLuaBar = false;
                 }
               }
             }
-            if (!nearbyLabel && prevSpanText && depth <= 2) {
-              nearbyLabel = prevSpanText;
+
+            // Strict RegexData.svelte structural check (direct child labels only; never whole-subtree outerHTML)
+            if (
+              checkLocalContext &&
+              !hasRegexContainer &&
+              (containerSpanLabels.includes('modification type') ||
+                (containerSpanLabels.includes('in:') && containerSpanLabels.includes('out:')))
+            ) {
+              hasRegexContainer = true;
             }
           }
 
@@ -1205,15 +1404,10 @@
           if (!isChatInput && isChatElementAttrs(pAttrs)) {
             isChatInput = true;
           }
-          if (pOuter.includes('triggerScript') || pOuter.includes('Trigger')) {
-            hasTriggerContainer = true;
-          }
-          if (pOuter.includes('regexScript') || pOuter.includes('editdisplay')) {
-            hasRegexContainer = true;
-          }
 
           cur = parent;
           curOuter = pOuter;
+          curTag = pAttrs._tag || '';
         }
 
         // Also look at top-level headings in rootDoc if none found locally
@@ -1989,6 +2183,9 @@
       if (kind === 'persona' && !ALLOWED_PERSONA_TEXT_FIELDS.includes(fieldKey)) {
         return `허용되지 않는 페르소나 필드입니다: ${fieldKey}`;
       }
+      if (kind === 'chat_note' && fieldKey !== 'note') {
+        return `허용되지 않는 작가의 노트 필드입니다: ${fieldKey}`;
+      }
       if (kind === 'config' && !ALLOWED_CONFIG_KEYS.includes(fieldKey)) {
         return `허용되지 않는 설정 키입니다: ${fieldKey}`;
       }
@@ -2393,6 +2590,22 @@
             label: CHAR_FIELD_META[fieldKey]?.label || fieldKey,
             content,
             charName: char.name || '(이름 없음)',
+          };
+        }
+
+        if (t.targetKind === 'chat_note') {
+          const { chat, char, charIndex, chatIndex } = await this.readActiveChat();
+          if (!chat) return { ok: false, reason: '활성 채팅을 찾을 수 없습니다.', content: '' };
+          const fieldKey = t.fieldKey || 'note';
+          const fieldErr = validateAllowedFieldKey('chat_note', fieldKey);
+          if (fieldErr) return { ok: false, reason: fieldErr, content: '' };
+          return {
+            ok: true,
+            target: { ...t, fieldKey: 'note' },
+            hostBinding: { charIndex, chatIndex, ...getCharIdentity(char) },
+            label: '작가의 노트 (현재 채팅)',
+            content: String(chat.note ?? ''),
+            charName: char?.name || '(이름 없음)',
           };
         }
 
@@ -2987,6 +3200,31 @@
             },
           });
           return { ok: true, undoId, summary: `캐릭터 ${CHAR_FIELD_META[fieldKey]?.label || fieldKey}에 적용했습니다.` };
+        }
+
+        if (kind === 'chat_note') {
+          const fieldKey = target.fieldKey || 'note';
+          assertAllowedFieldKey('chat_note', fieldKey);
+          const { chat, charIndex, chatIndex } = await this._requireSameActiveChat(options.hostBinding, '적용');
+          const hadKey = Object.hasOwn(chat, 'note');
+          const prevValue = clone(chat.note);
+
+          const nextChat = clone(chat);
+          nextChat.note = compute(String(nextChat.note ?? ''), '작가의 노트');
+          await this._setChat(charIndex, chatIndex, nextChat);
+
+          const undoId = this._pushUndo({
+            label: '작가의 노트 수정',
+            restore: async () => {
+              const latestChat = await this._readChatAt(charIndex, chatIndex);
+              if (!latestChat) throw new Error('되돌릴 채팅을 찾을 수 없습니다.');
+              const restored = clone(latestChat);
+              if (hadKey) restored.note = clone(prevValue);
+              else delete restored.note;
+              await this._setChat(charIndex, chatIndex, restored);
+            },
+          });
+          return { ok: true, undoId, summary: '현재 채팅의 작가의 노트에 적용했습니다.' };
         }
 
         if (kind === 'char_lorebook') {
@@ -3630,6 +3868,7 @@
     - systemPrompt (시스템 프롬프트): 비어 있지 않으면 전역 메인 프롬프트를 대체합니다.
     - replaceGlobalNote (글로벌 노트 덮어쓰기): 비어 있지 않으면 전역 UJB/글로벌 노트를 대체합니다.
     - backgroundHTML (백그라운드 임베딩): 채팅 배경에 삽입되는 HTML/CSS/마크다운. {{bg::에셋명}}, {{audio::에셋명}} 등을 사용할 수 있습니다.
+    - chat.note (작가의 노트): 현재 채팅 세션에만 주입되는 방향성·문체·전개 지시 메모입니다.
     - creatorNotes (제작자 코멘트): 프롬프트에 직접 들어가지 않는 제작자 안내 메모입니다.`,
 
       lorebook: `[로어북 (Lorebook) 가이드]
@@ -4137,6 +4376,9 @@
       if (kind === 'persona' && !ALLOWED_PERSONA_TEXT_FIELDS.includes(fieldKey)) {
         return `허용되지 않는 페르소나 필드입니다: ${fieldKey}`;
       }
+      if (kind === 'chat_note' && fieldKey !== 'note') {
+        return `허용되지 않는 작가의 노트 필드입니다: ${fieldKey}`;
+      }
       if (kind === 'config' && !ALLOWED_CONFIG_KEYS.includes(fieldKey)) {
         return `허용되지 않는 설정 키입니다: ${fieldKey}`;
       }
@@ -4261,6 +4503,7 @@
     - 필드(fieldKey): ${snapshot?.target?.fieldKey || context?.fieldKey || '없음'}
     - 대상 설명: ${targetLabel}${screenNote}
     ${snapshot?.target?.loreIndex !== null && snapshot?.target?.loreIndex !== undefined ? `- 로어북 인덱스(0-based): ${snapshot.target.loreIndex}` : ''}
+    ${snapshot?.target?.regexIndex !== null && snapshot?.target?.regexIndex !== undefined ? `- 정규식 인덱스(0-based): ${snapshot.target.regexIndex}` : ''}
     ${snapshot?.target?.personaIndex !== null && snapshot?.target?.personaIndex !== undefined ? `- 페르소나 인덱스(0-based): ${snapshot.target.personaIndex}` : ''}
     ${snapshot?.target?.moduleIndex !== null && snapshot?.target?.moduleIndex !== undefined ? `- 모듈 인덱스(0-based): ${snapshot.target.moduleIndex}` : ''}
 
@@ -6860,6 +7103,7 @@
           { value: 'auto', label: this.detectedContext ? `📍 자동 감지: ${this.detectedContext.labelText}` : '📍 자동 감지 (미감지 · 일반)' },
           { value: 'char_field:desc', label: '캐릭터 · 설명 (Description)' },
           { value: 'char_field:firstMessage', label: '캐릭터 · 첫 메시지 (First Message)' },
+          { value: 'chat_note:', label: "채팅 · 작가의 노트 (Author's Note)" },
           { value: 'char_field:systemPrompt', label: '캐릭터 · 시스템 프롬프트' },
           { value: 'char_field:replaceGlobalNote', label: '캐릭터 · 글로벌 노트 덮어쓰기' },
           { value: 'char_field:creatorNotes', label: '캐릭터 · 제작자 코멘트' },
@@ -6895,6 +7139,7 @@
           const [kind, field] = val.split(':');
           const screenMap = {
             char_field: 'character',
+            chat_note: 'character',
             char_lorebook: 'lorebook',
             chat_lorebook: 'lorebook',
             char_lua: 'scripts',
@@ -6909,10 +7154,19 @@
           this.manualTarget = {
             screen: screenMap[kind] || 'unknown',
             targetKind: kind,
-            fieldKey: field || (kind === 'char_lorebook' || kind === 'chat_lorebook' || kind === 'module_lorebook' ? 'content' : kind === 'persona' ? 'personaPrompt' : null),
+            fieldKey: field || (
+              kind === 'chat_note' ? 'note' :
+              kind === 'char_lorebook' || kind === 'chat_lorebook' || kind === 'module_lorebook' ? 'content' :
+              kind === 'persona' ? 'personaPrompt' :
+              null
+            ),
             loreIndex: null,
             loreScope: kind === 'chat_lorebook' ? 'chat' : kind === 'module_lorebook' ? 'module' : kind === 'char_lorebook' ? 'character' : null,
-            labelText: kind === 'char_field' ? (CHAR_FIELD_META[field]?.label || field) : (SCREEN_LABELS[screenMap[kind]] || kind),
+            labelText: kind === 'char_field'
+              ? (CHAR_FIELD_META[field]?.label || field)
+              : kind === 'chat_note'
+                ? '작가의 노트 (현재 채팅)'
+                : (SCREEN_LABELS[screenMap[kind]] || kind),
             warnings: [],
           };
         }

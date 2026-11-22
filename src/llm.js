@@ -337,6 +337,9 @@ function validateFieldKeyForKind(kind, fieldKey) {
   if (kind === 'persona' && !ALLOWED_PERSONA_TEXT_FIELDS.includes(fieldKey)) {
     return `허용되지 않는 페르소나 필드입니다: ${fieldKey}`;
   }
+  if (kind === 'chat_note' && fieldKey !== 'note') {
+    return `허용되지 않는 작가의 노트 필드입니다: ${fieldKey}`;
+  }
   if (kind === 'config' && !ALLOWED_CONFIG_KEYS.includes(fieldKey)) {
     return `허용되지 않는 설정 키입니다: ${fieldKey}`;
   }
@@ -461,6 +464,7 @@ ${knowledge}
 - 필드(fieldKey): ${snapshot?.target?.fieldKey || context?.fieldKey || '없음'}
 - 대상 설명: ${targetLabel}${screenNote}
 ${snapshot?.target?.loreIndex !== null && snapshot?.target?.loreIndex !== undefined ? `- 로어북 인덱스(0-based): ${snapshot.target.loreIndex}` : ''}
+${snapshot?.target?.regexIndex !== null && snapshot?.target?.regexIndex !== undefined ? `- 정규식 인덱스(0-based): ${snapshot.target.regexIndex}` : ''}
 ${snapshot?.target?.personaIndex !== null && snapshot?.target?.personaIndex !== undefined ? `- 페르소나 인덱스(0-based): ${snapshot.target.personaIndex}` : ''}
 ${snapshot?.target?.moduleIndex !== null && snapshot?.target?.moduleIndex !== undefined ? `- 모듈 인덱스(0-based): ${snapshot.target.moduleIndex}` : ''}
 
