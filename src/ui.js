@@ -183,6 +183,7 @@ class RisuHelperApp {
     this.tracker.showFloatingChip = this.settings.showFloatingChip;
     this.tracker.chipPos = normalizeChipPos(this.settings.floatingChipPos);
     const trackerStarted = await this.tracker.start().catch(() => false);
+    await this.adapter.probeHostFlavor(this.tracker.rootDoc).catch(() => {});
 
     // Optional PC auto-dock on startup (strictly opt-in via user settings)
     if (trackerStarted && this.settings.dockMode && this.settings.autoOpenDocked) {

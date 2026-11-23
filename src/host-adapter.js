@@ -253,6 +253,15 @@ function normalizeRegexEntry(input, existing = null) {
   return base;
 }
 
+function isCatchAllProxyApi(api) {
+  return Boolean(api && typeof api.__risuhelper_nonexistent_probe__ === 'function');
+}
+
+function isMissingMethodError(err) {
+  const msg = String(err?.message || err || '').toLowerCase();
+  return msg.includes('not found') || msg.includes('not a function') || msg.includes('undefined');
+}
+
 /**
  * Cross-fork safe adapter for RisuAI Plugin API v3.
  * Works with kwaroran/Risuai, PocketRisu, RisuBard, HaejeokRisuai, RisuNest, and RisuAI-Hardened.
@@ -262,26 +271,94 @@ class HostAdapter {
     this.api = api;
     this.undoStack = [];
     this.maxUndo = 20;
+    this._probedFlavor = null;
+  }
+
+  /**
+   * Probes the real host flavor safely (working around RisuAI Plugin v3's catch-all `window.risuai` Proxy,
+   * where `typeof api.anyName === 'function'` is always true for nonexistent methods).
+   */
+  async probeHostFlavor(rootDoc = null) {
+    if (this._probedFlavor) return this._probedFlavor;
+
+    // 1. Check host document <title> when mainDom is available (zero side effects, works on every fork)
+    if (rootDoc && typeof rootDoc.querySelector === 'function') {
+      try {
+        const titleEl = await rootDoc.querySelector('title');
+        const title = titleEl ? String((await titleEl.textContent()) || '').trim().toLowerCase() : '';
+        if (title.includes('pocketrisu')) {
+          this._probedFlavor = { name: 'PocketRisu', activePersonaAutoSyncs: false, syncLiteCharError: false };
+          return this._probedFlavor;
+        }
+        if (title.includes('risubard')) {
+          this._probedFlavor = { name: 'RisuBard', activePersonaAutoSyncs: false, syncLiteCharError: false };
+          return this._probedFlavor;
+        }
+        if (title.includes('risunest')) {
+          this._probedFlavor = { name: 'RisuNest', activePersonaAutoSyncs: true, syncLiteCharError: true };
+          return this._probedFlavor;
+        }
+        if (title.includes('haejeok') || title.includes('해적')) {
+          this._probedFlavor = { name: 'HaejeokRisuai', activePersonaAutoSyncs: true, syncLiteCharError: false };
+          return this._probedFlavor;
+        }
+        if (title.includes('risuai')) {
+          this._probedFlavor = { name: 'RisuAI', activePersonaAutoSyncs: false, syncLiteCharError: false };
+          return this._probedFlavor;
+        }
+      } catch {}
+    }
+
+    // 2. Non-Proxy object (e.g. unit tests or direct host objects) can safely inspect own properties
+    if (!isCatchAllProxyApi(this.api)) {
+      if (typeof this.api?.risunestCallHostTool === 'function') {
+        this._probedFlavor = { name: 'RisuNest', activePersonaAutoSyncs: true, syncLiteCharError: true };
+        return this._probedFlavor;
+      }
+      if (typeof this.api?._getBardWikiDocuments === 'function') {
+        this._probedFlavor = { name: 'RisuBard', activePersonaAutoSyncs: false, syncLiteCharError: false };
+        return this._probedFlavor;
+      }
+    }
+
+    this._probedFlavor = { name: 'RisuAI', activePersonaAutoSyncs: false, syncLiteCharError: false };
+    return this._probedFlavor;
   }
 
   detectHostFlavor() {
-    if (typeof this.api?.risunestCallHostTool === 'function') {
-      return { name: 'RisuNest', activePersonaAutoSyncs: true, syncLiteCharError: true };
+    if (this._probedFlavor) return this._probedFlavor;
+    // Never trust `typeof api.foo === 'function'` when `window.risuai` is a catch-all Proxy
+    if (!isCatchAllProxyApi(this.api)) {
+      if (typeof this.api?.risunestCallHostTool === 'function') {
+        return { name: 'RisuNest', activePersonaAutoSyncs: true, syncLiteCharError: true };
+      }
+      if (typeof this.api?._getBardWikiDocuments === 'function') {
+        return { name: 'RisuBard', activePersonaAutoSyncs: false, syncLiteCharError: false };
+      }
     }
-    if (typeof this.api?._getBardWikiDocuments === 'function') {
-      return { name: 'RisuBard', activePersonaAutoSyncs: false, syncLiteCharError: false };
-    }
-    return { name: 'RisuAI / Fork', activePersonaAutoSyncs: false, syncLiteCharError: false };
+    return { name: 'RisuAI', activePersonaAutoSyncs: false, syncLiteCharError: false };
   }
 
   async _getCharacter() {
-    if (typeof this.api.getCharacter === 'function') return await this.api.getCharacter();
+    if (typeof this.api.getCharacter === 'function') {
+      try {
+        return await this.api.getCharacter();
+      } catch (err) {
+        if (!isMissingMethodError(err) || typeof this.api.getChar !== 'function') throw err;
+      }
+    }
     if (typeof this.api.getChar === 'function') return await this.api.getChar();
     return null;
   }
 
   async _setCharacter(char) {
-    if (typeof this.api.setCharacter === 'function') return await this.api.setCharacter(char);
+    if (typeof this.api.setCharacter === 'function') {
+      try {
+        return await this.api.setCharacter(char);
+      } catch (err) {
+        if (!isMissingMethodError(err) || typeof this.api.setChar !== 'function') throw err;
+      }
+    }
     if (typeof this.api.setChar === 'function') return await this.api.setChar(char);
     throw new Error('캐릭터 저장 API를 찾을 수 없습니다.');
   }
@@ -350,8 +427,12 @@ class HostAdapter {
       Number.isInteger(charIndex) &&
       charIndex >= 0
     ) {
-      await this.api.setChatToIndex(charIndex, chatIndex, nextChat);
-      return;
+      try {
+        await this.api.setChatToIndex(charIndex, chatIndex, nextChat);
+        return;
+      } catch (err) {
+        if (!isMissingMethodError(err)) throw err;
+      }
     }
     const { char } = await this.readActiveCharacter();
     if (!char || !Array.isArray(char.chats) || !char.chats[chatIndex]) {

@@ -461,4 +461,31 @@ test('HostAdapter supports chat_note (Author\'s Note) preview, apply, validation
   assert.equal(state.character.chats[0].message.length, 3);
 });
 
+test('HostAdapter does not misidentify catch-all Plugin v3 Proxy as RisuNest and detects PocketRisu via rootDoc <title>', async () => {
+  // Real RisuAI / PocketRisu `window.risuai` is a catch-all Proxy returning a function for ANY property name
+  const proxyApi = new Proxy({}, {
+    get(_target, prop) {
+      return async () => { throw new Error(`Method ${String(prop)} not found`); };
+    },
+  });
+  const adapter = new HostAdapter(proxyApi);
+
+  // Even before probing rootDoc, must NEVER falsely report RisuNest!
+  assert.equal(adapter.detectHostFlavor().name, 'RisuAI');
+  assert.equal(adapter.detectHostFlavor().activePersonaAutoSyncs, false);
+
+  // Probing PocketRisu rootDoc <title> identifies PocketRisu accurately
+  const pocketRootDoc = {
+    async querySelector(sel) {
+      if (sel === 'title') return { async textContent() { return 'PocketRisu'; } };
+      return null;
+    },
+  };
+  const flavor = await adapter.probeHostFlavor(pocketRootDoc);
+  assert.equal(flavor.name, 'PocketRisu');
+  assert.equal(adapter.detectHostFlavor().name, 'PocketRisu');
+  assert.equal(flavor.activePersonaAutoSyncs, false);
+});
+
+
 
