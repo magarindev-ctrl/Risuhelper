@@ -345,7 +345,7 @@ const PROPOSAL_KEYS_BY_ACTION = {
   update_persona: ['personaIndex', 'name', 'note', 'personaPrompt', 'largePortrait', 'edits', 'fieldKey', 'fieldEdits', 'bindToCurrentChat'],
   update_config: ['changes'],
   update_greeting: ['greetingIndex', 'edits', 'content'],
-  create_greeting: ['content'],
+  create_greeting: ['content', 'useInCurrentChat'],
 };
 
 function findUnknownProposalKeys(item) {
@@ -555,7 +555,7 @@ function buildConversationMessages({ context, snapshot, extraContext, history, u
 
 ${knowledge}
 
-[현재 감지된 화면 및 대상]
+[현재 감지된 화면 및 대상] (이전 대화에서 다른 화면이나 필드를 언급했더라도, 지금 기준인 현재 상태는 아래 정보입니다)
 - 화면: ${context?.screen || 'unknown'}
 - 대상 종류(targetKind): ${snapshot?.target?.targetKind || context?.targetKind || 'general'}
 - 필드(fieldKey): ${snapshot?.target?.fieldKey || context?.fieldKey || '없음'}
@@ -592,7 +592,7 @@ ${extraBlocks.join('\n\n')}
 - 기존 페르소나 수정: {"action":"update_persona","title":"설명","personaIndex":0,"name":"이름","note":"메모","personaPrompt":"설명","bindToCurrentChat":false}
 - 허용 설정 변경: {"action":"update_config","title":"설명","changes":{"temperature":80,"maxResponse":2000}}
 - 첫 메시지 수정: {"action":"update_greeting","title":"설명","greetingIndex":-1,"edits":[{"before":"...","after":"..."}]} (greetingIndex -1 = 기본 첫 메시지, 0 이상 = 추가 첫 메시지 번호. 전체 교체는 edits 대신 "content":"새 전체 텍스트")
-- 추가 첫 메시지 새로 만들기: {"action":"create_greeting","title":"설명","content":"새 추가 첫 메시지 전체 텍스트"} (기존 항목은 바뀌지 않고 맨 뒤에 추가됨)
+- 추가 첫 메시지 새로 만들기: {"action":"create_greeting","title":"설명","content":"새 추가 첫 메시지 전체 텍스트","useInCurrentChat":false} (기존 항목은 바뀌지 않고 맨 뒤에 추가됨. 사용자가 지금 채팅에서 바로 쓰길 원하면 useInCurrentChat을 true로)
 
 [권장: 긴 코드·Lua·정규식·HTML용 원문 구분자 형식 (JSON 이스케이프 불필요)]
 따옴표·백슬래시·줄바꿈이 많은 Lua/정규식/HTML/긴 본문은 JSON 헤더 아래에 구분자 섹션을 쓰면 이스케이프 오류를 피할 수 있습니다:

@@ -305,3 +305,17 @@ test('greeting actions are part of the protocol: validated, parsed from raw sect
   assert.ok(sys.includes('update_greeting'));
   assert.ok(sys.includes('create_greeting'));
 });
+
+test('create_greeting may ask to use the new greeting in the current chat, and the prompt separates the current screen from earlier turns', async () => {
+  const { findUnknownProposalKeys } = await import('../src/llm.js');
+  assert.equal(validateProposal({ action: 'create_greeting', content: 'x', useInCurrentChat: true }), null);
+  assert.deepEqual(findUnknownProposalKeys({ action: 'create_greeting', content: 'x', useInCurrentChat: true }), []);
+  const sys = buildConversationMessages({
+    context: { screen: 'chat', targetKind: 'general' },
+    snapshot: { label: '채팅 입력 화면', content: '', target: { targetKind: 'general' } },
+    history: [{ role: 'assistant', content: '추가 첫 메시지 필드에 포커스가 있습니다' }],
+    userInput: '하나 더 만들어줘',
+  })[0].content;
+  assert.ok(sys.includes('useInCurrentChat'));
+  assert.match(sys, /이전 대화[^\n]*현재/);
+});

@@ -2010,6 +2010,14 @@ class HostAdapter {
       }
     }
 
+    if (proposal.action === 'update_greeting' || proposal.action === 'create_greeting') {
+      const { char } = await this.readActiveCharacter();
+      if (!char) return '선택된 캐릭터가 없습니다.';
+      if (char.type === 'group') {
+        return '그룹 채팅에는 첫 메시지(firstMessage / alternateGreetings) 구조가 없어 첫 메시지 수정·추가를 지원하지 않습니다.';
+      }
+    }
+
     if (proposal.action === 'update_greeting' && proposal.greetingIndex !== -1) {
       const { char } = await this.readActiveCharacter();
       const list = Array.isArray(char?.alternateGreetings) ? char.alternateGreetings : [];
@@ -2082,7 +2090,8 @@ class HostAdapter {
       if (!kind || nonEditableTextKinds.has(kind)) {
         return {
           ok: false,
-          error: `현재 대상(${kind || '없음'})에는 직접 텍스트 적용을 지원하지 않습니다. 상단에서 편집할 대상을 선택해 주세요.`,
+          error: `현재 대상(${kind || '없음'})에는 직접 텍스트 적용을 지원하지 않습니다. 상단에서 편집할 대상을 선택해 주세요. ` +
+            '첫 메시지를 고치거나 새로 추가하려는 것이라면 대상 선택 없이 update_greeting / create_greeting 제안을 쓰면 됩니다(자동 재요청).',
           label: snap.label,
           target: snap.target,
         };
@@ -2104,6 +2113,24 @@ class HostAdapter {
           error: '수정할 로어북 항목이 선택되지 않았습니다. 상단에서 로어북 항목을 선택하거나 create_lorebook을 사용하세요.',
           label: snap.label,
           target: snap.target,
+        };
+      }
+      if (
+        kind === 'char_alt_greeting' &&
+        !Number.isInteger(snap.target?.greetingIndex) &&
+        snap.greetingCount === 0 &&
+        proposal.action === 'replace_text'
+      ) {
+        // Nothing exists to overwrite, so "fill this empty field" can only mean: add the first one.
+        return {
+          ok: true,
+          createsGreeting: true,
+          before: '',
+          after: String(proposal.content ?? ''),
+          label: `캐릭터 · 추가 첫 메시지 #1 (새로 추가 · ${snap.charName || '무제'})`,
+          target: snap.target,
+          hostBinding: snap.hostBinding,
+          warning: '추가 첫 메시지가 아직 없어 새 항목으로 추가합니다. 기존 첫 메시지와 기존 채팅은 바뀌지 않습니다.',
         };
       }
       if (kind === 'char_alt_greeting' && !Number.isInteger(snap.target?.greetingIndex)) {
@@ -2450,9 +2477,7 @@ class HostAdapter {
           label: snap.label,
           target: { ...snap.target, greetingsShownFull: target.greetingsShownFull },
           hostBinding: snap.hostBinding,
-          warning: proposal.greetingIndex === -1
-            ? '기본 첫 메시지는 이 캐릭터의 모든 채팅에 공통으로 적용됩니다.'
-            : null,
+          warning: await this._greetingScopeNotice(proposal.greetingIndex),
         };
       } catch (err) {
         return { ok: false, error: err.message, before, label: snap.label };
@@ -2467,9 +2492,11 @@ class HostAdapter {
         ok: true,
         before: '',
         after: String(proposal.content ?? ''),
+        createsGreeting: true,
         label: `캐릭터 · 추가 첫 메시지 #${count + 1} (새로 추가 · ${char.name || '무제'})`,
         target: { targetKind: 'char_alt_greeting', fieldKey: 'alternateGreetings' },
         hostBinding: { charIndex, ...getCharIdentity(char) },
+        warning: '새 항목은 맨 뒤에 추가되며 기존 첫 메시지와 기존 채팅은 바뀌지 않습니다.',
       };
     }
 
@@ -2643,6 +2670,13 @@ class HostAdapter {
       }));
     }
 
+    if (kind === 'char_alt_greeting' && !Number.isInteger(target.greetingIndex) && proposal.action === 'replace_text') {
+      const { char } = await this.readActiveCharacter();
+      if (char && (!Array.isArray(char.alternateGreetings) || char.alternateGreetings.length === 0)) {
+        return await this._applyCreateGreeting({ content: proposal.content }, target, options);
+      }
+    }
+
     if (kind === 'char_alt_greeting') {
       return await writeSlot('character', (root) => {
         const idx = target.greetingIndex;
@@ -2746,17 +2780,54 @@ class HostAdapter {
     );
   }
 
+  /**
+   * First messages belong to the character, not to one chat: an edit shows up in every chat that
+   * uses that greeting. Says so, and whether the chat on screen is one of them.
+   */
+  async _greetingScopeNotice(greetingIndex) {
+    let activeIndex = -1;
+    try {
+      const { chat, char } = await this.readActiveChat();
+      const fm = Number.isInteger(chat?.fmIndex) ? chat.fmIndex : -1;
+      activeIndex = fm >= 0 && Array.isArray(char?.alternateGreetings) && char.alternateGreetings[fm] !== undefined ? fm : -1;
+    } catch {}
+    const here = greetingIndex === activeIndex
+      ? '현재 채팅이 사용 중인 첫 메시지라 화면에 바로 반영됩니다.'
+      : '현재 채팅은 다른 첫 메시지를 사용 중이라 지금 화면에는 변화가 없습니다.';
+    return `첫 메시지는 채팅별이 아닌 캐릭터 단위 데이터라, 이 수정은 이 첫 메시지를 쓰는 모든 채팅에 공통으로 반영됩니다. ${here}`;
+  }
+
   async _applyCreateGreeting(proposal, target, options = {}) {
     const opened = await this._openScope('character', proposal, target, options);
+    if (opened.root.type === 'group') {
+      throw new Error('그룹 채팅에는 첫 메시지(firstMessage / alternateGreetings) 구조가 없어 첫 메시지 수정·추가를 지원하지 않습니다.');
+    }
     if (!Array.isArray(opened.root.alternateGreetings)) opened.root.alternateGreetings = [];
     opened.root.alternateGreetings.push(String(proposal.content ?? ''));
     const number = opened.root.alternateGreetings.length;
     const undoId = await opened.commit(`추가 첫 메시지 #${number} 생성`);
+
+    // Optionally make the chat on screen use the new greeting; recorded in the same undo entry.
+    let switched = false;
+    if (options.useInCurrentChat ?? proposal.useInCurrentChat) {
+      try {
+        const { chat, charIndex, chatIndex } = await this.readActiveChat();
+        if (chat) {
+          const nextChat = clone(chat);
+          nextChat.fmIndex = number - 1;
+          await this._commitChat(chat, charIndex, chatIndex, nextChat, '', { appendTo: undoId });
+          switched = true;
+        }
+      } catch {}
+    }
     return {
       ok: true,
       undoId,
       greetingIndex: number - 1,
-      summary: `추가 첫 메시지 #${number}을(를) 새로 만들었습니다. 채팅 화면의 첫 메시지 좌우 화살표로 전환할 수 있습니다.`,
+      switchedCurrentChat: switched,
+      summary: switched
+        ? `추가 첫 메시지 #${number}을(를) 새로 만들고 현재 채팅의 첫 메시지로 전환했습니다.`
+        : `추가 첫 메시지 #${number}을(를) 새로 만들었습니다. 채팅 화면의 첫 메시지 좌우 화살표로 전환할 수 있습니다.`,
     };
   }
 

@@ -1470,3 +1470,79 @@ test('the alternate-greeting target without a chosen item never falls back to ov
   assert.equal(outOfRange.ok, false);
   assert.deepEqual(state.character.alternateGreetings, ['ALT ONE 원문', 'ALT TWO 원문']);
 });
+
+// --- Screenshot cases: empty alternate greetings, chat screen, group chats, scope notices ---
+
+test('a whole-text write to the alternate-greeting target creates the first greeting when none exist', async () => {
+  const { state, adapter } = createGreetingHost();
+  state.character.alternateGreetings = [];
+  const target = { targetKind: 'char_alt_greeting', fieldKey: 'alternateGreetings' };
+  const proposal = { action: 'replace_text', title: '추가 첫 메시지: 새 상황', content: '빈 칸에 들어갈 새 인사' };
+
+  const preview = await adapter.previewProposal(proposal, target);
+  assert.equal(preview.ok, true, preview.error);
+  assert.equal(preview.createsGreeting, true);
+  assert.equal(preview.before, '');
+  assert.match(preview.label, /#1/);
+
+  const res = await adapter.applyProposal(proposal, preview.target, { hostBinding: preview.hostBinding });
+  assert.deepEqual(state.character.alternateGreetings, ['빈 칸에 들어갈 새 인사']);
+  await adapter.undo(res.undoId);
+  assert.deepEqual(state.character.alternateGreetings, []);
+
+  const patch = await adapter.previewProposal({ action: 'patch_text', edits: [{ before: 'a', after: 'b' }] }, target);
+  assert.equal(patch.ok, false, 'there is nothing to patch in an empty list');
+});
+
+test('a new greeting can be switched on for the current chat, and undo restores both the list and the chat', async () => {
+  const { state, adapter } = createGreetingHost();
+  state.character.chats[0].fmIndex = -1;
+  const proposal = { action: 'create_greeting', content: '바로 쓸 새 인사' };
+  const preview = await adapter.previewProposal(proposal, CHAT_SCREEN);
+  const res = await adapter.applyProposal(proposal, preview.target, { hostBinding: preview.hostBinding, useInCurrentChat: true });
+
+  assert.deepEqual(state.character.alternateGreetings, ['ALT ONE 원문', 'ALT TWO 원문', '바로 쓸 새 인사']);
+  assert.equal(state.character.chats[0].fmIndex, 2);
+  assert.equal(adapter.undoUnitCount(), 1, 'greeting and chat switch must be one undo unit');
+
+  await adapter.undo(res.undoId);
+  assert.deepEqual(state.character.alternateGreetings, ['ALT ONE 원문', 'ALT TWO 원문']);
+  assert.equal(state.character.chats[0].fmIndex, -1);
+
+  const off = await adapter.applyProposal(proposal, preview.target, { hostBinding: preview.hostBinding });
+  assert.equal(state.character.chats[0].fmIndex, -1, 'the chat is left alone unless asked');
+  await adapter.undo(off.undoId);
+});
+
+test('greeting actions are refused for group chats, which have no first-message fields', async () => {
+  const { state, adapter } = createGreetingHost();
+  state.character.type = 'group';
+  for (const proposal of [
+    { action: 'update_greeting', greetingIndex: -1, content: 'x' },
+    { action: 'create_greeting', content: 'x' },
+  ]) {
+    const preview = await adapter.previewProposal(proposal, CHAT_SCREEN);
+    assert.equal(preview.ok, false, proposal.action);
+    assert.match(preview.error, /그룹/);
+    await assert.rejects(() => adapter.applyProposal(proposal, CHAT_SCREEN, {}), /그룹/);
+  }
+  assert.deepEqual(state.character.alternateGreetings, ['ALT ONE 원문', 'ALT TWO 원문']);
+});
+
+test('a greeting edit says it affects every chat of the character and whether the current chat shows it', async () => {
+  const { state, adapter } = createGreetingHost();
+  state.character.chats[0].fmIndex = 1;
+  const inUse = await adapter.previewProposal({ action: 'update_greeting', greetingIndex: 1, content: 'x' }, CHAT_SCREEN);
+  assert.match(inUse.warning, /캐릭터 단위/);
+  assert.match(inUse.warning, /현재 채팅이 사용 중/);
+  const notInUse = await adapter.previewProposal({ action: 'update_greeting', greetingIndex: -1, content: 'x' }, CHAT_SCREEN);
+  assert.match(notInUse.warning, /캐릭터 단위/);
+  assert.match(notInUse.warning, /다른 첫 메시지/);
+});
+
+test('a text overwrite sent from the chat screen is refused with a pointer to the greeting actions', async () => {
+  const { adapter } = createGreetingHost();
+  const preview = await adapter.previewProposal({ action: 'replace_text', title: '추가 첫 메시지', content: 'x' }, CHAT_SCREEN);
+  assert.equal(preview.ok, false);
+  assert.match(preview.error, /create_greeting/);
+});

@@ -211,3 +211,33 @@ test('choosing the alternate-greeting target selects no item until the user pick
   assert.equal(ui.buttons('적용').length, 0, 'an overwrite without a chosen item must not be applicable');
   assert.deepEqual(state.character.alternateGreetings, ['기존 1번', '기존 2번']);
 });
+
+test('with no alternate greetings yet, a plain overwrite from that target is applied as the first greeting', async () => {
+  const state = { character: freshCharacter() };
+  state.character.alternateGreetings = [];
+  const reply = '준비했습니다.\n' + proposalBlock({ action: 'replace_text', title: '추가 첫 메시지: 새 상황', content: '빈 칸을 채운 인사' });
+  const ui = await bootBundle({ state, runLLMModel: async () => reply });
+  await ui.selectTarget('char_alt_greeting:');
+  await ui.send('추가 첫 메시지 만들어줘');
+  await ui.click('적용');
+  assert.deepEqual(state.character.alternateGreetings, ['빈 칸을 채운 인사']);
+});
+
+test('the new-greeting card offers to use it in the current chat right away', async () => {
+  const state = { character: freshCharacter() };
+  state.character.alternateGreetings = ['기존'];
+  state.character.chats[0].fmIndex = -1;
+  const reply = '추가합니다.\n' + proposalBlock({ action: 'create_greeting', title: '새 인사', content: '새로 만든 인사' });
+  const ui = await bootBundle({ state, runLLMModel: async () => reply });
+  await ui.send('추가 첫 메시지 만들어줘');
+
+  const label = ui.findAll(n => n.tagName === 'LABEL' && /현재 채팅에서 바로 사용/.test(n.textContent))[0];
+  assert.ok(label, 'the card must offer the option');
+  const checkbox = label.children.find(c => c.tagName === 'INPUT');
+  checkbox.checked = true;
+  for (const fn of checkbox.listeners.get('change') || []) await fn({ target: checkbox });
+
+  await ui.click('적용');
+  assert.deepEqual(state.character.alternateGreetings, ['기존', '새로 만든 인사']);
+  assert.equal(state.character.chats[0].fmIndex, 1);
+});

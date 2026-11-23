@@ -809,6 +809,7 @@ class RisuHelperApp {
           applied: false,
           undoId: null,
           bindToCurrentChat: Boolean(prop.bindToCurrentChat),
+          useInCurrentChat: Boolean(prop.useInCurrentChat),
           destructiveConfirmed: false,
           statusMessage: '',
           unknownKeys: findUnknownProposalKeys(prop),
@@ -946,6 +947,7 @@ class RisuHelperApp {
     try {
       const res = await this.adapter.applyProposal(item.proposal, pinnedTarget, {
         bindToCurrentChat: item.bindToCurrentChat,
+        useInCurrentChat: item.useInCurrentChat,
         hostBinding,
         requireDestructiveConfirm: Boolean(item.preview?.requiresConfirm),
         destructiveConfirmed: Boolean(item.destructiveConfirmed),
@@ -1244,6 +1246,18 @@ class RisuHelperApp {
             onchange: (e) => { item.bindToCurrentChat = Boolean(e.target.checked); },
           }),
           '현재 채팅에 바인딩(즉시 반영)'
+        )
+      );
+    }
+    if (preview.ok && preview.createsGreeting && !item.applied) {
+      leftControls.push(
+        h(doc, 'label', { style: 'font-size:11.5px;display:inline-flex;align-items:center;gap:4px;cursor:pointer;' },
+          h(doc, 'input', {
+            type: 'checkbox',
+            checked: item.useInCurrentChat,
+            onchange: (e) => { item.useInCurrentChat = Boolean(e.target.checked); },
+          }),
+          '현재 채팅에서 바로 사용 (이 채팅의 첫 메시지를 새 항목으로 전환)'
         )
       );
     }
