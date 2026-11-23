@@ -9,7 +9,7 @@ import { newPresetState, validatePresetState, assembleRisuHelperMessages } from 
 import { renderPresetPanel } from './preset-ui.js';
 import { renderMarkdown } from './markdown.js';
 import { planGreetingContext, wantsGreetingText } from './greetings.js';
-import { planFieldContext } from './fields.js';
+import { planFieldContext, mentionedFields, AUTHOR_NOTE_FIELD } from './fields.js';
 
 const DEFAULT_SETTINGS = {
   modelMode: 'model',
@@ -137,6 +137,8 @@ class RisuHelperApp {
       ctx.messageIndex ?? '',
       ctx.moduleIndex ?? '',
       ctx.moduleDomHints?.fingerprint || '',
+      ctx.freeTalk ? '1' : '0',
+      ctx.screenHint || '',
       ctx.labelText || '',
     ].join('|');
   }
@@ -627,6 +629,15 @@ class RisuHelperApp {
     return this.moduleHintSnapshot || null;
   }
 
+  /** Text that belongs in the open module editor's contenteditable box (regex uses entry.out, not JSON). */
+  _moduleSyncText(snap) {
+    if (!snap) return '';
+    if (snap.target?.targetKind === 'module_regex') {
+      return String(snap.entry?.out ?? '');
+    }
+    return String(snap.content ?? '');
+  }
+
   showToast(message) {
     this.toastText = message;
     clearTimeout(this.toastTimer);
@@ -639,32 +650,42 @@ class RisuHelperApp {
 
   async gatherExtraContext(ctx, userInput = '') {
     const extra = {};
-    // First messages: full text when the request is likely about them (chat screen, greeting
-    // target, or the wording), otherwise short previews as part of the character summary.
+    // First messages & character fields: full text when the request mentions them (or on the
+    // chat/greeting screen for first messages), otherwise short previews when char summary is on.
     const wantGreetingText = wantsGreetingText(ctx, userInput);
-    if (this.settings.includeCharSummary || this.settings.includeLoreSummary || wantGreetingText) {
+    const wantFields = mentionedFields(userInput);
+    if (this.settings.includeCharSummary || this.settings.includeLoreSummary || wantGreetingText || wantFields.length > 0) {
       try {
         const { char } = await this.adapter.readActiveCharacter();
         if (char) {
+          let cachedChat;
+          const getActiveChat = async () => {
+            if (cachedChat === undefined) {
+              try {
+                cachedChat = (await this.adapter.readActiveChat()).chat || null;
+              } catch {
+                cachedChat = null;
+              }
+            }
+            return cachedChat;
+          };
+
           if (wantGreetingText || this.settings.includeCharSummary) {
-            let chat = null;
-            try {
-              chat = (await this.adapter.readActiveChat()).chat;
-            } catch {}
-            const plan = planGreetingContext(char, chat, { includeFullText: wantGreetingText });
+            const plan = planGreetingContext(char, await getActiveChat(), { includeFullText: wantGreetingText });
             extra.greetings = { activeIndex: plan.activeIndex, greetings: plan.greetings };
             extra.greetingsShownFull = plan.shownFull;
           }
-          if (this.settings.includeCharSummary) {
+          if (this.settings.includeCharSummary || wantFields.length > 0) {
             // Character text fields + author note: previews, and the full text of whichever
             // field the request mentions (src/fields.js).
-            let noteChat = null;
-            try {
-              noteChat = (await this.adapter.readActiveChat()).chat;
-            } catch {}
-            const fieldPlan = planFieldContext(char, noteChat, { userInput });
+            const fieldPlan = planFieldContext(char, await getActiveChat(), {
+              userInput,
+              onlyMentioned: !this.settings.includeCharSummary,
+            });
             if (fieldPlan.fields.length > 0) extra.fields = fieldPlan.fields;
             extra.fieldsShownFull = fieldPlan.shownFull;
+          }
+          if (this.settings.includeCharSummary) {
             extra.charSummary = {
               name: char.name || '',
               globalLoreCount: char.globalLore?.length ?? 0,
@@ -681,6 +702,32 @@ class RisuHelperApp {
           }
         }
       } catch {}
+    }
+
+    // If the currently selected target is itself a character field, author note, or greeting whose
+    // full text fit inside maxContentChars, record it as shown-in-full so update_field /
+    // update_greeting overwrites are never falsely rejected for lacking a keyword mention.
+    if (this.activeSnapshot?.ok) {
+      const snapText = String(this.activeSnapshot.content ?? '');
+      if (snapText.length <= this.settings.maxContentChars) {
+        const st = this.activeSnapshot.target;
+        const addFullField = (field) => {
+          if (!Array.isArray(extra.fieldsShownFull)) extra.fieldsShownFull = [];
+          if (!extra.fieldsShownFull.includes(field)) extra.fieldsShownFull.push(field);
+        };
+        const addFullGreeting = (idx) => {
+          if (!Array.isArray(extra.greetingsShownFull)) extra.greetingsShownFull = [];
+          if (!extra.greetingsShownFull.includes(idx)) extra.greetingsShownFull.push(idx);
+        };
+        if (st?.targetKind === 'char_field' && st.fieldKey) {
+          addFullField(st.fieldKey);
+          if (st.fieldKey === 'firstMessage') addFullGreeting(-1);
+        } else if (st?.targetKind === 'chat_note') {
+          addFullField(AUTHOR_NOTE_FIELD);
+        } else if (st?.targetKind === 'char_alt_greeting' && Number.isInteger(st.greetingIndex)) {
+          addFullGreeting(st.greetingIndex);
+        }
+      }
     }
 
     if (
@@ -708,9 +755,9 @@ class RisuHelperApp {
     }
 
     // Free talk hints: what the screen shows is context for the model, not a target.
-    if (ctx.freeTalk && this.settings.includeLoreSummary) {
+    if (ctx.freeTalk) {
       // The chat tab of the lorebook is open: list the chat lorebook too.
-      if (ctx.loreScope === 'chat' && !extra.chatLoreSummary) {
+      if (this.settings.includeLoreSummary && ctx.loreScope === 'chat' && !extra.chatLoreSummary) {
         try {
           const snap = await this.adapter.readTargetSnapshot({ targetKind: 'chat_lorebook', loreScope: 'chat' });
           if (snap.ok && Array.isArray(snap.loreSummary)) {
@@ -719,29 +766,62 @@ class RisuHelperApp {
           }
         } catch {}
       }
-      // A module editor is open: say which module it is and list its lorebook, plus the entry
-      // that is expanded, so a module-scoped proposal can name moduleIndex / loreIndex itself.
-      if (ctx.moduleDomHints && !extra.moduleLoreSummary) {
+      // A module editor is open: identify the module and pass the active tab's context
+      // (lorebook list + expanded entry, Lua trigger code, or regex list + expanded entry)
+      // so module-scoped proposals can name moduleIndex / loreIndex / regexIndex accurately.
+      if (ctx.moduleDomHints) {
         try {
-          const openIdx = Number.isInteger(ctx.moduleDomHints.openIdx) ? ctx.moduleDomHints.openIdx : null;
+          const hints = ctx.moduleDomHints;
+          const openIdx = Number.isInteger(hints.openIdx) ? hints.openIdx : null;
+          const tab = hints.tab || 'lorebook';
+          const probeKind =
+            tab === 'trigger' ? 'module_lua' :
+            tab === 'regex' ? 'module_regex' :
+            'module_lorebook';
           const snap = await this.adapter.readTargetSnapshot({
-            targetKind: 'module_lorebook',
-            loreScope: 'module',
-            moduleDomHints: ctx.moduleDomHints,
-            ...(ctx.moduleDomHints.tab === 'lorebook' && openIdx !== null ? { loreIndex: openIdx } : {}),
+            targetKind: probeKind,
+            ...(probeKind === 'module_lorebook' ? { loreScope: 'module', ...(openIdx !== null ? { loreIndex: openIdx } : {}) } : {}),
+            ...(probeKind === 'module_regex' && openIdx !== null ? { regexIndex: openIdx } : {}),
+            moduleDomHints: hints,
           });
           if (snap.ok && !snap.moduleUncertain && snap.module) {
-            if (Array.isArray(snap.loreSummary)) extra.moduleLoreSummary = snap.loreSummary;
-            if (snap.foldersSummary?.length > 0) extra.moduleFoldersSummary = snap.foldersSummary;
-            extra.openModule = {
+            if (this.settings.includeLoreSummary && !extra.moduleLoreSummary) {
+              if (Array.isArray(snap.loreSummary)) {
+                extra.moduleLoreSummary = snap.loreSummary;
+                if (snap.foldersSummary?.length > 0) extra.moduleFoldersSummary = snap.foldersSummary;
+              } else if (Array.isArray(snap.module.lorebook) && snap.module.lorebook.length > 0) {
+                const summarized = summarizeLoreList(snap.module.lorebook);
+                extra.moduleLoreSummary = summarized.loreSummary;
+                if (summarized.foldersSummary.length > 0) extra.moduleFoldersSummary = summarized.foldersSummary;
+              }
+            }
+            const om = {
               moduleIndex: snap.target?.moduleIndex ?? null,
               name: snap.module.name || '',
-              ...(snap.entry && Number.isInteger(snap.target?.loreIndex) ? {
-                expandedLoreIndex: snap.target.loreIndex,
-                expandedLoreTitle: snap.entry.comment || '',
-                expandedLoreContent: String(snap.entry.content ?? '').slice(0, this.settings.maxContentChars),
-              } : {}),
+              tab: hints.tab || null,
             };
+            if (probeKind === 'module_lorebook' && snap.entry && Number.isInteger(snap.target?.loreIndex)) {
+              om.expandedLoreIndex = snap.target.loreIndex;
+              om.expandedLoreTitle = snap.entry.comment || '';
+              om.expandedLoreContent = String(snap.entry.content ?? '').slice(0, this.settings.maxContentChars);
+            } else if (probeKind === 'module_lua') {
+              om.luaCode = String(snap.content ?? '').slice(0, this.settings.maxContentChars);
+              om.hasOtherTriggers = Boolean(snap.hasOtherTriggers);
+            } else if (probeKind === 'module_regex') {
+              if (Array.isArray(snap.regexList) && snap.regexList.length > 0) {
+                om.regexList = snap.regexList.map((r, i) => ({
+                  index: i,
+                  comment: r?.comment || '',
+                  type: r?.type || 'editdisplay',
+                  in: r?.in || '',
+                }));
+              }
+              if (snap.entry && Number.isInteger(snap.target?.regexIndex)) {
+                om.expandedRegexIndex = snap.target.regexIndex;
+                om.expandedRegex = snap.entry;
+              }
+            }
+            extra.openModule = om;
           }
         } catch {}
       }
@@ -972,7 +1052,7 @@ class RisuHelperApp {
 
     const norm = (s) => String(s || '').replace(/\r\n/g, '\n').trim();
     const livePreview = norm(this.detectedContext.liveTextPreview || this.detectedContext.moduleDomHints?.textPreview || '');
-    const dbContent = norm(syncSnap.content || '');
+    const dbContent = norm(this._moduleSyncText(syncSnap));
     if (!livePreview && !dbContent) return false;
     const dbPrefix = dbContent.slice(0, Math.min(dbContent.length, 600)).trim();
     const livePrefix = livePreview.slice(0, Math.min(livePreview.length, 600)).trim();
@@ -1073,7 +1153,7 @@ class RisuHelperApp {
       if (isModuleEdit) {
         item.moduleDbSaved = true;
         item.moduleDomSynced = false;
-        const savedText = item.preview?.after ?? this.activeSnapshot?.content ?? '';
+        const savedText = item.preview?.after ?? this._moduleSyncText(this.activeSnapshot);
         const canFillDom = this.tracker?.enabled && this._isModuleDomFillable(pinnedTarget, item.proposal);
         if (this.settings.autoFillModuleEditor && canFillDom) {
           const syncRes = await this.syncOpenModuleEditor(pinnedTarget, savedText, {
@@ -1116,7 +1196,7 @@ class RisuHelperApp {
         const pinnedTarget = item.pinnedTarget || item.preview?.target;
         const hostBinding = item.hostBinding || item.preview?.hostBinding || null;
         if (this.settings.autoFillModuleEditor && this.tracker?.enabled && this._isModuleDomFillable(pinnedTarget, item.proposal)) {
-          const restoredText = item.preview?.before ?? this.activeSnapshot?.content ?? '';
+          const restoredText = item.preview?.before ?? this._moduleSyncText(this.activeSnapshot);
           const syncRes = await this.syncOpenModuleEditor(pinnedTarget, restoredText, {
             moduleId: hostBinding?.moduleId || this.activeSnapshot?.hostBinding?.moduleId || null,
           });
@@ -1246,19 +1326,22 @@ class RisuHelperApp {
         ),
         loreIndex: null,
         loreScope: kind === 'chat_lorebook' ? 'chat' : kind === 'module_lorebook' ? 'module' : kind === 'char_lorebook' ? 'character' : null,
-        labelText: kind === 'char_field'
-          ? (CHAR_FIELD_META[field]?.label || field)
-          : kind === 'char_alt_greeting'
-            ? '캐릭터 · 추가 첫 메시지'
-            : kind === 'chat_note'
-              ? '작가의 노트 (현재 채팅)'
-              : kind === 'chat_message'
-                ? '채팅 · 메시지 수정'
-                : kind === 'module_field'
-                  ? (MODULE_FIELD_META[field]?.label || `모듈 · ${field}`)
-                  : kind === 'config' && field
-                    ? (CONFIG_FIELD_META[field]?.label || `설정 · ${field}`)
-                    : (SCREEN_LABELS[screenMap[kind]] || kind),
+        ...(kind === 'general' ? { freeTalk: true, screenHint: '' } : {}),
+        labelText: kind === 'general'
+          ? '자유대화'
+          : kind === 'char_field'
+            ? (CHAR_FIELD_META[field]?.label || field)
+            : kind === 'char_alt_greeting'
+              ? '캐릭터 · 추가 첫 메시지'
+              : kind === 'chat_note'
+                ? '작가의 노트 (현재 채팅)'
+                : kind === 'chat_message'
+                  ? '채팅 · 메시지 수정'
+                  : kind === 'module_field'
+                    ? (MODULE_FIELD_META[field]?.label || `모듈 · ${field}`)
+                    : kind === 'config' && field
+                      ? (CONFIG_FIELD_META[field]?.label || `설정 · ${field}`)
+                      : (SCREEN_LABELS[screenMap[kind]] || kind),
         warnings: [],
       };
     }
@@ -1412,7 +1495,7 @@ class RisuHelperApp {
             onclick: async () => {
               const syncRes = await this.syncOpenModuleEditor(
                 syncTarget,
-                preview.after ?? this.activeSnapshot?.content ?? '',
+                preview.after ?? this._moduleSyncText(this.activeSnapshot),
                 { moduleId: item.hostBinding?.moduleId || preview.hostBinding?.moduleId || null }
               );
               if (syncRes.ok) {
@@ -2085,9 +2168,10 @@ class RisuHelperApp {
               class: 'rh-btn',
               onclick: async () => {
                 const syncSnap = this._moduleSyncSnapshot();
+                if (!syncSnap) return;
                 const syncRes = await this.syncOpenModuleEditor(
                   syncSnap.target,
-                  syncSnap.content,
+                  this._moduleSyncText(syncSnap),
                   { moduleId: syncSnap.hostBinding?.moduleId || null }
                 );
                 this.showToast(syncRes.ok ? syncRes.message : syncRes.reason);

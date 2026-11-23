@@ -348,3 +348,34 @@ test('update_field is validated, and free talk tells the model what it can do on
     }
   }
 });
+
+test('openModule free-talk hint includes Lua code and regex details when those tabs are open', () => {
+  const sysLua = buildConversationMessages({
+    context: { screen: 'module', targetKind: 'general', freeTalk: true, labelText: '자유대화', screenHint: '모듈 Lua 트리거 스크립트' },
+    snapshot: { label: '자유대화', content: '', target: { targetKind: 'general' } },
+    extraContext: { openModule: { moduleIndex: 2, name: 'HUD', luaCode: 'function onOutput(id) return 1 end' } },
+    history: [],
+    userInput: 'Lua 점검해줘',
+  })[0].content;
+  assert.ok(sysLua.includes('moduleIndex: 2'));
+  assert.ok(sysLua.includes('function onOutput(id) return 1 end'));
+
+  const sysRegex = buildConversationMessages({
+    context: { screen: 'module', targetKind: 'general', freeTalk: true, labelText: '자유대화', screenHint: '모듈 정규식 스크립트 #1' },
+    snapshot: { label: '자유대화', content: '', target: { targetKind: 'general' } },
+    extraContext: {
+      openModule: {
+        moduleIndex: 2,
+        name: 'HUD',
+        regexList: [{ index: 0, comment: 'BG', type: 'editdisplay', in: '<bg>' }],
+        expandedRegexIndex: 0,
+        expandedRegex: { comment: 'BG', in: '<bg>', out: '<div>bg</div>', type: 'editdisplay' },
+      },
+    },
+    history: [],
+    userInput: '정규식 봐줘',
+  })[0].content;
+  assert.ok(sysRegex.includes('regexIndex 0'));
+  assert.ok(sysRegex.includes('<div>bg</div>'));
+});
+

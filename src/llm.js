@@ -565,13 +565,23 @@ function buildConversationMessages({ context, snapshot, extraContext, history, u
   }
   if (extraContext?.openModule) {
     const om = extraContext.openModule;
-    extraBlocks.push(
+    const parts = [
       `[열려 있는 모듈 편집 화면 (참고용 힌트)] 모듈 "${om.name}" (moduleIndex: ${om.moduleIndex}). ` +
-      '이 모듈의 로어북을 고치거나 추가하려면 scope를 "module"로, moduleIndex를 이 값으로 지정하세요.' +
-      (Number.isInteger(om.expandedLoreIndex)
-        ? `\n현재 펼쳐져 있는 항목: loreIndex ${om.expandedLoreIndex} "${om.expandedLoreTitle}". 본문 원문:\n\`\`\`\n${om.expandedLoreContent}\n\`\`\``
-        : '')
-    );
+      '이 모듈의 로어북·정규식·Lua를 고치거나 추가하려면 scope를 "module"로, moduleIndex를 이 값으로 지정하세요.',
+    ];
+    if (Number.isInteger(om.expandedLoreIndex)) {
+      parts.push(`현재 펼쳐져 있는 항목: loreIndex ${om.expandedLoreIndex} "${om.expandedLoreTitle}". 본문 원문:\n\`\`\`\n${om.expandedLoreContent}\n\`\`\``);
+    }
+    if (typeof om.luaCode === 'string') {
+      parts.push(`현재 모듈의 Lua 트리거 코드:\n\`\`\`lua\n${om.luaCode || '(비어 있음)'}\n\`\`\``);
+    }
+    if (Array.isArray(om.regexList) && om.regexList.length > 0) {
+      parts.push(`현재 모듈 정규식 목록 요약:\n${JSON.stringify(om.regexList, null, 2)}`);
+    }
+    if (Number.isInteger(om.expandedRegexIndex) && om.expandedRegex) {
+      parts.push(`현재 펼쳐져 있는 정규식: regexIndex ${om.expandedRegexIndex}\n\`\`\`json\n${JSON.stringify(om.expandedRegex, null, 2)}\n\`\`\``);
+    }
+    extraBlocks.push(parts.join('\n'));
   }
   if (extraContext?.configSummary) {
     extraBlocks.push(`[현재 허용 RisuAI 설정값]\n${JSON.stringify(extraContext.configSummary, null, 2)}`);

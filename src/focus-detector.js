@@ -1791,14 +1791,21 @@ class FocusTracker {
   }
 
   /**
-   * The panel was opened ('overlay' or 'docked'). A field that lost the cursor moments ago is
-   * confirmed as the target; if nothing is selected, the screen hint is refreshed.
+   * The panel was opened ('overlay' or 'docked'). If an input currently has the cursor it wins
+   * immediately (including moving into the chat input); if nothing has focus, a field that lost
+   * the cursor moments ago is confirmed as the target, otherwise the screen hint is refreshed.
    */
   async onPanelOpen(mode = 'overlay') {
     this._cancelPendingFreeTalk();
     this.panelMode = mode === 'docked' ? 'docked' : 'overlay';
-    if (this.rootDoc && (!this.lastContext || this.lastContext.freeTalk)) {
-      await this.scanNow({ force: true });
+    if (!this.rootDoc) return this.lastContext;
+    const focused = await inspectFocusedElement(this.rootDoc, { diagnostics: Boolean(this.diagnostics) });
+    if (focused) {
+      await this._commitContext(focused);
+      return this.lastContext;
+    }
+    if (!this.lastContext || this.lastContext.freeTalk) {
+      await this._commitContext(await this._freeTalkContext());
     }
     return this.lastContext;
   }

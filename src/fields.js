@@ -16,7 +16,7 @@ const FIELD_CONTEXT_BUDGET = 24000;
 // What a request has to say for a field to count as "mentioned". "설명해줘" (explain) must not be
 // read as the description field, hence the negative lookahead.
 const FIELD_KEYWORDS = {
-  desc: /(?<!추가\s?)설명(?!\s*해|\s*좀\s*해|\s*부탁)|디스크립션|(?<!additional\s)description|\bdesc\b/i,
+  desc: /캐릭터\s*설명|(?<!추가\s?)설명(?!서|\s*(?:좀\s*)?(?:해|하|부탁|드리|드려|을\s*해|을\s*부탁)|\s+좀[\s.,?!]*$)|디스크립션|(?<!additional\s)description|\bdesc\b/i,
   additionalText: /추가\s*(디스크립션|설명)|additional\s*(description|text)/i,
   firstMessage: /첫\s*(메시지|메세지|인사|대사)|first\s*message/i,
   creatorNotes: /제작자\s*(코멘트|노트)|creator'?s?\s*(comment|note)/i,
@@ -60,12 +60,21 @@ function readField(char, chat, field) {
  *   shownFull: string[],
  * }}
  */
-function planFieldContext(char, chat, { userInput = '', budget = FIELD_CONTEXT_BUDGET } = {}) {
+function planFieldContext(char, chat, { userInput = '', budget = FIELD_CONTEXT_BUDGET, onlyMentioned = false } = {}) {
+  const isGroup = char?.type === 'group';
   const wanted = new Set(mentionedFields(userInput));
+  // Most RisuAI cards keep personality inside `desc`; when `personality` is empty, also surface `desc`.
+  if (!isGroup && wanted.has('personality') && !readField(char, chat, 'personality').trim()) {
+    wanted.add('desc');
+  }
   let remaining = Math.max(0, Number(budget) || 0);
 
-  const entries = FREE_EDIT_FIELDS
-    .filter(field => field !== 'firstMessage') // first messages have their own list (src/greetings.js)
+  const candidateFields = isGroup
+    ? [AUTHOR_NOTE_FIELD]
+    : FREE_EDIT_FIELDS.filter(field => field !== 'firstMessage'); // first messages have their own list (src/greetings.js)
+
+  const entries = candidateFields
+    .filter(field => !onlyMentioned || wanted.has(field))
     .map(field => ({ field, full: readField(char, chat, field) }))
     .filter(entry => entry.full.length > 0);
 

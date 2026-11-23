@@ -48,3 +48,26 @@ test('the free-edit field list covers character text fields and the author note'
     assert.ok(FREE_EDIT_FIELDS.includes(f), f);
   }
 });
+
+test('mentionedFields avoids Korean explain false positives while recognising explicit desc requests', () => {
+  assert.deepEqual(mentionedFields('로어북 설명 좀 부탁해'), []);
+  assert.deepEqual(mentionedFields('이 옵션 설명 좀'), []);
+  assert.deepEqual(mentionedFields('설명서를 봐줘'), []);
+  assert.deepEqual(mentionedFields('캐릭터 설명 부탁해'), ['desc']);
+  assert.deepEqual(mentionedFields('설명 좀 고쳐줘'), ['desc']);
+  assert.deepEqual(mentionedFields('추가 설명 고쳐줘'), ['additionalText']);
+});
+
+test('planFieldContext filters group chats to authorNote, supports onlyMentioned, and falls back personality to desc when empty', () => {
+  const groupChar = { type: 'group', name: '그룹', desc: long('DESC', 500) };
+  const groupPlan = planFieldContext(groupChar, { note: '그룹 작가노트' }, { userInput: '설명 고쳐줘' });
+  assert.deepEqual(groupPlan.fields.map(f => f.field), ['authorNote']);
+
+  const charNoPers = { name: 'A', desc: long('DESC', 600), personality: '', systemPrompt: long('SYS', 600) };
+  const persFallback = planFieldContext(charNoPers, {}, { userInput: '캐릭터 성격을 까칠하게 바꿔줘' });
+  assert.ok(persFallback.shownFull.includes('desc'), 'when personality is empty, asking about personality surfaces desc in full');
+
+  const only = planFieldContext(charNoPers, { note: '짧은 노트' }, { userInput: '작가의 노트 고쳐줘', onlyMentioned: true });
+  assert.deepEqual(only.fields.map(f => f.field), ['authorNote']);
+});
+

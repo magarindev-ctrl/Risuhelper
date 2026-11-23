@@ -265,3 +265,104 @@ test('free talk: an unrelated request does not ship the long description to the 
   assert.ok(!prompts[0].includes('설명-끝표식'));
   assert.ok(prompts[0].includes('첫 줄.'), 'a short preview is still included');
 });
+
+test('focused char_field allows update_field whole-text overwrite even without repeating the field name', async () => {
+  const state = { character: freshCharacter() };
+  state.character.desc = '긴 원문. ' + '다'.repeat(1200) + ' 끝';
+  const reply = '다시 썼습니다.\n' + proposalBlock({ action: 'update_field', title: '설명 전체 다듬기', field: 'desc', content: '새로 쓴 설명' });
+  const ui = await bootBundle({ state, runLLMModel: async () => reply });
+  await ui.selectTarget('char_field:desc');
+  await ui.send('전체 말투를 시니컬하게 다시 써줘');
+  await ui.click('적용');
+  assert.equal(state.character.desc, '새로 쓴 설명');
+});
+
+test('free talk: mentioned field still ships and applies when includeCharSummary is unchecked', async () => {
+  const state = { character: freshCharacter() };
+  state.character.desc = '원본 설명. ' + '라'.repeat(800) + ' 끝표식';
+  const prompts = [];
+  const reply = '고쳤습니다.\n' + proposalBlock({ action: 'update_field', title: '설명 전체 수정', field: 'desc', content: '완전히 새로운 설명' });
+  const ui = await bootBundle({ state, runLLMModel: async ({ messages }) => { prompts.push(messages[0].content); return reply; } });
+
+  const summaryLabel = ui.findAll(n => n.tagName === 'LABEL' && /캐릭터 요약 참고/.test(n.textContent))[0];
+  const cb = summaryLabel.children.find(c => c.tagName === 'INPUT');
+  cb.checked = false;
+  for (const fn of cb.listeners.get('change') || []) await fn({ target: cb });
+
+  await ui.send('캐릭터 설명 전체 다시 써줘');
+  assert.ok(prompts[0].includes('끝표식'), 'mentioned field full text must still be sent');
+  await ui.click('적용');
+  assert.equal(state.character.desc, '완전히 새로운 설명');
+});
+
+test('manual general target sets freeTalk banner, _focusSignature tracks screenHint, and module regex/Lua free-talk hints & DOM sync stay accurate', async () => {
+  const { RisuHelperApp } = await import('../src/ui.js');
+  const { createMockDocument } = await import('./helpers/mock-document.mjs');
+
+  const writtenToDom = [];
+  const db = {
+    modules: [{
+      id: 'mod-1',
+      name: 'HUD 모듈',
+      lorebook: [],
+      regex: [{ comment: 'BG', in: '<bg>', out: '<div class="bg">ok</div>', type: 'editdisplay', flag: 'g', ableFlag: false }],
+      trigger: [{ comment: '', type: 'start', conditions: [], effect: [{ type: 'triggerlua', code: 'function onOutput(id) return 42 end' }] }],
+    }],
+  };
+  let chatReads = 0;
+  const api = {
+    async getDatabase() { return db; },
+    async getCharacter() { return freshCharacter(); },
+    async getCurrentCharacterIndex() { return 0; },
+    async getCurrentChatIndex() { return 0; },
+    async getChatFromIndex() { chatReads++; return { message: [], note: '채팅 노트', fmIndex: -1 }; },
+  };
+  const app = new RisuHelperApp(api, createMockDocument());
+  app.tracker.enabled = true;
+  app.tracker.syncModuleEditorDom = async (opts) => { writtenToDom.push(opts.text); return { ok: true, message: 'filled' }; };
+
+  // 1. Manual general target sets freeTalk: true and labelText: '자유대화'
+  await app.onSelectTarget('general:');
+  assert.equal(app.manualTarget.freeTalk, true);
+  assert.equal(app.manualTarget.labelText, '자유대화');
+  assert.match(app.doc.body.textContent, /입력칸을 선택하지 않은 상태/);
+
+  // 2. _focusSignature distinguishes screenHint changes within the same screen
+  const sigA = app._focusSignature({ screen: 'settings', targetKind: 'general', freeTalk: true, labelText: '자유대화', screenHint: '설정 / 컨피그 (채팅 봇)' });
+  const sigB = app._focusSignature({ screen: 'settings', targetKind: 'general', freeTalk: true, labelText: '자유대화', screenHint: '설정 / 컨피그 (디스플레이)' });
+  assert.notEqual(sigA, sigB);
+
+  // 3. Module regex DOM mismatch compares entry.out (not JSON) and refill writes entry.out
+  app.manualTarget = null;
+  app.detectedContext = {
+    screen: 'module', targetKind: 'general', freeTalk: true, labelText: '자유대화',
+    moduleDomHints: { tab: 'regex', openIdx: 0, items: [{ idx: 0, title: 'BG' }], textPreview: '<div class="bg">ok</div>', fingerprint: 'r1' },
+  };
+  await app.refreshContextSnapshot();
+  assert.equal(app._hasModuleDomMismatch(), false, 'identical regex out must not trigger false mismatch');
+
+  db.modules[0].regex[0].out = '<div class="bg">updated</div>';
+  await app.refreshContextSnapshot();
+  assert.equal(app._hasModuleDomMismatch(), true, 'real regex out drift must be detected');
+  const syncSnap = app._moduleSyncSnapshot();
+  await app.syncOpenModuleEditor(syncSnap.target, app._moduleSyncText(syncSnap), { moduleId: syncSnap.hostBinding?.moduleId });
+  assert.deepEqual(writtenToDom, ['<div class="bg">updated</div>'], 'refill must write entry.out, never raw JSON');
+
+  // 4. Module regex & Lua free-talk hints reach the model even with includeLoreSummary = false, and readActiveChat runs at most once
+  app.settings.includeLoreSummary = false;
+  chatReads = 0;
+  const extraRegex = await app.gatherExtraContext(app.getEffectiveContext(), '정규식 봐줘');
+  assert.equal(chatReads, 1, 'readActiveChat should not be called twice in one gatherExtraContext');
+  assert.equal(extraRegex.openModule?.expandedRegexIndex, 0);
+  assert.equal(extraRegex.openModule?.expandedRegex?.out, '<div class="bg">updated</div>');
+  assert.equal(extraRegex.openModule?.regexList?.length, 1);
+
+  app.detectedContext = {
+    screen: 'module', targetKind: 'general', freeTalk: true, labelText: '자유대화',
+    moduleDomHints: { tab: 'trigger', openIdx: null, items: [], textPreview: 'function onOutput(id)', fingerprint: 'l1' },
+  };
+  await app.refreshContextSnapshot();
+  const extraLua = await app.gatherExtraContext(app.getEffectiveContext(), 'Lua 디버깅해줘');
+  assert.match(extraLua.openModule?.luaCode || '', /return 42/);
+});
+

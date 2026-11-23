@@ -132,3 +132,18 @@ test('a real focused field still resolves exactly as before on every recorded ho
   assert.equal(ctx.loreIndex, 1);
   assert.equal(ctx.freeTalk, undefined);
 });
+
+test('onPanelOpen picks up a newly focused chat input or field immediately instead of keeping a stale field', async () => {
+  const basic = fixtureDoc('upstream-ko-char-basic', c => c.expect.fieldKey === 'desc');
+  const { tracker } = trackerOn(basic.root, 5000);
+  await tracker.scanNow();
+  assert.equal(tracker.lastContext.fieldKey, 'desc');
+
+  const chatInput = await basic.root.querySelector('textarea.text-input-area');
+  assert.ok(chatInput);
+  basic.root.doc.focused = chatInput;
+  await tracker.onPanelOpen('overlay');
+  assert.equal(tracker.lastContext.freeTalk, true, 'live focus in chat input must override stale desc');
+  assert.equal(tracker.lastContext.screen, 'chat');
+});
+
