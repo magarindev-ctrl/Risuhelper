@@ -126,6 +126,7 @@ const VALID_ACTIONS = new Set([
   'replace_text',
   'create_lorebook',
   'update_lorebook',
+  'organize_lorebook',
   'update_lua',
   'upsert_regex',
   'create_persona',
@@ -380,13 +381,34 @@ function validateProposal(item) {
     return 'replace_text에는 문자열 content가 필요합니다.';
   }
   if (item.action === 'create_lorebook') {
-    if (typeof item.comment !== 'string' || typeof item.content !== 'string') {
+    if (typeof item.comment !== 'string') {
+      return 'create_lorebook에는 comment 문자열이 필요합니다.';
+    }
+    if (item.mode !== 'folder' && typeof item.content !== 'string') {
       return 'create_lorebook에는 comment와 content 문자열이 필요합니다.';
     }
   }
   if (item.action === 'update_lorebook' && item.fieldKey !== undefined) {
     const err = validateFieldKeyForKind('char_lorebook', item.fieldKey);
     if (err) return err;
+  }
+  if (item.action === 'organize_lorebook') {
+    if (!Array.isArray(item.loreIndices) || item.loreIndices.length === 0) {
+      return 'organize_lorebook에는 1개 이상의 loreIndices 정수 배열이 필요합니다.';
+    }
+    for (const idx of item.loreIndices) {
+      if (!Number.isInteger(idx) || idx < 0) {
+        return 'organize_lorebook의 loreIndices는 0 이상의 정수 인덱스 배열이어야 합니다.';
+      }
+    }
+    const isRoot = item.moveToRoot === true || item.folder === '' || item.folder === null;
+    const hasFolderRef =
+      (typeof item.folderName === 'string' && item.folderName.trim().length > 0) ||
+      (typeof item.folder === 'string' && item.folder.trim().length > 0) ||
+      (Number.isInteger(item.folderIndex) && item.folderIndex >= 0);
+    if (!isRoot && !hasFolderRef) {
+      return 'organize_lorebook에는 folderName, folderIndex, 또는 moveToRoot: true 중 하나가 필요합니다.';
+    }
   }
   if (item.action === 'update_lua') {
     if (!item.edits && typeof item.code !== 'string' && typeof item.content !== 'string') {
@@ -435,8 +457,20 @@ function buildConversationMessages({ context, snapshot, extraContext, history, u
   if (extraContext?.charSummary) {
     extraBlocks.push(`[현재 캐릭터 요약]\n${JSON.stringify(extraContext.charSummary, null, 2)}`);
   }
+  if (extraContext?.foldersSummary?.length) {
+    extraBlocks.push(`[캐릭터 로어북 폴더 목록]\n${JSON.stringify(extraContext.foldersSummary, null, 2)}`);
+  }
   if (extraContext?.loreSummary) {
     extraBlocks.push(`[로어북 목록 요약]\n${JSON.stringify(extraContext.loreSummary, null, 2)}`);
+  }
+  if (extraContext?.chatFoldersSummary?.length) {
+    extraBlocks.push(`[현재 채팅 로어북 폴더 목록]\n${JSON.stringify(extraContext.chatFoldersSummary, null, 2)}`);
+  }
+  if (extraContext?.chatLoreSummary) {
+    extraBlocks.push(`[현재 채팅 로어북 목록 요약]\n${JSON.stringify(extraContext.chatLoreSummary, null, 2)}`);
+  }
+  if (extraContext?.moduleFoldersSummary?.length) {
+    extraBlocks.push(`[현재 모듈 로어북 폴더 목록]\n${JSON.stringify(extraContext.moduleFoldersSummary, null, 2)}`);
   }
   if (extraContext?.moduleLoreSummary) {
     extraBlocks.push(`[현재 모듈 로어북 목록 요약]\n${JSON.stringify(extraContext.moduleLoreSummary, null, 2)}`);
@@ -483,12 +517,14 @@ ${extraBlocks.join('\n\n')}
 2. 사용자가 편집·수정·덮어쓰기·새로 생성·설정 변경을 요청할 때는 설명과 함께 \`\`\`risuhelper-proposal 블록을 포함하세요. 사용자가 UI에서 Diff를 검토하고 "적용" 버튼을 눌러야 실제 반영됩니다.
 3. 기존 긴 원문의 일부만 바꿀 때는 반드시 \`patch_text\`를 사용하고, \`before\`에는 위 [현재 대상의 실제 원문]에서 **공백과 줄바꿈까지 정확히 일치하는 고유 구간**을 복사하세요.
 4. 주의: \`patch_text\`/\`replace_text\`에서 \`target\`을 임의로 바꿔 다른 필드를 지정하지 마세요.
+5. 로어북 폴더를 새로 만들어 로어북을 옮기거나 기존 폴더에 여러 로어북을 담을 때는 절대 \`update_lorebook\`을 여러 개로 쪼개거나 \`\\uf000folder:...\` 키를 임의로 지어내지 말고, 반드시 **단일 \`organize_lorebook\` 블록 하나**로 제안하세요.
 
 지원 action 스키마 (표준 JSON):
 - 부분 편집: {"action":"patch_text","title":"설명","edits":[{"before":"원문 구간","after":"수정 구간"}]}
 - 전체 덮어쓰기: {"action":"replace_text","title":"설명","content":"새 전체 텍스트"}
 - 새 로어북 생성: {"action":"create_lorebook","title":"설명","scope":"character|chat|module","comment":"항목명","key":"키1,키2","secondkey":"","selective":false,"alwaysActive":false,"insertorder":100,"content":"본문"}
 - 기존 로어북 수정: {"action":"update_lorebook","title":"설명","scope":"character|chat|module","loreIndex":0,"comment":"항목명","key":"키1,키2","edits":[{"before":"...","after":"..."}]}
+- 로어북 폴더 정리(생성+일괄 이동): {"action":"organize_lorebook","title":"설명","scope":"character|chat|module","folderName":"폴더명","createFolderIfMissing":true,"loreIndices":[0,1,2]} (기존 폴더는 folderName 또는 folderIndex 지정, 최상위 복귀는 "moveToRoot":true)
 - Lua 트리거 수정/생성: {"action":"update_lua","title":"설명","scope":"character|module","edits":[{"before":"...","after":"..."}]} (신규이거나 전체 교체면 "code":"..." 사용)
 - 정규식 생성/수정: {"action":"upsert_regex","title":"설명","scope":"character|module","comment":"이름","in":"패턴","out":"치환","type":"editdisplay|editoutput|editinput|editprocess","flag":"g","ableFlag":true}
 - 새 페르소나 생성: {"action":"create_persona","title":"설명","name":"이름","note":"메모","personaPrompt":"설명","bindToCurrentChat":true}

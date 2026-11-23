@@ -1,7 +1,7 @@
 import { VERSION, STORAGE_KEY, PRESET_STORAGE_KEY, CHAR_FIELD_META, MODULE_FIELD_META, CONFIG_FIELD_META, SCREEN_LABELS } from './version.js';
 import { STYLES } from './style.js';
 import { FocusTracker, normalizeChipPos, MIN_DOCK_VIEWPORT_PX } from './focus-detector.js';
-import { HostAdapter, resolveModuleIndex } from './host-adapter.js';
+import { HostAdapter, resolveModuleIndex, summarizeLoreList } from './host-adapter.js';
 import { callRisuModel, parseAssistantReply, buildConversationMessages } from './llm.js';
 import { buildDiffPreview } from './text-edits.js';
 import { getQuickPromptsForContext } from './knowledge.js';
@@ -42,6 +42,7 @@ const ACTION_LABELS = {
   replace_text: '전체 덮어쓰기',
   create_lorebook: '새 로어북 생성',
   update_lorebook: '로어북 수정',
+  organize_lorebook: '로어북 폴더 정리',
   update_lua: 'Lua 스크립트 수정',
   upsert_regex: '정규식 저장',
   create_persona: '새 페르소나 생성',
@@ -423,26 +424,26 @@ class RisuHelperApp {
 
   async gatherExtraContext(ctx) {
     const extra = {};
-    if (this.settings.includeCharSummary) {
+    if (this.settings.includeCharSummary || this.settings.includeLoreSummary) {
       try {
         const { char } = await this.adapter.readActiveCharacter();
         if (char) {
-          extra.charSummary = {
-            name: char.name || '',
-            descPreview: String(char.desc || '').slice(0, 500),
-            firstMessagePreview: String(char.firstMessage || '').slice(0, 300),
-            globalLoreCount: char.globalLore?.length ?? 0,
-            regexCount: char.customscript?.length ?? 0,
-            hasLua: char.triggerscript?.[0]?.effect?.[0]?.type === 'triggerlua',
-          };
+          if (this.settings.includeCharSummary) {
+            extra.charSummary = {
+              name: char.name || '',
+              descPreview: String(char.desc || '').slice(0, 500),
+              firstMessagePreview: String(char.firstMessage || '').slice(0, 300),
+              globalLoreCount: char.globalLore?.length ?? 0,
+              regexCount: char.customscript?.length ?? 0,
+              hasLua: char.triggerscript?.[0]?.effect?.[0]?.type === 'triggerlua',
+            };
+          }
           if (this.settings.includeLoreSummary && Array.isArray(char.globalLore)) {
-            extra.loreSummary = char.globalLore.slice(0, 30).map((e, i) => ({
-              index: i,
-              comment: e.comment || '',
-              key: e.key || '',
-              alwaysActive: Boolean(e.alwaysActive),
-              insertorder: e.insertorder ?? 100,
-            }));
+            const summarized = summarizeLoreList(char.globalLore);
+            extra.loreSummary = summarized.loreSummary;
+            if (summarized.foldersSummary.length > 0) {
+              extra.foldersSummary = summarized.foldersSummary;
+            }
           }
         }
       } catch {}
@@ -451,10 +452,25 @@ class RisuHelperApp {
     if (
       this.settings.includeLoreSummary &&
       this.activeSnapshot?.ok &&
+      this.activeSnapshot.target?.targetKind === 'chat_lorebook' &&
+      Array.isArray(this.activeSnapshot.loreSummary)
+    ) {
+      extra.chatLoreSummary = this.activeSnapshot.loreSummary;
+      if (this.activeSnapshot.foldersSummary?.length > 0) {
+        extra.chatFoldersSummary = this.activeSnapshot.foldersSummary;
+      }
+    }
+
+    if (
+      this.settings.includeLoreSummary &&
+      this.activeSnapshot?.ok &&
       this.activeSnapshot.target?.targetKind === 'module_lorebook' &&
       Array.isArray(this.activeSnapshot.loreSummary)
     ) {
-      extra.moduleLoreSummary = this.activeSnapshot.loreSummary.slice(0, 30);
+      extra.moduleLoreSummary = this.activeSnapshot.loreSummary;
+      if (this.activeSnapshot.foldersSummary?.length > 0) {
+        extra.moduleFoldersSummary = this.activeSnapshot.foldersSummary;
+      }
     }
 
     if (ctx.targetKind === 'persona' || ctx.screen === 'persona') {
@@ -641,8 +657,11 @@ class RisuHelperApp {
     return false;
   }
 
-  _isModuleDomFillable(target) {
+  _isModuleDomFillable(target, proposal = null) {
     if (!target) return false;
+    if (proposal?.action === 'organize_lorebook' || proposal?.action === 'create_lorebook') {
+      return false;
+    }
     if (target.targetKind === 'module_lorebook') {
       return (target.fieldKey || 'content') === 'content' && Number.isInteger(target.loreIndex) && target.loreIndex >= 0;
     }
@@ -726,6 +745,24 @@ class RisuHelperApp {
     return res;
   }
 
+  async _repreviewSiblingProposals(appliedItem) {
+    const ownerMsg = this.messages.find(m => Array.isArray(m.proposals) && m.proposals.includes(appliedItem));
+    if (!ownerMsg) return;
+    for (const sibling of ownerMsg.proposals) {
+      if (sibling === appliedItem || sibling.applied || sibling.preview?.ok) continue;
+      try {
+        const nextPreview = await this.adapter.previewProposal(sibling.proposal, sibling.pinnedTarget);
+        sibling.preview = nextPreview;
+        if (nextPreview.target) {
+          sibling.pinnedTarget = JSON.parse(JSON.stringify(nextPreview.target));
+        }
+        if (nextPreview.hostBinding) {
+          sibling.hostBinding = JSON.parse(JSON.stringify(nextPreview.hostBinding));
+        }
+      } catch {}
+    }
+  }
+
   async applyProposalItem(item) {
     const pinnedTarget = item.pinnedTarget || item.preview?.target;
     const hostBinding = item.hostBinding || item.preview?.hostBinding || null;
@@ -739,6 +776,9 @@ class RisuHelperApp {
       item.applied = true;
       item.undoId = res.undoId;
       item.statusMessage = res.summary;
+      if (item.proposal?.action === 'create_lorebook' || item.proposal?.action === 'organize_lorebook') {
+        await this._repreviewSiblingProposals(item);
+      }
       await this.refreshContextSnapshot();
 
       const isModuleEdit = this._isModuleTarget(pinnedTarget, item.proposal);
@@ -746,7 +786,7 @@ class RisuHelperApp {
         item.moduleDbSaved = true;
         item.moduleDomSynced = false;
         const savedText = item.preview?.after ?? this.activeSnapshot?.content ?? '';
-        const canFillDom = this.tracker?.enabled && this._isModuleDomFillable(pinnedTarget);
+        const canFillDom = this.tracker?.enabled && this._isModuleDomFillable(pinnedTarget, item.proposal);
         if (this.settings.autoFillModuleEditor && canFillDom) {
           const syncRes = await this.syncOpenModuleEditor(pinnedTarget, savedText, {
             moduleId: hostBinding?.moduleId || this.activeSnapshot?.hostBinding?.moduleId || null,
@@ -787,7 +827,7 @@ class RisuHelperApp {
         item.moduleDomSynced = false;
         const pinnedTarget = item.pinnedTarget || item.preview?.target;
         const hostBinding = item.hostBinding || item.preview?.hostBinding || null;
-        if (this.settings.autoFillModuleEditor && this.tracker?.enabled && this._isModuleDomFillable(pinnedTarget)) {
+        if (this.settings.autoFillModuleEditor && this.tracker?.enabled && this._isModuleDomFillable(pinnedTarget, item.proposal)) {
           const restoredText = item.preview?.before ?? this.activeSnapshot?.content ?? '';
           const syncRes = await this.syncOpenModuleEditor(pinnedTarget, restoredText, {
             moduleId: hostBinding?.moduleId || this.activeSnapshot?.hostBinding?.moduleId || null,
@@ -1058,7 +1098,7 @@ class RisuHelperApp {
       );
     } else if (item.applied) {
       const syncTarget = item.pinnedTarget || preview.target;
-      if (item.moduleDbSaved && this.tracker?.enabled && this._isModuleDomFillable(syncTarget)) {
+      if (item.moduleDbSaved && this.tracker?.enabled && this._isModuleDomFillable(syncTarget, proposal)) {
         rightControls.push(
           h(doc, 'button', {
             class: 'rh-btn',
@@ -1110,6 +1150,17 @@ class RisuHelperApp {
     );
   }
 
+  _formatLoreOptionLabel(item) {
+    if (item.mode === 'folder') {
+      return `#${item.index + 1} 📁 ${item.comment || '(무제 폴더)'}`;
+    }
+    const prefix = item.orphaned
+      ? '⚠️(숨겨짐) '
+      : (item.folderName ? `[${item.folderName}] ` : '');
+    const keyPart = item.key ? ` [${item.key.slice(0, 24)}]` : '';
+    return `#${item.index + 1} ${prefix}${item.comment || '(무제)'}${keyPart}`;
+  }
+
   renderSubItemPicker(ctx) {
     const doc = this.doc;
     if (!this.activeSnapshot?.ok) return null;
@@ -1131,7 +1182,7 @@ class RisuHelperApp {
           h(doc, 'option', {
             value: String(item.index),
             selected: ctx.loreIndex === item.index,
-          }, `#${item.index + 1} ${item.comment || '(무제)'}${item.key ? ` [${item.key.slice(0, 24)}]` : ''}`)
+          }, this._formatLoreOptionLabel(item))
         )
       );
       return sel;
@@ -1245,7 +1296,7 @@ class RisuHelperApp {
             h(doc, 'option', {
               value: String(item.index),
               selected: selectedLoreIdx === item.index,
-            }, `#${item.index + 1} ${item.comment || '(무제)'}${item.key ? ` [${item.key.slice(0, 24)}]` : ''}`)
+            }, this._formatLoreOptionLabel(item))
           )
         );
         return [modSel, loreSel];
@@ -1607,6 +1658,37 @@ class RisuHelperApp {
     if (this.activeSnapshot?.ok && this.activeSnapshot.moduleUncertain) {
       contextBarChildren.push(h(doc, 'div', { class: 'rh-banner error' },
         '열려 있는 모듈을 자동으로 확정하지 못했습니다. 아래 모듈 선택기에서 편집할 모듈을 직접 선택해 주세요. 선택 전에는 모듈 편집 제안을 적용할 수 없습니다.'));
+    }
+
+    if (this.activeSnapshot?.ok && !this.activeSnapshot.moduleUncertain && this.activeSnapshot.orphanedLoreCount > 0) {
+      const orphanCount = this.activeSnapshot.orphanedLoreCount;
+      const scopeLabel = this.activeSnapshot.orphanedLoreScopeLabel || '로어북';
+      const rescueTarget = this.activeSnapshot.orphanedLoreTarget || this.activeSnapshot.target;
+      const rescueHostBinding = this.activeSnapshot.hostBinding || null;
+      contextBarChildren.push(
+        h(doc, 'div', { class: 'rh-banner error', style: 'display:flex;flex-direction:column;gap:6px;' },
+          h(doc, 'div', {}, `🛟 ${scopeLabel}에서 잘못된 폴더 연결로 화면에 숨겨진 로어북 ${orphanCount}개를 발견했습니다. 삭제된 것이 아니라 DB에 그대로 남아 있으며, 아래 버튼으로 최상위 목록에 바로 복구할 수 있습니다.`),
+          h(doc, 'div', { class: 'rh-row' },
+            h(doc, 'button', {
+              class: 'rh-btn primary',
+              onclick: async () => {
+                try {
+                  const res = await this.adapter.recoverOrphanedLorebooks(rescueTarget, { hostBinding: rescueHostBinding });
+                  await this.refreshContextSnapshot();
+                  const isMod = rescueTarget?.loreScope === 'module' || rescueTarget?.targetKind === 'module_lorebook';
+                  this.showToast(
+                    isMod
+                      ? `${res.summary} — ⚠️ 하단 "모듈 수정"을 누르지 말고 다른 설정 탭을 다녀와 다시 여세요!`
+                      : res.summary
+                  );
+                } catch (err) {
+                  this.showToast(`복구 실패: ${err.message}`);
+                }
+              },
+            }, `🛟 숨겨진 로어북 ${orphanCount}개 최상위로 복구`)
+          )
+        )
+      );
     }
 
     if (this._hasModuleDomMismatch()) {

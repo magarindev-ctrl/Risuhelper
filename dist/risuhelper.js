@@ -1,21 +1,21 @@
 //@name risuhelper
 //@display-name RisuHelper
 //@api 3.0
-//@version 0.4.1
+//@version 0.4.2
 //@update-url https://raw.githubusercontent.com/magarindev-ctrl/Risuhelper/main/dist/risuhelper.js
 //@link https://github.com/magarindev-ctrl/Risuhelper RisuHelper GitHub
 
 /*
- * RisuHelper v0.4.1 — RisuAI Plugin API v3
+ * RisuHelper v0.4.2 — RisuAI Plugin API v3
  * License: GPL-3.0-only
  * https://github.com/magarindev-ctrl/Risuhelper
  */
 (() => {
   'use strict';
-  const __RISUHELPER_VERSION__ = "0.4.1";
+  const __RISUHELPER_VERSION__ = "0.4.2";
   const __modules = {
   "src/version.js"(__require, __exports) {
-const VERSION = '0.4.1';
+const VERSION = '0.4.2';
 const PLUGIN_NAME = 'risuhelper';
 const STORAGE_KEY = 'risuhelper_state_v1';
 const PRESET_STORAGE_KEY = 'risuhelper_preset_v1';
@@ -4162,6 +4162,479 @@ function buildLuaDestructiveWarning(otherTriggerCount) {
   );
 }
 
+const LORE_FOLDER_PREFIX = '\uf000folder:';
+const MAX_LORE_SUMMARY_ITEMS = 120;
+
+/**
+ * Ensures a lorebook folder key uses RisuAI's canonical `\uf000folder:<id>` format.
+ * Repairs literal double-escaped `\\uf000folder:...`, stripped `folder:...`, bare IDs, or empty keys.
+ */
+function canonicalizeFolderKey(rawKey) {
+  const s = String(rawKey ?? '').trim();
+  if (!s) return LORE_FOLDER_PREFIX + makeUuid();
+  if (s.startsWith(LORE_FOLDER_PREFIX)) {
+    const suffix = s.slice(LORE_FOLDER_PREFIX.length).trim();
+    return LORE_FOLDER_PREFIX + (suffix || makeUuid());
+  }
+  const literalEscaped = s.match(/^\\+u[fF]000folder:(.*)$/);
+  if (literalEscaped) {
+    const suffix = literalEscaped[1].trim();
+    return LORE_FOLDER_PREFIX + (suffix || makeUuid());
+  }
+  const barePrefix = s.match(/^folder:(.*)$/i);
+  if (barePrefix) {
+    const suffix = barePrefix[1].trim();
+    return LORE_FOLDER_PREFIX + (suffix || makeUuid());
+  }
+  return LORE_FOLDER_PREFIX + s;
+}
+
+function getReachableFolderKeys(list) {
+  if (!Array.isArray(list)) return new Set();
+  const folderByKey = new Map();
+  for (const e of list) {
+    if (e && e.mode === 'folder' && typeof e.key === 'string' && e.key.length > 0) {
+      folderByKey.set(e.key, e);
+    }
+  }
+  const reachable = new Set();
+  for (const [key, folder] of folderByKey.entries()) {
+    const seen = new Set([key]);
+    let cur = folder;
+    let ok = true;
+    while (cur && cur.folder) {
+      if (seen.has(cur.folder) || !folderByKey.has(cur.folder)) {
+        ok = false;
+        break;
+      }
+      seen.add(cur.folder);
+      cur = folderByKey.get(cur.folder);
+    }
+    if (ok) reachable.add(key);
+  }
+  return reachable;
+}
+
+/**
+ * Returns indices of lorebook entries whose `folder` property points to a missing/unreachable folder key.
+ * In RisuAI's LoreBookList.svelte (`(!showFolder && !item.folder) || (showFolder === item.folder)`),
+ * these entries remain in DB but disappear from both the root list and every folder view.
+ */
+function findOrphanedLorebooks(list) {
+  if (!Array.isArray(list)) return [];
+  const reachable = getReachableFolderKeys(list);
+  const orphaned = [];
+  for (let i = 0; i < list.length; i++) {
+    const e = list[i];
+    if (!e || typeof e !== 'object') continue;
+    if (e.folder && !reachable.has(e.folder)) {
+      orphaned.push(i);
+    }
+  }
+  return orphaned;
+}
+
+function buildFolderNameMap(list) {
+  const map = new Map();
+  if (!Array.isArray(list)) return map;
+  for (const e of list) {
+    if (e && e.mode === 'folder' && typeof e.key === 'string' && e.key.length > 0) {
+      map.set(e.key, String(e.comment || '').trim() || '(무제 폴더)');
+    }
+  }
+  return map;
+}
+
+function formatFolderDisplay(val, folderNameMap) {
+  if (val === undefined || val === null || val === '') return '(최상위)';
+  const str = String(val);
+  if (folderNameMap && folderNameMap.has(str)) {
+    return `📁 ${folderNameMap.get(str)}`;
+  }
+  return `⚠️ 알 수 없는 폴더 (${str.replace(/\uf000/g, '')})`;
+}
+
+function computeLoreMetaChanges(beforeObj, afterObj, list, skipKey = null) {
+  const folderNameMap = buildFolderNameMap(list);
+  const raw = computeMetaChanges(beforeObj, afterObj, LORE_META_SPECS, skipKey);
+  return raw.map(ch => {
+    if (ch.key === 'folder') {
+      return {
+        ...ch,
+        before: formatFolderDisplay(beforeObj?.folder, folderNameMap),
+        after: formatFolderDisplay(afterObj?.folder, folderNameMap),
+      };
+    }
+    return ch;
+  });
+}
+
+/**
+ * Resolves a folder reference (`folderIndex`, `folder` key/canonical key/name, or `folderName`)
+ * against the real `mode === 'folder'` entries in `list`, blocking writes to nonexistent folder keys.
+ */
+function resolveFolderRef(list, { folder, folderName, folderIndex } = {}) {
+  const folders = [];
+  if (Array.isArray(list)) {
+    for (let i = 0; i < list.length; i++) {
+      const e = list[i];
+      if (e && e.mode === 'folder' && typeof e.key === 'string' && e.key.length > 0) {
+        folders.push({
+          index: i,
+          entry: e,
+          key: e.key,
+          name: String(e.comment || '').trim(),
+        });
+      }
+    }
+  }
+
+  const hasFolderIndex = folderIndex !== undefined && folderIndex !== null;
+  const hasFolderName = typeof folderName === 'string' && folderName.trim().length > 0;
+
+  if ((folder === '' || folder === null) && !hasFolderName && !hasFolderIndex) {
+    return { ok: true, folderKey: '', folderName: '', folderIndex: null, isRoot: true };
+  }
+
+  if (hasFolderIndex) {
+    if (!Number.isInteger(folderIndex) || folderIndex < 0 || !Array.isArray(list) || !list[folderIndex]) {
+      return { ok: false, error: `폴더 인덱스(#${Number(folderIndex) + 1})를 찾을 수 없습니다.` };
+    }
+    const targetEntry = list[folderIndex];
+    if (targetEntry.mode !== 'folder' || typeof targetEntry.key !== 'string' || !targetEntry.key.length) {
+      return { ok: false, error: `항목 #${folderIndex + 1}은(는) 유효한 로어북 폴더가 아닙니다.` };
+    }
+    return {
+      ok: true,
+      folderKey: targetEntry.key,
+      folderName: String(targetEntry.comment || '').trim() || '(무제 폴더)',
+      folderIndex,
+      isRoot: false,
+    };
+  }
+
+  const findByName = (rawName) => {
+    const norm = String(rawName || '').trim().toLowerCase();
+    if (!norm) return null;
+    const matches = folders.filter(f => f.name.toLowerCase() === norm);
+    if (matches.length === 1) {
+      return {
+        ok: true,
+        folderKey: matches[0].key,
+        folderName: matches[0].name || '(무제 폴더)',
+        folderIndex: matches[0].index,
+        isRoot: false,
+      };
+    }
+    if (matches.length > 1) {
+      const idxList = matches.map(m => `#${m.index + 1}`).join(', ');
+      return {
+        ok: false,
+        ambiguous: true,
+        error: `이름이 "${rawName}"인 폴더가 ${matches.length}개(${idxList}) 있어 대상 폴더를 특정할 수 없습니다. folderIndex를 지정해 주세요.`,
+      };
+    }
+    return null;
+  };
+
+  if (folder !== undefined && folder !== null && String(folder).trim() !== '') {
+    const raw = String(folder).trim();
+    const exact = folders.find(f => f.key === raw);
+    if (exact) {
+      return {
+        ok: true,
+        folderKey: exact.key,
+        folderName: exact.name || '(무제 폴더)',
+        folderIndex: exact.index,
+        isRoot: false,
+      };
+    }
+    const canon = canonicalizeFolderKey(raw);
+    const byCanon = folders.find(f => f.key === canon);
+    if (byCanon) {
+      return {
+        ok: true,
+        folderKey: byCanon.key,
+        folderName: byCanon.name || '(무제 폴더)',
+        folderIndex: byCanon.index,
+        isRoot: false,
+      };
+    }
+    const byName = findByName(raw);
+    if (byName) return byName;
+  }
+
+  if (hasFolderName) {
+    const rawName = folderName.trim();
+    const exact = folders.find(f => f.key === rawName);
+    if (exact) {
+      return {
+        ok: true,
+        folderKey: exact.key,
+        folderName: exact.name || '(무제 폴더)',
+        folderIndex: exact.index,
+        isRoot: false,
+      };
+    }
+    const byName = findByName(rawName);
+    if (byName) return byName;
+  }
+
+  const requested = String(folderName ?? folder ?? '').trim().replace(/\uf000/g, '');
+  const existingHint = folders.length > 0
+    ? ` (현재 폴더: ${folders.slice(0, 12).map(f => `"${f.name || '무제'}"(#${f.index + 1})`).join(', ')})`
+    : ' (현재 생성된 폴더가 없습니다)';
+  return {
+    ok: false,
+    notFound: true,
+    error: `대상 폴더("${requested}")를 찾을 수 없습니다. 존재하지 않는 폴더 키를 지정하면 로어북이 화면에서 숨겨지므로 차단되었습니다. 폴더 생성과 이동을 함께 하려면 organize_lorebook 액션을 사용해 주세요.${existingHint}`,
+  };
+}
+
+/**
+ * Summarizes a lorebook array for both UI pickers and LLM context.
+ * Always includes EVERY `mode === 'folder'` entry regardless of list position, plus up to `maxItems`
+ * regular entries, with human-readable `folderName` instead of raw `\uf000folder:` keys.
+ */
+function summarizeLoreList(list, maxItems = MAX_LORE_SUMMARY_ITEMS) {
+  if (!Array.isArray(list)) {
+    return { loreSummary: [], foldersSummary: [], orphanedLoreIndices: [], orphanedLoreCount: 0 };
+  }
+
+  const folderNameByKey = buildFolderNameMap(list);
+  const childCountByKey = new Map();
+  const orphanedLoreIndices = findOrphanedLorebooks(list);
+  const orphanedSet = new Set(orphanedLoreIndices);
+
+  for (const e of list) {
+    if (e && e.folder && folderNameByKey.has(e.folder)) {
+      childCountByKey.set(e.folder, (childCountByKey.get(e.folder) || 0) + 1);
+    }
+  }
+
+  const foldersSummary = [];
+  const selectedIndices = new Set();
+  let regularCount = 0;
+
+  for (let i = 0; i < list.length; i++) {
+    const e = list[i];
+    if (!e || typeof e !== 'object') continue;
+    if (e.mode === 'folder') {
+      selectedIndices.add(i);
+      if (typeof e.key === 'string' && e.key.length > 0) {
+        foldersSummary.push({
+          index: i,
+          name: String(e.comment || '').trim() || '(무제 폴더)',
+          childCount: childCountByKey.get(e.key) || 0,
+        });
+      }
+    } else if (regularCount < maxItems) {
+      selectedIndices.add(i);
+      regularCount++;
+    }
+  }
+
+  const ordered = [...selectedIndices].sort((a, b) => a - b);
+  const loreSummary = ordered.map(i => {
+    const e = list[i];
+    const isFolder = e.mode === 'folder';
+    const item = {
+      index: i,
+      comment: e.comment || '',
+      key: isFolder ? '' : (e.key || ''),
+      alwaysActive: Boolean(e.alwaysActive),
+      insertorder: e.insertorder ?? 100,
+      mode: e.mode || 'normal',
+    };
+    if (e.folder) {
+      if (folderNameByKey.has(e.folder)) {
+        item.folderName = folderNameByKey.get(e.folder);
+      } else if (orphanedSet.has(i)) {
+        item.orphaned = true;
+      }
+    }
+    return item;
+  });
+
+  return {
+    loreSummary,
+    foldersSummary,
+    orphanedLoreIndices,
+    orphanedLoreCount: orphanedLoreIndices.length,
+  };
+}
+
+function resolveLorebookFolderProposal(list, proposal, existingEntry = null) {
+  const hasFolderSpec =
+    proposal.folder !== undefined ||
+    proposal.folderName !== undefined ||
+    proposal.folderIndex !== undefined;
+  const nextMode =
+    proposal.mode && ['normal', 'constant', 'multiple', 'child', 'folder'].includes(proposal.mode)
+      ? proposal.mode
+      : (existingEntry?.mode || 'normal');
+
+  if (nextMode === 'folder') {
+    const wantsNested =
+      (proposal.folder !== undefined && proposal.folder !== null && String(proposal.folder).trim() !== '') ||
+      (typeof proposal.folderName === 'string' && proposal.folderName.trim() !== '') ||
+      (proposal.folderIndex !== undefined && proposal.folderIndex !== null);
+    if (wantsNested) {
+      return { ok: false, error: '폴더 항목은 다른 폴더 안으로 중첩할 수 없습니다.' };
+    }
+    return { ok: true, resolvedFolder: undefined };
+  }
+
+  if (!hasFolderSpec) {
+    return { ok: true, resolvedFolder: undefined };
+  }
+
+  const ref = resolveFolderRef(list, {
+    folder: proposal.folder,
+    folderName: proposal.folderName,
+    folderIndex: proposal.folderIndex,
+  });
+  if (!ref.ok) return { ok: false, error: ref.error };
+  return {
+    ok: true,
+    resolvedFolder: ref.isRoot ? '' : ref.folderKey,
+    folderName: ref.folderName,
+    folderIndex: ref.folderIndex,
+  };
+}
+
+function planOrganizeLorebook(list, proposal) {
+  if (!Array.isArray(list)) {
+    return { ok: false, error: '대상 로어북 목록을 읽을 수 없습니다.' };
+  }
+  if (!Array.isArray(proposal.loreIndices) || proposal.loreIndices.length === 0) {
+    return { ok: false, error: '이동할 로어북 인덱스(loreIndices)를 1개 이상 지정해야 합니다.' };
+  }
+
+  const uniqueIndices = [];
+  const seen = new Set();
+  for (const rawIdx of proposal.loreIndices) {
+    if (!Number.isInteger(rawIdx) || rawIdx < 0 || rawIdx >= list.length) {
+      return { ok: false, error: `유효하지 않은 로어북 인덱스(#${Number(rawIdx) + 1})가 포함되어 있습니다. (전체 ${list.length}개)` };
+    }
+    if (!seen.has(rawIdx)) {
+      seen.add(rawIdx);
+      uniqueIndices.push(rawIdx);
+    }
+  }
+
+  const isRoot =
+    proposal.moveToRoot === true ||
+    ((proposal.folder === '' || proposal.folder === null) &&
+      proposal.folderName === undefined &&
+      proposal.folderIndex === undefined);
+
+  let willCreateFolder = false;
+  let newFolderName = '';
+  let folderKey = '';
+  let folderLabel = '(최상위)';
+  let folderIndex = null;
+
+  if (!isRoot) {
+    const ref = resolveFolderRef(list, {
+      folder: proposal.folder,
+      folderName: proposal.folderName,
+      folderIndex: proposal.folderIndex,
+    });
+    if (ref.ok && !ref.isRoot) {
+      folderKey = ref.folderKey;
+      folderLabel = ref.folderName || '(무제 폴더)';
+      folderIndex = ref.folderIndex;
+    } else if (
+      ref.notFound &&
+      proposal.createFolderIfMissing !== false &&
+      proposal.folderIndex === undefined
+    ) {
+      const explicitName = typeof proposal.folderName === 'string' ? proposal.folderName.trim() : '';
+      const rawFolder = typeof proposal.folder === 'string' ? proposal.folder.trim() : '';
+      const rawLooksLikeKey = /^(\uf000|\\+u[fF]000)?folder:/i.test(rawFolder);
+      newFolderName = explicitName || (!rawLooksLikeKey ? rawFolder : '');
+      if (!newFolderName) {
+        return { ok: false, error: '새로 만들 폴더 이름(folderName)이 필요합니다.' };
+      }
+      willCreateFolder = true;
+      folderLabel = newFolderName;
+    } else {
+      return { ok: false, error: ref.error };
+    }
+  }
+
+  const movableIndices = [];
+  const skippedFolderIndices = [];
+  for (const idx of uniqueIndices) {
+    const entry = list[idx];
+    if (!isRoot && entry?.mode === 'folder') {
+      skippedFolderIndices.push(idx);
+    } else {
+      movableIndices.push(idx);
+    }
+  }
+
+  if (movableIndices.length === 0) {
+    return { ok: false, error: '이동할 일반 로어북 항목이 없습니다. 폴더 자체는 다른 폴더 안으로 넣을 수 없습니다.' };
+  }
+
+  const folderNameMap = buildFolderNameMap(list);
+  const destDisplay = isRoot ? '(최상위)' : `📁 ${folderLabel}`;
+
+  const beforeLines = movableIndices.map(idx => {
+    const e = list[idx];
+    const title = String(e?.comment || e?.key || '(무제)').trim();
+    const curLoc = formatFolderDisplay(e?.folder, folderNameMap);
+    return `#${idx + 1} ${title}  [${curLoc}]`;
+  });
+
+  const afterLines = [];
+  if (willCreateFolder) {
+    afterLines.push(`📁 새 폴더 생성: "${newFolderName}"`);
+  }
+  for (const idx of movableIndices) {
+    const e = list[idx];
+    const title = String(e?.comment || e?.key || '(무제)').trim();
+    afterLines.push(`#${idx + 1} ${title}  [${destDisplay}]`);
+  }
+
+  const metaChanges = [
+    {
+      key: 'folder',
+      label: '대상 폴더',
+      before: willCreateFolder ? '(신규 폴더 생성)' : (isRoot ? '(기존 위치)' : `📁 ${folderLabel} (#${folderIndex + 1})`),
+      after: destDisplay,
+    },
+    {
+      key: 'count',
+      label: '이동 항목 수',
+      before: `${movableIndices.length}개`,
+      after: `${movableIndices.length}개`,
+    },
+  ];
+
+  const warning = skippedFolderIndices.length > 0
+    ? `⚠️ 폴더 항목(${skippedFolderIndices.map(i => `#${i + 1} "${list[i]?.comment || '무제'}"`).join(', ')})은 중첩할 수 없어 이동 대상에서 제외되었습니다.`
+    : null;
+
+  return {
+    ok: true,
+    isRoot,
+    willCreateFolder,
+    newFolderName,
+    folderKey,
+    folderLabel,
+    folderIndex,
+    movableIndices,
+    skippedFolderIndices,
+    before: beforeLines.join('\n'),
+    after: afterLines.join('\n'),
+    metaChanges,
+    warning,
+  };
+}
+
 function normalizeLorebookEntry(input, existing = null) {
   const base = existing ? clone(existing) : {
     key: '',
@@ -4190,7 +4663,24 @@ function normalizeLorebookEntry(input, existing = null) {
   if (input.mode && ['normal', 'constant', 'multiple', 'child', 'folder'].includes(input.mode)) {
     base.mode = input.mode;
   }
-  if (input.folder !== undefined) base.folder = String(input.folder);
+  if (input.folder !== undefined) {
+    if (input.folder === '' || input.folder === null) {
+      delete base.folder;
+    } else {
+      base.folder = String(input.folder);
+    }
+  }
+  if (base.mode === 'folder') {
+    if (existing?.mode === 'folder' && existing.key && (!input.key || !String(input.key).trim())) {
+      base.key = canonicalizeFolderKey(existing.key);
+    } else {
+      base.key = canonicalizeFolderKey(base.key);
+    }
+    base.content = '';
+    base.secondkey = '';
+    base.selective = false;
+    delete base.folder;
+  }
   return base;
 }
 
@@ -4427,7 +4917,7 @@ class HostAdapter {
   constructor(api) {
     this.api = api;
     this.undoStack = [];
-    this.maxUndo = 20;
+    this.maxUndo = 100;
     this._probedFlavor = null;
     this._lastMatchedModuleId = null;
   }
@@ -4753,6 +5243,7 @@ class HostAdapter {
       const content = fieldKey === 'depthPrompt'
         ? String(char.depth_prompt?.prompt ?? '')
         : String(char[fieldKey] ?? '');
+      const orphanedCharLore = findOrphanedLorebooks(char.globalLore);
       return {
         ok: true,
         target: { ...t, fieldKey },
@@ -4760,6 +5251,12 @@ class HostAdapter {
         label: CHAR_FIELD_META[fieldKey]?.label || fieldKey,
         content,
         charName: char.name || '(이름 없음)',
+        ...(orphanedCharLore.length > 0 ? {
+          orphanedLoreCount: orphanedCharLore.length,
+          orphanedLoreIndices: orphanedCharLore,
+          orphanedLoreScopeLabel: '캐릭터 로어북',
+          orphanedLoreTarget: { targetKind: 'char_lorebook', loreScope: 'character' },
+        } : {}),
       };
     }
 
@@ -4861,6 +5358,7 @@ class HostAdapter {
       const fieldKey = t.fieldKey || 'content';
       const fieldErr = validateAllowedFieldKey('char_lorebook', fieldKey);
       if (fieldErr) return { ok: false, reason: fieldErr, content: '' };
+      const { loreSummary, foldersSummary, orphanedLoreIndices, orphanedLoreCount } = summarizeLoreList(list);
       return {
         ok: true,
         target: { ...t, loreIndex: idx, fieldKey },
@@ -4869,14 +5367,14 @@ class HostAdapter {
         content: entry ? String(entry[fieldKey] ?? '') : '',
         entry,
         loreCount: list.length,
-        loreSummary: list.slice(0, 40).map((e, i) => ({
-          index: i,
-          comment: e.comment || '',
-          key: e.key || '',
-          alwaysActive: Boolean(e.alwaysActive),
-          insertorder: e.insertorder ?? 100,
-          mode: e.mode || 'normal',
-        })),
+        loreSummary,
+        foldersSummary,
+        orphanedLoreIndices,
+        orphanedLoreCount,
+        ...(orphanedLoreCount > 0 ? {
+          orphanedLoreScopeLabel: '캐릭터 로어북',
+          orphanedLoreTarget: { targetKind: 'char_lorebook', loreScope: 'character' },
+        } : {}),
       };
     }
 
@@ -4889,6 +5387,7 @@ class HostAdapter {
       const fieldKey = t.fieldKey || 'content';
       const fieldErr = validateAllowedFieldKey('chat_lorebook', fieldKey);
       if (fieldErr) return { ok: false, reason: fieldErr, content: '' };
+      const { loreSummary, foldersSummary, orphanedLoreIndices, orphanedLoreCount } = summarizeLoreList(list);
       return {
         ok: true,
         target: { ...t, loreIndex: idx, fieldKey },
@@ -4897,13 +5396,14 @@ class HostAdapter {
         content: entry ? String(entry[fieldKey] ?? '') : '',
         entry,
         loreCount: list.length,
-        loreSummary: list.slice(0, 40).map((e, i) => ({
-          index: i,
-          comment: e.comment || '',
-          key: e.key || '',
-          alwaysActive: Boolean(e.alwaysActive),
-          insertorder: e.insertorder ?? 100,
-        })),
+        loreSummary,
+        foldersSummary,
+        orphanedLoreIndices,
+        orphanedLoreCount,
+        ...(orphanedLoreCount > 0 ? {
+          orphanedLoreScopeLabel: '채팅 로어북',
+          orphanedLoreTarget: { targetKind: 'chat_lorebook', loreScope: 'chat' },
+        } : {}),
       };
     }
 
@@ -4993,6 +5493,9 @@ class HostAdapter {
       let resolvedRegexIdx = t.regexIndex;
       let loreCount;
       let loreSummary;
+      let foldersSummary;
+      let orphanedLoreIndices;
+      let orphanedLoreCount;
       let regexList;
 
       if (t.targetKind === 'module_field') {
@@ -5031,15 +5534,22 @@ class HostAdapter {
         const entryTitle = entry?.comment ? ` · ${entry.comment}` : '';
         label = entry ? `모듈 로어북 (${mod.name} #${lIdx + 1}${entryTitle})` : `모듈 로어북 (${mod.name}, ${list.length}개)`;
         loreCount = list.length;
-        loreSummary = list.slice(0, 40).map((e, i) => ({
-          index: i,
-          comment: e.comment || '',
-          key: e.key || '',
-          alwaysActive: Boolean(e.alwaysActive),
-          insertorder: e.insertorder ?? 100,
-          mode: e.mode || 'normal',
-        }));
+        const summarized = summarizeLoreList(list);
+        loreSummary = summarized.loreSummary;
+        foldersSummary = summarized.foldersSummary;
+        orphanedLoreIndices = summarized.orphanedLoreIndices;
+        orphanedLoreCount = summarized.orphanedLoreCount;
       }
+
+      const moduleUncertain = isUncertainModuleMatch(resolvedMod.matchedBy);
+      if (!moduleUncertain && orphanedLoreCount === undefined) {
+        const modOrphaned = findOrphanedLorebooks(mod.lorebook);
+        if (modOrphaned.length > 0) {
+          orphanedLoreIndices = modOrphaned;
+          orphanedLoreCount = modOrphaned.length;
+        }
+      }
+
       return {
         ok: true,
         target: {
@@ -5051,14 +5561,19 @@ class HostAdapter {
         },
         hostBinding: { moduleIndex: modIdx, moduleId: mod.id || null },
         moduleMatchedBy: resolvedMod.matchedBy,
-        moduleUncertain: isUncertainModuleMatch(resolvedMod.matchedBy),
+        moduleUncertain,
         label,
         content,
         entry,
         isLua,
         hasOtherTriggers,
         otherTriggerCount,
-        ...(loreSummary !== undefined ? { loreCount, loreSummary } : {}),
+        ...(loreSummary !== undefined ? { loreCount, loreSummary, foldersSummary } : {}),
+        ...(orphanedLoreCount !== undefined ? { orphanedLoreIndices, orphanedLoreCount } : {}),
+        ...(!moduleUncertain && orphanedLoreCount > 0 ? {
+          orphanedLoreScopeLabel: `모듈 "${mod.name || '무제'}" 로어북`,
+          orphanedLoreTarget: { targetKind: 'module_lorebook', loreScope: 'module', moduleIndex: modIdx },
+        } : {}),
         ...(regexList !== undefined ? { regexList } : {}),
         module: mod,
         modulesSummary: modules.map((m, i) => ({
@@ -5088,14 +5603,22 @@ class HostAdapter {
 
     if (t.screen === 'chat') {
       try {
-        const { char } = await this.readActiveCharacter();
+        const { char, charIndex } = await this.readActiveCharacter();
         if (char) {
+          const orphanedCharLore = findOrphanedLorebooks(char.globalLore);
           return {
             ok: true,
             target: t,
+            hostBinding: { charIndex, ...getCharIdentity(char) },
             label: `채팅 화면 (${char.name || '이름 없음'})`,
             content: '',
             charName: char.name || '',
+            ...(orphanedCharLore.length > 0 ? {
+              orphanedLoreCount: orphanedCharLore.length,
+              orphanedLoreIndices: orphanedCharLore,
+              orphanedLoreScopeLabel: '캐릭터 로어북',
+              orphanedLoreTarget: { targetKind: 'char_lorebook', loreScope: 'character' },
+            } : {}),
           };
         }
       } catch {}
@@ -5115,6 +5638,63 @@ class HostAdapter {
       this.undoStack.shift();
     }
     return this.undoStack[this.undoStack.length - 1].id;
+  }
+
+  async _loadLorebookForPreview(scope, proposal, target) {
+    if (scope === 'chat') {
+      const { chat, char, charIndex, chatIndex } = await this.readActiveChat();
+      if (!chat) return { ok: false, error: '활성 채팅을 찾을 수 없습니다.' };
+      const list = Array.isArray(chat.localLore) ? chat.localLore : [];
+      return {
+        ok: true,
+        list,
+        scopeLabel: '채팅 로어북',
+        target: { ...target, targetKind: 'chat_lorebook', loreScope: 'chat' },
+        hostBinding: { charIndex, chatIndex, ...getCharIdentity(char) },
+      };
+    }
+
+    if (scope === 'module') {
+      const { modules, permissionDenied } = await this.readModules();
+      if (permissionDenied) return { ok: false, error: DB_PERMISSION_ERROR };
+      const modTarget = {
+        ...target,
+        targetKind: 'module_lorebook',
+        moduleIndex: proposal.moduleIndex ?? target.moduleIndex,
+        moduleDomHints: proposal.moduleIndex === undefined ? target.moduleDomHints : undefined,
+      };
+      const resolvedMod = resolveModuleIndex(modules, modTarget, this._lastMatchedModuleId);
+      const modIdx = resolvedMod.index;
+      const mod = modIdx !== null ? modules[modIdx] : null;
+      if (!mod) return { ok: false, error: '대상 모듈을 찾을 수 없습니다.' };
+      if (isUncertainModuleMatch(resolvedMod.matchedBy)) {
+        return {
+          ok: false,
+          error: MODULE_UNCERTAIN_ERROR,
+          label: `모듈 로어북 (${mod.name || '무제'})`,
+          target: { ...modTarget, moduleIndex: modIdx, loreScope: 'module' },
+        };
+      }
+      const list = Array.isArray(mod.lorebook) ? mod.lorebook : [];
+      return {
+        ok: true,
+        list,
+        scopeLabel: `모듈 "${mod.name || '무제'}" 로어북`,
+        target: { ...modTarget, moduleIndex: modIdx, loreScope: 'module' },
+        hostBinding: { moduleIndex: modIdx, moduleId: mod.id || null },
+      };
+    }
+
+    const { char, charIndex } = await this.readActiveCharacter();
+    if (!char) return { ok: false, error: '선택된 캐릭터가 없습니다.' };
+    const list = Array.isArray(char.globalLore) ? char.globalLore : [];
+    return {
+      ok: true,
+      list,
+      scopeLabel: '캐릭터 로어북',
+      target: { ...target, targetKind: 'char_lorebook', loreScope: 'character' },
+      hostBinding: { charIndex, ...getCharIdentity(char) },
+    };
   }
 
   /**
@@ -5257,7 +5837,7 @@ class HostAdapter {
     }
 
     if (proposal.action === 'update_lorebook') {
-      const scope = proposal.scope || target.loreScope || 'character';
+      const scope = proposal.scope || target.loreScope || (target.targetKind?.startsWith('module_') ? 'module' : target.targetKind === 'chat_lorebook' ? 'chat' : 'character');
       const targetKind = scope === 'chat' ? 'chat_lorebook' : scope === 'module' ? 'module_lorebook' : 'char_lorebook';
       const loreIndex = Number.isInteger(proposal.loreIndex) ? proposal.loreIndex : target.loreIndex;
       const fieldKey = proposal.fieldKey || 'content';
@@ -5280,7 +5860,18 @@ class HostAdapter {
         if (truncErr) return { ok: false, error: truncErr, before, label: snap.label, target: snap.target };
       }
 
-      const nextEntry = normalizeLorebookEntry(proposal, snap.entry);
+      const loaded = await this._loadLorebookForPreview(scope, proposal, snap.target);
+      if (!loaded.ok) return { ok: false, error: loaded.error, before, label: snap.label, target: snap.target };
+
+      const folderRes = resolveLorebookFolderProposal(loaded.list, proposal, snap.entry);
+      if (!folderRes.ok) {
+        return { ok: false, error: folderRes.error, before, label: snap.label, target: snap.target };
+      }
+
+      const resolvedInput = folderRes.resolvedFolder !== undefined
+        ? { ...proposal, folder: folderRes.resolvedFolder }
+        : proposal;
+      const nextEntry = normalizeLorebookEntry(resolvedInput, snap.entry);
       if (proposal.edits) {
         try {
           nextEntry[fieldKey] = applyTextEdits(before, proposal.edits, '로어북');
@@ -5289,7 +5880,7 @@ class HostAdapter {
         }
       }
       const after = String(nextEntry[fieldKey] ?? '');
-      const metaChanges = computeMetaChanges(snap.entry, nextEntry, LORE_META_SPECS, fieldKey);
+      const metaChanges = computeLoreMetaChanges(snap.entry, nextEntry, loaded.list, fieldKey);
       return {
         ok: true,
         before,
@@ -5298,6 +5889,33 @@ class HostAdapter {
         label: snap.label,
         target: snap.target,
         hostBinding: snap.hostBinding || null,
+      };
+    }
+
+    if (proposal.action === 'organize_lorebook') {
+      const scope = proposal.scope || target.loreScope || (target.targetKind?.startsWith('module_') ? 'module' : target.targetKind === 'chat_lorebook' ? 'chat' : 'character');
+      const loaded = await this._loadLorebookForPreview(scope, proposal, target);
+      if (!loaded.ok) {
+        return { ok: false, error: loaded.error, label: loaded.label, target: loaded.target };
+      }
+      const plan = planOrganizeLorebook(loaded.list, proposal);
+      if (!plan.ok) {
+        return { ok: false, error: plan.error, label: loaded.scopeLabel, target: loaded.target };
+      }
+      const defaultTitle = plan.isRoot
+        ? `${loaded.scopeLabel} · ${plan.movableIndices.length}개 항목 최상위로 이동`
+        : plan.willCreateFolder
+          ? `${loaded.scopeLabel} · "${plan.newFolderName}" 폴더 생성 및 ${plan.movableIndices.length}개 이동`
+          : `${loaded.scopeLabel} · "${plan.folderLabel}" 폴더로 ${plan.movableIndices.length}개 이동`;
+      return {
+        ok: true,
+        before: plan.before,
+        after: plan.after,
+        metaChanges: plan.metaChanges,
+        warning: plan.warning,
+        label: proposal.title || defaultTitle,
+        target: loaded.target,
+        hostBinding: loaded.hostBinding || null,
       };
     }
 
@@ -5393,27 +6011,42 @@ class HostAdapter {
     }
 
     if (proposal.action === 'create_lorebook') {
-      const scope = proposal.scope || target.loreScope || 'character';
-      const targetKind = scope === 'chat' ? 'chat_lorebook' : scope === 'module' ? 'module_lorebook' : 'char_lorebook';
-      const snap = await this.readTargetSnapshot({
-        targetKind,
-        moduleIndex: proposal.moduleIndex ?? target.moduleIndex,
-        moduleDomHints: proposal.moduleIndex === undefined ? target.moduleDomHints : undefined,
-      });
-      if (!snap.ok) return { ok: false, error: snap.reason };
-      if (snap.moduleUncertain) return { ok: false, error: MODULE_UNCERTAIN_ERROR, label: snap.label, target: snap.target };
-      const nextEntry = normalizeLorebookEntry(proposal);
+      const scope = proposal.scope || target.loreScope || (target.targetKind?.startsWith('module_') ? 'module' : target.targetKind === 'chat_lorebook' ? 'chat' : 'character');
+      const loaded = await this._loadLorebookForPreview(scope, proposal, target);
+      if (!loaded.ok) {
+        return { ok: false, error: loaded.error, label: loaded.label, target: loaded.target };
+      }
+      const folderRes = resolveLorebookFolderProposal(loaded.list, proposal, null);
+      if (!folderRes.ok) {
+        return { ok: false, error: folderRes.error, label: loaded.scopeLabel, target: loaded.target };
+      }
+      const resolvedInput = folderRes.resolvedFolder !== undefined
+        ? { ...proposal, folder: folderRes.resolvedFolder }
+        : proposal;
+      const nextEntry = normalizeLorebookEntry(resolvedInput);
+      const folderNameMap = buildFolderNameMap(loaded.list);
       const metaChanges = LORE_META_SPECS
-        .filter(([k]) => nextEntry[k] !== undefined && nextEntry[k] !== '' && nextEntry[k] !== false)
-        .map(([key, label]) => ({ key, label, before: '(신규)', after: formatMetaValue(nextEntry[key]) }));
+        .filter(([k]) => {
+          if (nextEntry.mode === 'folder' && k === 'key') return false;
+          return nextEntry[k] !== undefined && nextEntry[k] !== '' && nextEntry[k] !== false;
+        })
+        .map(([key, label]) => ({
+          key,
+          label,
+          before: '(신규)',
+          after: key === 'folder' ? formatFolderDisplay(nextEntry[key], folderNameMap) : formatMetaValue(nextEntry[key]),
+        }));
+      const defaultLabel = nextEntry.mode === 'folder'
+        ? `새 로어북 폴더 (${nextEntry.comment})`
+        : `새 로어북 (${nextEntry.comment})`;
       return {
         ok: true,
         before: '',
         after: String(nextEntry.content ?? ''),
         metaChanges,
-        label: proposal.title || `새 로어북 (${nextEntry.comment})`,
-        target: snap.target,
-        hostBinding: snap.hostBinding || null,
+        label: proposal.title || defaultLabel,
+        target: loaded.target,
+        hostBinding: loaded.hostBinding || null,
       };
     }
 
@@ -5475,6 +6108,8 @@ class HostAdapter {
         return await this._applyCreateLorebook(proposal, target, options);
       case 'update_lorebook':
         return await this._applyUpdateLorebook(proposal, target, options);
+      case 'organize_lorebook':
+        return await this._applyOrganizeLorebook(proposal, target, options);
       case 'update_lua':
         return await this._applyUpdateLua(proposal, target, options);
       case 'upsert_regex':
@@ -5794,13 +6429,21 @@ class HostAdapter {
   }
 
   async _applyCreateLorebook(proposal, target, options = {}) {
-    const scope = proposal.scope || target.loreScope || 'character';
-    const entry = normalizeLorebookEntry(proposal);
+    const scope = proposal.scope || target.loreScope || (target.targetKind?.startsWith('module_') ? 'module' : target.targetKind === 'chat_lorebook' ? 'chat' : 'character');
+    const buildEntry = (liveList) => {
+      const folderRes = resolveLorebookFolderProposal(liveList, proposal, null);
+      if (!folderRes.ok) throw new Error(folderRes.error);
+      const resolvedInput = folderRes.resolvedFolder !== undefined
+        ? { ...proposal, folder: folderRes.resolvedFolder }
+        : proposal;
+      return normalizeLorebookEntry(resolvedInput);
+    };
 
     if (scope === 'chat') {
       const { chat, charIndex, chatIndex } = await this._requireSameActiveChat(options.hostBinding, '적용');
       const nextChat = clone(chat);
       nextChat.localLore = Array.isArray(nextChat.localLore) ? nextChat.localLore : [];
+      const entry = buildEntry(nextChat.localLore);
       const insertedIndex = nextChat.localLore.length;
       nextChat.localLore.push(entry);
       await this._setChat(charIndex, chatIndex, nextChat);
@@ -5829,6 +6472,7 @@ class HostAdapter {
       const moduleId = modules[modIdx].id;
       const nextModules = clone(modules);
       nextModules[modIdx].lorebook = Array.isArray(nextModules[modIdx].lorebook) ? nextModules[modIdx].lorebook : [];
+      const entry = buildEntry(nextModules[modIdx].lorebook);
       const insertedIndex = nextModules[modIdx].lorebook.length;
       nextModules[modIdx].lorebook.push(entry);
       await this.writeDbSubset({ modules: nextModules });
@@ -5855,6 +6499,7 @@ class HostAdapter {
     const charBinding = { charIndex, ...getCharIdentity(char) };
     const nextChar = clone(char);
     nextChar.globalLore = Array.isArray(nextChar.globalLore) ? nextChar.globalLore : [];
+    const entry = buildEntry(nextChar.globalLore);
     const insertedIndex = nextChar.globalLore.length;
     nextChar.globalLore.push(entry);
     await this._setCharacter(nextChar);
@@ -5875,7 +6520,7 @@ class HostAdapter {
   }
 
   async _applyUpdateLorebook(proposal, target, options = {}) {
-    const scope = proposal.scope || target.loreScope || 'character';
+    const scope = proposal.scope || target.loreScope || (target.targetKind?.startsWith('module_') ? 'module' : target.targetKind === 'chat_lorebook' ? 'chat' : 'character');
     const loreIndex = Number.isInteger(proposal.loreIndex) ? proposal.loreIndex : target.loreIndex;
     if (!Number.isInteger(loreIndex) || loreIndex < 0) {
       throw new Error('수정할 로어북 인덱스(loreIndex)가 필요합니다.');
@@ -5883,12 +6528,17 @@ class HostAdapter {
     const fieldKey = proposal.fieldKey || 'content';
     assertAllowedFieldKey('char_lorebook', fieldKey);
 
-    const mutateEntry = (existing) => {
+    const mutateEntry = (existing, liveList) => {
       if (!proposal.edits && (proposal[fieldKey] !== undefined || (fieldKey === 'content' && proposal.content !== undefined))) {
         const truncErr = checkTruncationGuard(String(existing[fieldKey] ?? ''), '로어북 전체 덮어쓰기');
         if (truncErr) throw new Error(truncErr);
       }
-      const next = normalizeLorebookEntry(proposal, existing);
+      const folderRes = resolveLorebookFolderProposal(liveList, proposal, existing);
+      if (!folderRes.ok) throw new Error(folderRes.error);
+      const resolvedInput = folderRes.resolvedFolder !== undefined
+        ? { ...proposal, folder: folderRes.resolvedFolder }
+        : proposal;
+      const next = normalizeLorebookEntry(resolvedInput, existing);
       if (proposal.edits) {
         const nextStr = applyTextEdits(String(existing[fieldKey] ?? ''), proposal.edits, '로어북');
         if (fieldKey === 'insertorder') {
@@ -5907,7 +6557,7 @@ class HostAdapter {
       if (!chat?.localLore?.[loreIndex]) throw new Error(`채팅 로어북 #${loreIndex + 1}을(를) 찾을 수 없습니다.`);
       const prevEntry = clone(chat.localLore[loreIndex]);
       const nextChat = clone(chat);
-      nextChat.localLore[loreIndex] = mutateEntry(nextChat.localLore[loreIndex]);
+      nextChat.localLore[loreIndex] = mutateEntry(nextChat.localLore[loreIndex], nextChat.localLore);
       await this._setChat(charIndex, chatIndex, nextChat);
 
       const undoId = this._pushUndo({
@@ -5931,7 +6581,7 @@ class HostAdapter {
       const moduleId = modules[modIdx].id;
       const prevEntry = clone(modules[modIdx].lorebook[loreIndex]);
       const nextModules = clone(modules);
-      nextModules[modIdx].lorebook[loreIndex] = mutateEntry(nextModules[modIdx].lorebook[loreIndex]);
+      nextModules[modIdx].lorebook[loreIndex] = mutateEntry(nextModules[modIdx].lorebook[loreIndex], nextModules[modIdx].lorebook);
       await this.writeDbSubset({ modules: nextModules });
 
       const undoId = this._pushUndo({
@@ -5953,7 +6603,7 @@ class HostAdapter {
     const charBinding = { charIndex, ...getCharIdentity(char) };
     const prevEntry = clone(char.globalLore[loreIndex]);
     const nextChar = clone(char);
-    nextChar.globalLore[loreIndex] = mutateEntry(nextChar.globalLore[loreIndex]);
+    nextChar.globalLore[loreIndex] = mutateEntry(nextChar.globalLore[loreIndex], nextChar.globalLore);
     await this._setCharacter(nextChar);
 
     const undoId = this._pushUndo({
@@ -5967,6 +6617,270 @@ class HostAdapter {
       },
     });
     return { ok: true, undoId, summary: `캐릭터 로어북 #${loreIndex + 1}을(를) 수정했습니다.` };
+  }
+
+  async _applyOrganizeLorebook(proposal, target, options = {}) {
+    const scope = proposal.scope || target.loreScope || (target.targetKind?.startsWith('module_') ? 'module' : target.targetKind === 'chat_lorebook' ? 'chat' : 'character');
+
+    const applyToList = (liveList) => {
+      const plan = planOrganizeLorebook(liveList, proposal);
+      if (!plan.ok) throw new Error(plan.error);
+
+      const prevStates = plan.movableIndices.map(idx => ({
+        idx,
+        hadFolder: Object.hasOwn(liveList[idx], 'folder'),
+        prevFolder: liveList[idx].folder,
+      }));
+
+      let createdFolder = null;
+      let createdFolderIndex = -1;
+      let targetFolderKey = plan.folderKey;
+
+      if (plan.willCreateFolder) {
+        createdFolder = normalizeLorebookEntry({
+          mode: 'folder',
+          comment: plan.newFolderName,
+          key: '',
+        });
+        createdFolderIndex = liveList.length;
+        liveList.push(createdFolder);
+        targetFolderKey = createdFolder.key;
+      }
+
+      for (const idx of plan.movableIndices) {
+        if (plan.isRoot) {
+          delete liveList[idx].folder;
+        } else {
+          liveList[idx].folder = targetFolderKey;
+        }
+      }
+
+      return { plan, prevStates, createdFolder, createdFolderIndex, targetFolderKey };
+    };
+
+    const restoreList = (latestList, { prevStates, createdFolder, createdFolderIndex }) => {
+      for (const st of prevStates) {
+        if (!latestList?.[st.idx]) continue;
+        if (st.hadFolder) latestList[st.idx].folder = st.prevFolder;
+        else delete latestList[st.idx].folder;
+      }
+      if (createdFolder) {
+        removeCreatedItem(latestList, createdFolderIndex, e =>
+          e && e.mode === 'folder' && e.key === createdFolder.key
+        );
+      }
+    };
+
+    const formatSummary = (scopePrefix, result) => {
+      const count = result.plan.movableIndices.length;
+      if (result.plan.isRoot) {
+        return `${scopePrefix} 로어북 ${count}개를 최상위 목록으로 이동했습니다.`;
+      }
+      if (result.createdFolder) {
+        return `${scopePrefix}에 새 폴더 "${result.createdFolder.comment}"을(를) 만들고 로어북 ${count}개를 이동했습니다.`;
+      }
+      return `${scopePrefix} 로어북 ${count}개를 "${result.plan.folderLabel}" 폴더로 이동했습니다.`;
+    };
+
+    if (scope === 'chat') {
+      const { chat, charIndex, chatIndex } = await this._requireSameActiveChat(options.hostBinding, '적용');
+      const nextChat = clone(chat);
+      nextChat.localLore = Array.isArray(nextChat.localLore) ? nextChat.localLore : [];
+      const result = applyToList(nextChat.localLore);
+      await this._setChat(charIndex, chatIndex, nextChat);
+
+      const undoId = this._pushUndo({
+        label: `채팅 로어북 폴더 정리 (${result.plan.movableIndices.length}개)`,
+        restore: async () => {
+          const latestChat = await this._readChatAt(charIndex, chatIndex);
+          if (!latestChat) throw new Error('되돌릴 채팅을 찾을 수 없습니다.');
+          const restored = clone(latestChat);
+          restoreList(restored.localLore, result);
+          await this._setChat(charIndex, chatIndex, restored);
+        },
+      });
+      return {
+        ok: true,
+        undoId,
+        folderKey: result.targetFolderKey,
+        movedCount: result.plan.movableIndices.length,
+        createdFolder: Boolean(result.createdFolder),
+        summary: formatSummary('채팅', result),
+      };
+    }
+
+    if (scope === 'module') {
+      const { modules, permissionDenied } = await this.readModules();
+      if (permissionDenied) throw new Error(DB_PERMISSION_ERROR);
+      const modIdx = this._resolveWriteModuleIndex(modules, proposal, target, options);
+      if (!modules[modIdx]) throw new Error('대상 모듈을 찾을 수 없습니다.');
+      const moduleId = modules[modIdx].id;
+      const nextModules = clone(modules);
+      nextModules[modIdx].lorebook = Array.isArray(nextModules[modIdx].lorebook) ? nextModules[modIdx].lorebook : [];
+      const result = applyToList(nextModules[modIdx].lorebook);
+      await this.writeDbSubset({ modules: nextModules });
+
+      const undoId = this._pushUndo({
+        label: `모듈 "${nextModules[modIdx].name}" 로어북 폴더 정리 (${result.plan.movableIndices.length}개)`,
+        restore: async () => {
+          const { modules: latestModules } = await this.readModules();
+          const idx = latestModules.findIndex(m => m.id === moduleId);
+          if (idx === -1) throw new Error('되돌릴 모듈을 찾을 수 없습니다.');
+          const restored = clone(latestModules);
+          restoreList(restored[idx].lorebook, result);
+          await this.writeDbSubset({ modules: restored });
+        },
+      });
+      return {
+        ok: true,
+        undoId,
+        folderKey: result.targetFolderKey,
+        movedCount: result.plan.movableIndices.length,
+        createdFolder: Boolean(result.createdFolder),
+        summary: formatSummary(`모듈 "${nextModules[modIdx].name}"`, result),
+      };
+    }
+
+    const { char, charIndex } = await this._requireSameActiveCharacter(options.hostBinding, '적용');
+    const charBinding = { charIndex, ...getCharIdentity(char) };
+    const nextChar = clone(char);
+    nextChar.globalLore = Array.isArray(nextChar.globalLore) ? nextChar.globalLore : [];
+    const result = applyToList(nextChar.globalLore);
+    await this._setCharacter(nextChar);
+
+    const undoId = this._pushUndo({
+      label: `캐릭터 로어북 폴더 정리 (${result.plan.movableIndices.length}개)`,
+      restore: async () => {
+        const { char: latest } = await this._requireSameActiveCharacter(charBinding, '되돌리기');
+        const restored = clone(latest);
+        restoreList(restored.globalLore, result);
+        await this._setCharacter(restored);
+      },
+    });
+    return {
+      ok: true,
+      undoId,
+      folderKey: result.targetFolderKey,
+      movedCount: result.plan.movableIndices.length,
+      createdFolder: Boolean(result.createdFolder),
+      summary: formatSummary('캐릭터', result),
+    };
+  }
+
+  /**
+   * Rescues orphaned lorebook entries whose `folder` property points to a nonexistent folder key
+   * by clearing `entry.folder` (moving them back to root) in one atomic write with surgical Undo.
+   */
+  async recoverOrphanedLorebooks(target = {}, options = {}) {
+    const scope =
+      target?.loreScope ||
+      (target?.targetKind === 'chat_lorebook' ? 'chat' :
+        target?.targetKind?.startsWith('module_') ? 'module' : 'character');
+
+    const rescueList = (liveList) => {
+      const orphaned = findOrphanedLorebooks(liveList);
+      const prevStates = orphaned.map(idx => ({
+        idx,
+        hadFolder: Object.hasOwn(liveList[idx], 'folder'),
+        prevFolder: liveList[idx].folder,
+      }));
+      for (const idx of orphaned) {
+        delete liveList[idx].folder;
+      }
+      return prevStates;
+    };
+
+    const restoreRescued = (latestList, prevStates) => {
+      for (const st of prevStates) {
+        if (!latestList?.[st.idx]) continue;
+        if (st.hadFolder) latestList[st.idx].folder = st.prevFolder;
+        else delete latestList[st.idx].folder;
+      }
+    };
+
+    if (scope === 'chat') {
+      const { chat, charIndex, chatIndex } = await this._requireSameActiveChat(options.hostBinding, '복구');
+      const nextChat = clone(chat);
+      nextChat.localLore = Array.isArray(nextChat.localLore) ? nextChat.localLore : [];
+      const prevStates = rescueList(nextChat.localLore);
+      if (prevStates.length === 0) {
+        return { ok: true, recoveredCount: 0, undoId: null, summary: '복구할 숨겨진 채팅 로어북이 없습니다.' };
+      }
+      await this._setChat(charIndex, chatIndex, nextChat);
+      const undoId = this._pushUndo({
+        label: `숨겨진 채팅 로어북 ${prevStates.length}개 복구`,
+        restore: async () => {
+          const latestChat = await this._readChatAt(charIndex, chatIndex);
+          if (!latestChat) throw new Error('되돌릴 채팅을 찾을 수 없습니다.');
+          const restored = clone(latestChat);
+          restoreRescued(restored.localLore, prevStates);
+          await this._setChat(charIndex, chatIndex, restored);
+        },
+      });
+      return {
+        ok: true,
+        recoveredCount: prevStates.length,
+        undoId,
+        summary: `숨겨진 채팅 로어북 ${prevStates.length}개를 최상위 목록으로 복구했습니다.`,
+      };
+    }
+
+    if (scope === 'module') {
+      const { modules, permissionDenied } = await this.readModules();
+      if (permissionDenied) throw new Error(DB_PERMISSION_ERROR);
+      const modIdx = this._resolveWriteModuleIndex(modules, {}, target, options);
+      if (!modules[modIdx]) throw new Error('대상 모듈을 찾을 수 없습니다.');
+      const moduleId = modules[modIdx].id;
+      const nextModules = clone(modules);
+      nextModules[modIdx].lorebook = Array.isArray(nextModules[modIdx].lorebook) ? nextModules[modIdx].lorebook : [];
+      const prevStates = rescueList(nextModules[modIdx].lorebook);
+      if (prevStates.length === 0) {
+        return { ok: true, recoveredCount: 0, undoId: null, summary: '복구할 숨겨진 모듈 로어북이 없습니다.' };
+      }
+      await this.writeDbSubset({ modules: nextModules });
+      const undoId = this._pushUndo({
+        label: `모듈 "${nextModules[modIdx].name}" 숨겨진 로어북 ${prevStates.length}개 복구`,
+        restore: async () => {
+          const { modules: latestModules } = await this.readModules();
+          const idx = latestModules.findIndex(m => m.id === moduleId);
+          if (idx === -1) throw new Error('되돌릴 모듈을 찾을 수 없습니다.');
+          const restored = clone(latestModules);
+          restoreRescued(restored[idx].lorebook, prevStates);
+          await this.writeDbSubset({ modules: restored });
+        },
+      });
+      return {
+        ok: true,
+        recoveredCount: prevStates.length,
+        undoId,
+        summary: `모듈 "${nextModules[modIdx].name}"의 숨겨진 로어북 ${prevStates.length}개를 최상위 목록으로 복구했습니다.`,
+      };
+    }
+
+    const { char, charIndex } = await this._requireSameActiveCharacter(options.hostBinding, '복구');
+    const charBinding = { charIndex, ...getCharIdentity(char) };
+    const nextChar = clone(char);
+    nextChar.globalLore = Array.isArray(nextChar.globalLore) ? nextChar.globalLore : [];
+    const prevStates = rescueList(nextChar.globalLore);
+    if (prevStates.length === 0) {
+      return { ok: true, recoveredCount: 0, undoId: null, summary: '복구할 숨겨진 캐릭터 로어북이 없습니다.' };
+    }
+    await this._setCharacter(nextChar);
+    const undoId = this._pushUndo({
+      label: `숨겨진 캐릭터 로어북 ${prevStates.length}개 복구`,
+      restore: async () => {
+        const { char: latest } = await this._requireSameActiveCharacter(charBinding, '되돌리기');
+        const restored = clone(latest);
+        restoreRescued(restored.globalLore, prevStates);
+        await this._setCharacter(restored);
+      },
+    });
+    return {
+      ok: true,
+      recoveredCount: prevStates.length,
+      undoId,
+      summary: `숨겨진 캐릭터 로어북 ${prevStates.length}개를 최상위 목록으로 복구했습니다.`,
+    };
   }
 
   async _applyUpdateLua(proposal, target, options = {}) {
@@ -6300,6 +7214,11 @@ class HostAdapter {
   }
 }
 
+  __exports.LORE_FOLDER_PREFIX = LORE_FOLDER_PREFIX;
+  __exports.canonicalizeFolderKey = canonicalizeFolderKey;
+  __exports.resolveFolderRef = resolveFolderRef;
+  __exports.findOrphanedLorebooks = findOrphanedLorebooks;
+  __exports.summarizeLoreList = summarizeLoreList;
   __exports.extractLuaFromTriggers = extractLuaFromTriggers;
   __exports.buildLuaTriggers = buildLuaTriggers;
   __exports.normalizeLorebookEntry = normalizeLorebookEntry;
@@ -6336,7 +7255,7 @@ const KNOWLEDGE_SECTIONS = {
   - insertorder(숫자, 기본 100): 높을수록 우선순위가 높아 토큰 예산(loreBookToken) 안에서 먼저 채택되고 프롬프트 하단에 가깝게 배치.
   - useRegex(true): 활성화 키를 정규식으로 매칭.
   - activationPercent: 0~100 확률 활성화.
-  - mode: 'normal' | 'constant' | 'multiple' | 'child' | 'folder' (폴더는 key가 '\\uf000folder:<uuid>').
+  - mode: 'normal' | 'constant' | 'multiple' | 'child' | 'folder' (폴더는 RisuAI 내부적으로 mode='folder', key='\uf000folder:<uuid>'를 쓰며 자식 로어북은 folder=폴더.key로 연결됨. 폴더 생성·이동 시 키를 직접 작성하지 말고 단일 organize_lorebook 액션에 folderName/folderIndex와 loreIndices를 지정해 한 번에 정리할 것).
 - 주요 데코레이터(본문 최상단 줄에 기재):
   - @@depth N: 채팅 끝에서 N번째 위치에 삽입
   - @@role user|assistant|system: 삽입 메시지 역할 지정
@@ -6651,6 +7570,7 @@ const VALID_ACTIONS = new Set([
   'replace_text',
   'create_lorebook',
   'update_lorebook',
+  'organize_lorebook',
   'update_lua',
   'upsert_regex',
   'create_persona',
@@ -6905,13 +7825,34 @@ function validateProposal(item) {
     return 'replace_text에는 문자열 content가 필요합니다.';
   }
   if (item.action === 'create_lorebook') {
-    if (typeof item.comment !== 'string' || typeof item.content !== 'string') {
+    if (typeof item.comment !== 'string') {
+      return 'create_lorebook에는 comment 문자열이 필요합니다.';
+    }
+    if (item.mode !== 'folder' && typeof item.content !== 'string') {
       return 'create_lorebook에는 comment와 content 문자열이 필요합니다.';
     }
   }
   if (item.action === 'update_lorebook' && item.fieldKey !== undefined) {
     const err = validateFieldKeyForKind('char_lorebook', item.fieldKey);
     if (err) return err;
+  }
+  if (item.action === 'organize_lorebook') {
+    if (!Array.isArray(item.loreIndices) || item.loreIndices.length === 0) {
+      return 'organize_lorebook에는 1개 이상의 loreIndices 정수 배열이 필요합니다.';
+    }
+    for (const idx of item.loreIndices) {
+      if (!Number.isInteger(idx) || idx < 0) {
+        return 'organize_lorebook의 loreIndices는 0 이상의 정수 인덱스 배열이어야 합니다.';
+      }
+    }
+    const isRoot = item.moveToRoot === true || item.folder === '' || item.folder === null;
+    const hasFolderRef =
+      (typeof item.folderName === 'string' && item.folderName.trim().length > 0) ||
+      (typeof item.folder === 'string' && item.folder.trim().length > 0) ||
+      (Number.isInteger(item.folderIndex) && item.folderIndex >= 0);
+    if (!isRoot && !hasFolderRef) {
+      return 'organize_lorebook에는 folderName, folderIndex, 또는 moveToRoot: true 중 하나가 필요합니다.';
+    }
   }
   if (item.action === 'update_lua') {
     if (!item.edits && typeof item.code !== 'string' && typeof item.content !== 'string') {
@@ -6960,8 +7901,20 @@ function buildConversationMessages({ context, snapshot, extraContext, history, u
   if (extraContext?.charSummary) {
     extraBlocks.push(`[현재 캐릭터 요약]\n${JSON.stringify(extraContext.charSummary, null, 2)}`);
   }
+  if (extraContext?.foldersSummary?.length) {
+    extraBlocks.push(`[캐릭터 로어북 폴더 목록]\n${JSON.stringify(extraContext.foldersSummary, null, 2)}`);
+  }
   if (extraContext?.loreSummary) {
     extraBlocks.push(`[로어북 목록 요약]\n${JSON.stringify(extraContext.loreSummary, null, 2)}`);
+  }
+  if (extraContext?.chatFoldersSummary?.length) {
+    extraBlocks.push(`[현재 채팅 로어북 폴더 목록]\n${JSON.stringify(extraContext.chatFoldersSummary, null, 2)}`);
+  }
+  if (extraContext?.chatLoreSummary) {
+    extraBlocks.push(`[현재 채팅 로어북 목록 요약]\n${JSON.stringify(extraContext.chatLoreSummary, null, 2)}`);
+  }
+  if (extraContext?.moduleFoldersSummary?.length) {
+    extraBlocks.push(`[현재 모듈 로어북 폴더 목록]\n${JSON.stringify(extraContext.moduleFoldersSummary, null, 2)}`);
   }
   if (extraContext?.moduleLoreSummary) {
     extraBlocks.push(`[현재 모듈 로어북 목록 요약]\n${JSON.stringify(extraContext.moduleLoreSummary, null, 2)}`);
@@ -7008,12 +7961,14 @@ ${extraBlocks.join('\n\n')}
 2. 사용자가 편집·수정·덮어쓰기·새로 생성·설정 변경을 요청할 때는 설명과 함께 \`\`\`risuhelper-proposal 블록을 포함하세요. 사용자가 UI에서 Diff를 검토하고 "적용" 버튼을 눌러야 실제 반영됩니다.
 3. 기존 긴 원문의 일부만 바꿀 때는 반드시 \`patch_text\`를 사용하고, \`before\`에는 위 [현재 대상의 실제 원문]에서 **공백과 줄바꿈까지 정확히 일치하는 고유 구간**을 복사하세요.
 4. 주의: \`patch_text\`/\`replace_text\`에서 \`target\`을 임의로 바꿔 다른 필드를 지정하지 마세요.
+5. 로어북 폴더를 새로 만들어 로어북을 옮기거나 기존 폴더에 여러 로어북을 담을 때는 절대 \`update_lorebook\`을 여러 개로 쪼개거나 \`\\uf000folder:...\` 키를 임의로 지어내지 말고, 반드시 **단일 \`organize_lorebook\` 블록 하나**로 제안하세요.
 
 지원 action 스키마 (표준 JSON):
 - 부분 편집: {"action":"patch_text","title":"설명","edits":[{"before":"원문 구간","after":"수정 구간"}]}
 - 전체 덮어쓰기: {"action":"replace_text","title":"설명","content":"새 전체 텍스트"}
 - 새 로어북 생성: {"action":"create_lorebook","title":"설명","scope":"character|chat|module","comment":"항목명","key":"키1,키2","secondkey":"","selective":false,"alwaysActive":false,"insertorder":100,"content":"본문"}
 - 기존 로어북 수정: {"action":"update_lorebook","title":"설명","scope":"character|chat|module","loreIndex":0,"comment":"항목명","key":"키1,키2","edits":[{"before":"...","after":"..."}]}
+- 로어북 폴더 정리(생성+일괄 이동): {"action":"organize_lorebook","title":"설명","scope":"character|chat|module","folderName":"폴더명","createFolderIfMissing":true,"loreIndices":[0,1,2]} (기존 폴더는 folderName 또는 folderIndex 지정, 최상위 복귀는 "moveToRoot":true)
 - Lua 트리거 수정/생성: {"action":"update_lua","title":"설명","scope":"character|module","edits":[{"before":"...","after":"..."}]} (신규이거나 전체 교체면 "code":"..." 사용)
 - 정규식 생성/수정: {"action":"upsert_regex","title":"설명","scope":"character|module","comment":"이름","in":"패턴","out":"치환","type":"editdisplay|editoutput|editinput|editprocess","flag":"g","ableFlag":true}
 - 새 페르소나 생성: {"action":"create_persona","title":"설명","name":"이름","note":"메모","personaPrompt":"설명","bindToCurrentChat":true}
@@ -9753,7 +10708,7 @@ function buildListItem(doc, rawItemText) {
 const { VERSION, STORAGE_KEY, PRESET_STORAGE_KEY, CHAR_FIELD_META, MODULE_FIELD_META, CONFIG_FIELD_META, SCREEN_LABELS } = __require("src/version.js");
 const { STYLES } = __require("src/style.js");
 const { FocusTracker, normalizeChipPos, MIN_DOCK_VIEWPORT_PX } = __require("src/focus-detector.js");
-const { HostAdapter, resolveModuleIndex } = __require("src/host-adapter.js");
+const { HostAdapter, resolveModuleIndex, summarizeLoreList } = __require("src/host-adapter.js");
 const { callRisuModel, parseAssistantReply, buildConversationMessages } = __require("src/llm.js");
 const { buildDiffPreview } = __require("src/text-edits.js");
 const { getQuickPromptsForContext } = __require("src/knowledge.js");
@@ -9794,6 +10749,7 @@ const ACTION_LABELS = {
   replace_text: '전체 덮어쓰기',
   create_lorebook: '새 로어북 생성',
   update_lorebook: '로어북 수정',
+  organize_lorebook: '로어북 폴더 정리',
   update_lua: 'Lua 스크립트 수정',
   upsert_regex: '정규식 저장',
   create_persona: '새 페르소나 생성',
@@ -10175,26 +11131,26 @@ class RisuHelperApp {
 
   async gatherExtraContext(ctx) {
     const extra = {};
-    if (this.settings.includeCharSummary) {
+    if (this.settings.includeCharSummary || this.settings.includeLoreSummary) {
       try {
         const { char } = await this.adapter.readActiveCharacter();
         if (char) {
-          extra.charSummary = {
-            name: char.name || '',
-            descPreview: String(char.desc || '').slice(0, 500),
-            firstMessagePreview: String(char.firstMessage || '').slice(0, 300),
-            globalLoreCount: char.globalLore?.length ?? 0,
-            regexCount: char.customscript?.length ?? 0,
-            hasLua: char.triggerscript?.[0]?.effect?.[0]?.type === 'triggerlua',
-          };
+          if (this.settings.includeCharSummary) {
+            extra.charSummary = {
+              name: char.name || '',
+              descPreview: String(char.desc || '').slice(0, 500),
+              firstMessagePreview: String(char.firstMessage || '').slice(0, 300),
+              globalLoreCount: char.globalLore?.length ?? 0,
+              regexCount: char.customscript?.length ?? 0,
+              hasLua: char.triggerscript?.[0]?.effect?.[0]?.type === 'triggerlua',
+            };
+          }
           if (this.settings.includeLoreSummary && Array.isArray(char.globalLore)) {
-            extra.loreSummary = char.globalLore.slice(0, 30).map((e, i) => ({
-              index: i,
-              comment: e.comment || '',
-              key: e.key || '',
-              alwaysActive: Boolean(e.alwaysActive),
-              insertorder: e.insertorder ?? 100,
-            }));
+            const summarized = summarizeLoreList(char.globalLore);
+            extra.loreSummary = summarized.loreSummary;
+            if (summarized.foldersSummary.length > 0) {
+              extra.foldersSummary = summarized.foldersSummary;
+            }
           }
         }
       } catch {}
@@ -10203,10 +11159,25 @@ class RisuHelperApp {
     if (
       this.settings.includeLoreSummary &&
       this.activeSnapshot?.ok &&
+      this.activeSnapshot.target?.targetKind === 'chat_lorebook' &&
+      Array.isArray(this.activeSnapshot.loreSummary)
+    ) {
+      extra.chatLoreSummary = this.activeSnapshot.loreSummary;
+      if (this.activeSnapshot.foldersSummary?.length > 0) {
+        extra.chatFoldersSummary = this.activeSnapshot.foldersSummary;
+      }
+    }
+
+    if (
+      this.settings.includeLoreSummary &&
+      this.activeSnapshot?.ok &&
       this.activeSnapshot.target?.targetKind === 'module_lorebook' &&
       Array.isArray(this.activeSnapshot.loreSummary)
     ) {
-      extra.moduleLoreSummary = this.activeSnapshot.loreSummary.slice(0, 30);
+      extra.moduleLoreSummary = this.activeSnapshot.loreSummary;
+      if (this.activeSnapshot.foldersSummary?.length > 0) {
+        extra.moduleFoldersSummary = this.activeSnapshot.foldersSummary;
+      }
     }
 
     if (ctx.targetKind === 'persona' || ctx.screen === 'persona') {
@@ -10393,8 +11364,11 @@ class RisuHelperApp {
     return false;
   }
 
-  _isModuleDomFillable(target) {
+  _isModuleDomFillable(target, proposal = null) {
     if (!target) return false;
+    if (proposal?.action === 'organize_lorebook' || proposal?.action === 'create_lorebook') {
+      return false;
+    }
     if (target.targetKind === 'module_lorebook') {
       return (target.fieldKey || 'content') === 'content' && Number.isInteger(target.loreIndex) && target.loreIndex >= 0;
     }
@@ -10478,6 +11452,24 @@ class RisuHelperApp {
     return res;
   }
 
+  async _repreviewSiblingProposals(appliedItem) {
+    const ownerMsg = this.messages.find(m => Array.isArray(m.proposals) && m.proposals.includes(appliedItem));
+    if (!ownerMsg) return;
+    for (const sibling of ownerMsg.proposals) {
+      if (sibling === appliedItem || sibling.applied || sibling.preview?.ok) continue;
+      try {
+        const nextPreview = await this.adapter.previewProposal(sibling.proposal, sibling.pinnedTarget);
+        sibling.preview = nextPreview;
+        if (nextPreview.target) {
+          sibling.pinnedTarget = JSON.parse(JSON.stringify(nextPreview.target));
+        }
+        if (nextPreview.hostBinding) {
+          sibling.hostBinding = JSON.parse(JSON.stringify(nextPreview.hostBinding));
+        }
+      } catch {}
+    }
+  }
+
   async applyProposalItem(item) {
     const pinnedTarget = item.pinnedTarget || item.preview?.target;
     const hostBinding = item.hostBinding || item.preview?.hostBinding || null;
@@ -10491,6 +11483,9 @@ class RisuHelperApp {
       item.applied = true;
       item.undoId = res.undoId;
       item.statusMessage = res.summary;
+      if (item.proposal?.action === 'create_lorebook' || item.proposal?.action === 'organize_lorebook') {
+        await this._repreviewSiblingProposals(item);
+      }
       await this.refreshContextSnapshot();
 
       const isModuleEdit = this._isModuleTarget(pinnedTarget, item.proposal);
@@ -10498,7 +11493,7 @@ class RisuHelperApp {
         item.moduleDbSaved = true;
         item.moduleDomSynced = false;
         const savedText = item.preview?.after ?? this.activeSnapshot?.content ?? '';
-        const canFillDom = this.tracker?.enabled && this._isModuleDomFillable(pinnedTarget);
+        const canFillDom = this.tracker?.enabled && this._isModuleDomFillable(pinnedTarget, item.proposal);
         if (this.settings.autoFillModuleEditor && canFillDom) {
           const syncRes = await this.syncOpenModuleEditor(pinnedTarget, savedText, {
             moduleId: hostBinding?.moduleId || this.activeSnapshot?.hostBinding?.moduleId || null,
@@ -10539,7 +11534,7 @@ class RisuHelperApp {
         item.moduleDomSynced = false;
         const pinnedTarget = item.pinnedTarget || item.preview?.target;
         const hostBinding = item.hostBinding || item.preview?.hostBinding || null;
-        if (this.settings.autoFillModuleEditor && this.tracker?.enabled && this._isModuleDomFillable(pinnedTarget)) {
+        if (this.settings.autoFillModuleEditor && this.tracker?.enabled && this._isModuleDomFillable(pinnedTarget, item.proposal)) {
           const restoredText = item.preview?.before ?? this.activeSnapshot?.content ?? '';
           const syncRes = await this.syncOpenModuleEditor(pinnedTarget, restoredText, {
             moduleId: hostBinding?.moduleId || this.activeSnapshot?.hostBinding?.moduleId || null,
@@ -10810,7 +11805,7 @@ class RisuHelperApp {
       );
     } else if (item.applied) {
       const syncTarget = item.pinnedTarget || preview.target;
-      if (item.moduleDbSaved && this.tracker?.enabled && this._isModuleDomFillable(syncTarget)) {
+      if (item.moduleDbSaved && this.tracker?.enabled && this._isModuleDomFillable(syncTarget, proposal)) {
         rightControls.push(
           h(doc, 'button', {
             class: 'rh-btn',
@@ -10862,6 +11857,17 @@ class RisuHelperApp {
     );
   }
 
+  _formatLoreOptionLabel(item) {
+    if (item.mode === 'folder') {
+      return `#${item.index + 1} 📁 ${item.comment || '(무제 폴더)'}`;
+    }
+    const prefix = item.orphaned
+      ? '⚠️(숨겨짐) '
+      : (item.folderName ? `[${item.folderName}] ` : '');
+    const keyPart = item.key ? ` [${item.key.slice(0, 24)}]` : '';
+    return `#${item.index + 1} ${prefix}${item.comment || '(무제)'}${keyPart}`;
+  }
+
   renderSubItemPicker(ctx) {
     const doc = this.doc;
     if (!this.activeSnapshot?.ok) return null;
@@ -10883,7 +11889,7 @@ class RisuHelperApp {
           h(doc, 'option', {
             value: String(item.index),
             selected: ctx.loreIndex === item.index,
-          }, `#${item.index + 1} ${item.comment || '(무제)'}${item.key ? ` [${item.key.slice(0, 24)}]` : ''}`)
+          }, this._formatLoreOptionLabel(item))
         )
       );
       return sel;
@@ -10997,7 +12003,7 @@ class RisuHelperApp {
             h(doc, 'option', {
               value: String(item.index),
               selected: selectedLoreIdx === item.index,
-            }, `#${item.index + 1} ${item.comment || '(무제)'}${item.key ? ` [${item.key.slice(0, 24)}]` : ''}`)
+            }, this._formatLoreOptionLabel(item))
           )
         );
         return [modSel, loreSel];
@@ -11359,6 +12365,37 @@ class RisuHelperApp {
     if (this.activeSnapshot?.ok && this.activeSnapshot.moduleUncertain) {
       contextBarChildren.push(h(doc, 'div', { class: 'rh-banner error' },
         '열려 있는 모듈을 자동으로 확정하지 못했습니다. 아래 모듈 선택기에서 편집할 모듈을 직접 선택해 주세요. 선택 전에는 모듈 편집 제안을 적용할 수 없습니다.'));
+    }
+
+    if (this.activeSnapshot?.ok && !this.activeSnapshot.moduleUncertain && this.activeSnapshot.orphanedLoreCount > 0) {
+      const orphanCount = this.activeSnapshot.orphanedLoreCount;
+      const scopeLabel = this.activeSnapshot.orphanedLoreScopeLabel || '로어북';
+      const rescueTarget = this.activeSnapshot.orphanedLoreTarget || this.activeSnapshot.target;
+      const rescueHostBinding = this.activeSnapshot.hostBinding || null;
+      contextBarChildren.push(
+        h(doc, 'div', { class: 'rh-banner error', style: 'display:flex;flex-direction:column;gap:6px;' },
+          h(doc, 'div', {}, `🛟 ${scopeLabel}에서 잘못된 폴더 연결로 화면에 숨겨진 로어북 ${orphanCount}개를 발견했습니다. 삭제된 것이 아니라 DB에 그대로 남아 있으며, 아래 버튼으로 최상위 목록에 바로 복구할 수 있습니다.`),
+          h(doc, 'div', { class: 'rh-row' },
+            h(doc, 'button', {
+              class: 'rh-btn primary',
+              onclick: async () => {
+                try {
+                  const res = await this.adapter.recoverOrphanedLorebooks(rescueTarget, { hostBinding: rescueHostBinding });
+                  await this.refreshContextSnapshot();
+                  const isMod = rescueTarget?.loreScope === 'module' || rescueTarget?.targetKind === 'module_lorebook';
+                  this.showToast(
+                    isMod
+                      ? `${res.summary} — ⚠️ 하단 "모듈 수정"을 누르지 말고 다른 설정 탭을 다녀와 다시 여세요!`
+                      : res.summary
+                  );
+                } catch (err) {
+                  this.showToast(`복구 실패: ${err.message}`);
+                }
+              },
+            }, `🛟 숨겨진 로어북 ${orphanCount}개 최상위로 복구`)
+          )
+        )
+      );
     }
 
     if (this._hasModuleDomMismatch()) {

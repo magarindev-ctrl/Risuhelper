@@ -192,3 +192,43 @@ test('parseAssistantReply supports raw delimiter body protocol for Lua, regex, e
   );
 });
 
+test('validateProposal and buildConversationMessages support organize_lorebook and folder-aware lore summaries', () => {
+  assert.equal(
+    validateProposal({ action: 'organize_lorebook', scope: 'character', folderName: '세계관', loreIndices: [0, 1, 2] }),
+    null
+  );
+  assert.equal(
+    validateProposal({ action: 'organize_lorebook', scope: 'module', folderIndex: 4, loreIndices: [0] }),
+    null
+  );
+  assert.equal(
+    validateProposal({ action: 'organize_lorebook', scope: 'character', moveToRoot: true, loreIndices: [1, 2] }),
+    null
+  );
+  assert.match(
+    validateProposal({ action: 'organize_lorebook', scope: 'character', folderName: '세계관', loreIndices: [] }),
+    /loreIndices/
+  );
+  assert.match(
+    validateProposal({ action: 'organize_lorebook', scope: 'character', loreIndices: [0] }),
+    /folderName/
+  );
+  assert.equal(
+    validateProposal({ action: 'create_lorebook', mode: 'folder', comment: '배경' }),
+    null
+  );
+
+  const msgs = buildConversationMessages({
+    context: { screen: 'lorebook', targetKind: 'char_lorebook', labelText: '캐릭터 로어북' },
+    snapshot: { label: '캐릭터 로어북 (40개)', content: '', target: { targetKind: 'char_lorebook' } },
+    extraContext: {
+      foldersSummary: [{ index: 39, name: '미리 만든 폴더', childCount: 0 }],
+      loreSummary: [{ index: 0, comment: '항목 1', key: 'k1', mode: 'normal' }],
+    },
+    userInput: '미리 만든 폴더에 항목 1 담아줘',
+  });
+  assert.match(msgs[0].content, /캐릭터 로어북 폴더 목록/);
+  assert.match(msgs[0].content, /미리 만든 폴더/);
+  assert.match(msgs[0].content, /organize_lorebook/);
+});
+

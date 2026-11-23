@@ -865,3 +865,253 @@ test('HostAdapter edits the module the user picked explicitly even when modules 
   assert.equal(state.db.modules[0].lorebook[0].content, 'same body text here');
   assert.equal(state.db.modules[1].lorebook[0].content, 'PICKED');
 });
+
+test('Lorebook folder canonicalization prevents malformed keys, blocks nonexistent folders, and resolves existing folders by name/key/index', async () => {
+  const {
+    LORE_FOLDER_PREFIX,
+    canonicalizeFolderKey,
+    resolveFolderRef,
+    normalizeLorebookEntry,
+  } = await import('../src/host-adapter.js');
+
+  // 1. canonicalizeFolderKey repairs empty, double-escaped, bare-prefix, and slug keys
+  assert.ok(canonicalizeFolderKey('').startsWith(LORE_FOLDER_PREFIX));
+  assert.equal(canonicalizeFolderKey('\\uf000folder:abc-1'), '\uf000folder:abc-1');
+  assert.equal(canonicalizeFolderKey('\\\\uF000folder:abc-2'), '\uf000folder:abc-2');
+  assert.equal(canonicalizeFolderKey('folder:abc-3'), '\uf000folder:abc-3');
+  assert.equal(canonicalizeFolderKey('abc-4'), '\uf000folder:abc-4');
+  assert.equal(canonicalizeFolderKey('\uf000folder:already-ok'), '\uf000folder:already-ok');
+
+  // 2. normalizeLorebookEntry forces canonical key for mode:'folder', strips nested folder, and preserves existing UUID on rename
+  const newFolder = normalizeLorebookEntry({ mode: 'folder', comment: '세계관', key: '', content: 'ignored', folder: 'bad' });
+  assert.ok(newFolder.key.startsWith(LORE_FOLDER_PREFIX));
+  assert.equal(newFolder.content, '');
+  assert.equal(Object.hasOwn(newFolder, 'folder'), false);
+
+  const renamed = normalizeLorebookEntry({ comment: '세계관 V2', key: '' }, newFolder);
+  assert.equal(renamed.key, newFolder.key, 'renaming an existing folder must preserve its UUID key');
+
+  const cleared = normalizeLorebookEntry({ folder: '' }, { comment: 'A', key: 'a', content: 'x', folder: newFolder.key });
+  assert.equal(Object.hasOwn(cleared, 'folder'), false);
+
+  // 3. HostAdapter blocks update_lorebook/create_lorebook with nonexistent folder keys (prevents Bug #1 orphaning)
+  const { state, adapter } = createMockHost();
+  const realKey = '\uf000folder:world-uuid-1';
+  state.character.globalLore = [
+    { comment: '북부 왕국', key: '왕국', content: '본문 1', insertorder: 100, mode: 'normal' },
+    { comment: '세계관', key: realKey, content: '', insertorder: 100, mode: 'folder', alwaysActive: false, secondkey: '', selective: false },
+  ];
+
+  const badPrev = await adapter.previewProposal(
+    { action: 'update_lorebook', scope: 'character', loreIndex: 0, folder: '존재하지않는폴더' },
+    { targetKind: 'char_lorebook', loreScope: 'character', loreIndex: 0 }
+  );
+  assert.equal(badPrev.ok, false);
+  assert.match(badPrev.error, /찾을 수 없습니다/);
+
+  await assert.rejects(
+    () => adapter.applyProposal(
+      { action: 'update_lorebook', scope: 'character', loreIndex: 0, folder: 'fake-folder-id' },
+      { targetKind: 'char_lorebook', loreScope: 'character', loreIndex: 0 }
+    ),
+    /숨겨지므로 차단/
+  );
+  assert.equal(state.character.globalLore[0].folder, undefined, 'failed folder move must leave entry visible at root');
+
+  // 4. Resolves existing folder by display name, escaped key, and folderIndex
+  const byName = await adapter.applyProposal(
+    { action: 'update_lorebook', scope: 'character', loreIndex: 0, folder: '세계관' },
+    { targetKind: 'char_lorebook', loreScope: 'character', loreIndex: 0 }
+  );
+  assert.equal(byName.ok, true);
+  assert.equal(state.character.globalLore[0].folder, realKey);
+
+  // Back to root via empty string
+  await adapter.applyProposal(
+    { action: 'update_lorebook', scope: 'character', loreIndex: 0, folder: '' },
+    { targetKind: 'char_lorebook', loreScope: 'character', loreIndex: 0 }
+  );
+  assert.equal(Object.hasOwn(state.character.globalLore[0], 'folder'), false);
+
+  // Escaped key resolves to real U+F000 key
+  const refEscaped = resolveFolderRef(state.character.globalLore, { folder: '\\uf000folder:world-uuid-1' });
+  assert.equal(refEscaped.ok, true);
+  assert.equal(refEscaped.folderKey, realKey);
+
+  // Nesting a folder inside another folder is blocked
+  const nestPrev = await adapter.previewProposal(
+    { action: 'create_lorebook', scope: 'character', mode: 'folder', comment: '중첩폴더', folder: '세계관' },
+    { targetKind: 'char_lorebook', loreScope: 'character' }
+  );
+  assert.equal(nestPrev.ok, false);
+  assert.match(nestPrev.error, /중첩할 수 없습니다/);
+});
+
+test('organize_lorebook creates folder + moves 25 entries atomically, reuses folders past index 40, supports module/chat scopes, and undoes in 1 click', async () => {
+  const { LORE_FOLDER_PREFIX } = await import('../src/host-adapter.js');
+  const { state, adapter } = createMockHost();
+
+  // Seed 45 lorebooks + 1 pre-existing folder at the very end (index 45, previously invisible past slice(0,30)/(0,40)!)
+  const preExistingFolderKey = '\uf000folder:late-folder-45';
+  state.character.globalLore = Array.from({ length: 45 }, (_, i) => ({
+    comment: `항목 ${i + 1}`,
+    key: `k${i + 1}`,
+    content: `내용 ${i + 1}`,
+    insertorder: 100,
+    mode: 'normal',
+  }));
+  state.character.globalLore.push({
+    comment: '미리 만든 폴더',
+    key: preExistingFolderKey,
+    content: '',
+    insertorder: 100,
+    mode: 'folder',
+    alwaysActive: false,
+    secondkey: '',
+    selective: false,
+  });
+
+  // Snapshot MUST include the folder at index 45 in both loreSummary and foldersSummary
+  const snap = await adapter.readTargetSnapshot({ targetKind: 'char_lorebook', loreScope: 'character' });
+  assert.equal(snap.ok, true);
+  assert.equal(snap.foldersSummary.length, 1);
+  assert.equal(snap.foldersSummary[0].index, 45);
+  assert.equal(snap.foldersSummary[0].name, '미리 만든 폴더');
+  assert.ok(snap.loreSummary.some(e => e.index === 45 && e.mode === 'folder'));
+
+  // 1. Create a NEW folder and move 25 entries atomically (only 1 Undo slot!)
+  const indices25 = Array.from({ length: 25 }, (_, i) => i);
+  const createProp = {
+    action: 'organize_lorebook',
+    scope: 'character',
+    folderName: '세계관 묶음',
+    createFolderIfMissing: true,
+    loreIndices: indices25,
+  };
+  const createPrev = await adapter.previewProposal(createProp, { targetKind: 'char_lorebook', loreScope: 'character' });
+  assert.equal(createPrev.ok, true);
+  assert.match(createPrev.after, /새 폴더 생성: "세계관 묶음"/);
+
+  const createRes = await adapter.applyProposal(createProp, createPrev.target, { hostBinding: createPrev.hostBinding });
+  assert.equal(createRes.ok, true);
+  assert.equal(createRes.createdFolder, true);
+  assert.equal(createRes.movedCount, 25);
+  assert.ok(createRes.folderKey.startsWith(LORE_FOLDER_PREFIX));
+  assert.equal(adapter.undoStack.length, 1, 'moving 25 entries + creating folder must take only 1 undo slot');
+
+  const createdFolderEntry = state.character.globalLore.find(e => e.mode === 'folder' && e.comment === '세계관 묶음');
+  assert.ok(createdFolderEntry);
+  assert.equal(createdFolderEntry.key, createRes.folderKey);
+  for (const idx of indices25) {
+    assert.equal(state.character.globalLore[idx].folder, createRes.folderKey);
+  }
+
+  // 1-click surgical Undo restores all 25 entries to root AND removes the newly created folder
+  await adapter.undo(createRes.undoId);
+  assert.equal(state.character.globalLore.length, 46);
+  for (const idx of indices25) {
+    assert.equal(Object.hasOwn(state.character.globalLore[idx], 'folder'), false);
+  }
+
+  // 2. Move into pre-existing folder at index 45 by folderName (even if folder index accidentally included in loreIndices!)
+  const reuseProp = {
+    action: 'organize_lorebook',
+    scope: 'character',
+    folderName: '미리 만든 폴더',
+    loreIndices: [0, 1, 2, 45],
+  };
+  const reusePrev = await adapter.previewProposal(reuseProp, { targetKind: 'char_lorebook', loreScope: 'character' });
+  assert.equal(reusePrev.ok, true);
+  assert.match(reusePrev.warning, /중첩할 수 없어 이동 대상에서 제외/);
+
+  const reuseRes = await adapter.applyProposal(reuseProp, reusePrev.target, { hostBinding: reusePrev.hostBinding });
+  assert.equal(reuseRes.createdFolder, false, 'must reuse existing folder without creating a duplicate');
+  assert.equal(state.character.globalLore.length, 46);
+  assert.equal(state.character.globalLore[0].folder, preExistingFolderKey);
+  assert.equal(state.character.globalLore[1].folder, preExistingFolderKey);
+  assert.equal(state.character.globalLore[2].folder, preExistingFolderKey);
+  assert.equal(Object.hasOwn(state.character.globalLore[45], 'folder'), false);
+
+  // 3. Move back to root
+  const rootRes = await adapter.applyProposal(
+    { action: 'organize_lorebook', scope: 'character', moveToRoot: true, loreIndices: [0, 1] },
+    { targetKind: 'char_lorebook', loreScope: 'character' }
+  );
+  assert.equal(Object.hasOwn(state.character.globalLore[0], 'folder'), false);
+  assert.equal(Object.hasOwn(state.character.globalLore[1], 'folder'), false);
+  assert.equal(state.character.globalLore[2].folder, preExistingFolderKey);
+  await adapter.undo(rootRes.undoId);
+  assert.equal(state.character.globalLore[0].folder, preExistingFolderKey);
+
+  // 4. Module scope organize_lorebook + Undo
+  state.db.modules[0].lorebook = [
+    { comment: 'M1', key: 'm1', content: 'c1', mode: 'normal' },
+    { comment: 'M2', key: 'm2', content: 'c2', mode: 'normal' },
+  ];
+  const modRes = await adapter.applyProposal(
+    { action: 'organize_lorebook', scope: 'module', moduleIndex: 0, folderName: '모듈폴더', loreIndices: [0, 1] },
+    { targetKind: 'module_lorebook', loreScope: 'module', moduleIndex: 0 }
+  );
+  assert.equal(state.db.modules[0].lorebook.length, 3);
+  assert.equal(state.db.modules[0].lorebook[0].folder, modRes.folderKey);
+  assert.equal(state.db.modules[0].lorebook[1].folder, modRes.folderKey);
+  await adapter.undo(modRes.undoId);
+  assert.equal(state.db.modules[0].lorebook.length, 2);
+  assert.equal(Object.hasOwn(state.db.modules[0].lorebook[0], 'folder'), false);
+});
+
+test('HostAdapter supports >= 100 Undo history depth without dropping edits beyond 20 (Bug #2)', async () => {
+  const { state, adapter } = createMockHost();
+  assert.ok(adapter.maxUndo >= 100);
+
+  const initial = state.character.desc;
+  const undoIds = [];
+  for (let i = 1; i <= 30; i++) {
+    const res = await adapter.applyProposal(
+      { action: 'replace_text', content: `버전 ${i}` },
+      { targetKind: 'char_field', fieldKey: 'desc' }
+    );
+    undoIds.push(res.undoId);
+  }
+  assert.equal(adapter.undoStack.length, 30);
+
+  for (let i = undoIds.length - 1; i >= 0; i--) {
+    await adapter.undo(undoIds[i]);
+  }
+  assert.equal(state.character.desc, initial);
+  assert.equal(adapter.undoStack.length, 0);
+});
+
+test('findOrphanedLorebooks and recoverOrphanedLorebooks detect and rescue trapped lorebooks with surgical Undo', async () => {
+  const { findOrphanedLorebooks } = await import('../src/host-adapter.js');
+  const { state, adapter } = createMockHost();
+
+  const validKey = '\uf000folder:valid-1';
+  state.character.globalLore = [
+    { comment: '정상 루트', key: 'a', content: '1', mode: 'normal' },
+    { comment: '정상 폴더', key: validKey, content: '', mode: 'folder' },
+    { comment: '정상 폴더 안', key: 'b', content: '2', mode: 'normal', folder: validKey },
+    { comment: '고아 1 (폴더명 오기입)', key: 'c', content: '3', mode: 'normal', folder: '세계관' },
+    { comment: '고아 2 (이중 이스케이프)', key: 'd', content: '4', mode: 'normal', folder: '\\uf000folder:valid-1' },
+  ];
+
+  assert.deepEqual(findOrphanedLorebooks(state.character.globalLore), [3, 4]);
+
+  const snap = await adapter.readTargetSnapshot({ targetKind: 'char_lorebook', loreScope: 'character' });
+  assert.equal(snap.orphanedLoreCount, 2);
+  assert.deepEqual(snap.orphanedLoreIndices, [3, 4]);
+  assert.equal(snap.loreSummary[3].orphaned, true);
+
+  const rescued = await adapter.recoverOrphanedLorebooks({ targetKind: 'char_lorebook', loreScope: 'character' });
+  assert.equal(rescued.ok, true);
+  assert.equal(rescued.recoveredCount, 2);
+  assert.deepEqual(findOrphanedLorebooks(state.character.globalLore), []);
+  assert.equal(state.character.globalLore[2].folder, validKey, 'valid folder assignment must remain untouched');
+  assert.equal(Object.hasOwn(state.character.globalLore[3], 'folder'), false);
+  assert.equal(Object.hasOwn(state.character.globalLore[4], 'folder'), false);
+
+  // Undo restores exact prior broken folder strings if ever needed
+  await adapter.undo(rescued.undoId);
+  assert.equal(state.character.globalLore[3].folder, '세계관');
+  assert.equal(state.character.globalLore[4].folder, '\\uf000folder:valid-1');
+});

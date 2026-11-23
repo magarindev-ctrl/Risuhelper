@@ -25,7 +25,7 @@ const KNOWLEDGE_SECTIONS = {
   - insertorder(숫자, 기본 100): 높을수록 우선순위가 높아 토큰 예산(loreBookToken) 안에서 먼저 채택되고 프롬프트 하단에 가깝게 배치.
   - useRegex(true): 활성화 키를 정규식으로 매칭.
   - activationPercent: 0~100 확률 활성화.
-  - mode: 'normal' | 'constant' | 'multiple' | 'child' | 'folder' (폴더는 key가 '\\uf000folder:<uuid>').
+  - mode: 'normal' | 'constant' | 'multiple' | 'child' | 'folder' (폴더는 RisuAI 내부적으로 mode='folder', key='\uf000folder:<uuid>'를 쓰며 자식 로어북은 folder=폴더.key로 연결됨. 폴더 생성·이동 시 키를 직접 작성하지 말고 단일 organize_lorebook 액션에 folderName/folderIndex와 loreIndices를 지정해 한 번에 정리할 것).
 - 주요 데코레이터(본문 최상단 줄에 기재):
   - @@depth N: 채팅 끝에서 N번째 위치에 삽입
   - @@role user|assistant|system: 삽입 메시지 역할 지정

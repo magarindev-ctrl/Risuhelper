@@ -1101,3 +1101,144 @@ test('dist/risuhelper.js warns about stale tempModule after module apply and ref
   assert.equal(findButtons('📝 DB 최신본을 입력칸에 채우기').length, 0, 'mismatch banner clears once DOM is synced');
 });
 
+test('dist/risuhelper.js rescues orphaned lorebooks in 1 click and organizes lorebooks into a folder past index 30', async () => {
+  const code = fs.readFileSync(BUNDLE_PATH, 'utf8');
+  const doc = createMockDocument();
+  const registeredButtons = [];
+  let capturedMessages = null;
+
+  const existingFolderKey = '\uf000folder:existing-bg-35';
+  const state = {
+    character: {
+      chaId: 'char-folder-e2e',
+      name: '로어테스트',
+      desc: '테스트 캐릭터',
+      globalLore: [
+        ...Array.from({ length: 33 }, (_, i) => ({
+          comment: `로어 ${i + 1}`,
+          key: `k${i + 1}`,
+          content: `본문 ${i + 1}`,
+          insertorder: 100,
+          mode: 'normal',
+        })),
+        { comment: '숨겨진 로어 A', key: 'a', content: '살아있는 본문 A', insertorder: 100, mode: 'normal', folder: '잘못된폴더키' },
+        { comment: '숨겨진 로어 B', key: 'b', content: '살아있는 본문 B', insertorder: 100, mode: 'normal', folder: '\\uf000folder:existing-bg-35' },
+        { comment: '배경설정', key: existingFolderKey, content: '', insertorder: 100, mode: 'folder', alwaysActive: false, secondkey: '', selective: false },
+      ],
+      customscript: [],
+      triggerscript: [],
+      chats: [{ localLore: [], message: [] }],
+    },
+  };
+
+  const mockRisuai = {
+    pluginStorage: { async getItem() { return null; }, async setItem() {} },
+    async getColorScheme() { return { scheme: { type: 'dark' } }; },
+    async registerButton(meta, cb) { registeredButtons.push({ meta, cb }); return { id: meta.id }; },
+    async registerSetting(_n, _cb, _i, _t, id) { return { id }; },
+    async unregisterUIPart() {},
+    async onUnload() {},
+    async showContainer() {},
+    async hideContainer() {},
+    async getCharacter() { return structuredClone(state.character); },
+    async setCharacter(c) { state.character = structuredClone(c); },
+    async getCurrentCharacterIndex() { return 0; },
+    async getCurrentChatIndex() { return 0; },
+    async getRootDocument() { return null; },
+    async runLLMModel({ messages }) {
+      capturedMessages = messages;
+      return [
+        '미리 만들어 둔 배경설정 폴더로 옮겼습니다.',
+        '```risuhelper-proposal',
+        JSON.stringify({
+          action: 'organize_lorebook',
+          title: '배경설정 폴더로 로어북 3개 이동',
+          scope: 'character',
+          folderName: '배경설정',
+          loreIndices: [0, 33, 34],
+        }),
+        '```',
+      ].join('\n');
+    },
+  };
+
+  const sandbox = {
+    risuai: mockRisuai,
+    document: doc,
+    console,
+    setTimeout,
+    clearTimeout,
+    TextEncoder,
+    TextDecoder,
+    Uint8Array,
+    Int32Array,
+    DataView,
+    URL,
+    Blob,
+    atob,
+    crypto,
+    DecompressionStream,
+    structuredClone,
+  };
+  sandbox.globalThis = sandbox;
+  vm.runInNewContext(code, sandbox, { filename: 'dist/risuhelper.js' });
+  await new Promise(r => setTimeout(r, 30));
+
+  const findAll = (pred) => {
+    const out = [];
+    const walk = (n) => {
+      if (pred(n)) out.push(n);
+      for (const c of n.children || []) walk(c);
+    };
+    walk(doc.body);
+    return out;
+  };
+
+  // Open drawer and switch to char_lorebook
+  registeredButtons[0].cb();
+  await new Promise(r => setTimeout(r, 20));
+  const targetSel = findAll(n => n.tagName === 'SELECT')[0];
+  targetSel.value = 'char_lorebook:';
+  for (const fn of targetSel.listeners.get('change') || []) await fn({ target: targetSel });
+
+  // 1. Orphaned Lorebook Rescue banner & button MUST appear for the 2 hidden lorebooks
+  const rescueBtn = findAll(n => n.tagName === 'BUTTON' && n.textContent === '🛟 숨겨진 로어북 2개 최상위로 복구')[0];
+  assert.ok(rescueBtn, 'rescue button should appear when orphaned lorebooks exist');
+
+  rescueBtn.click();
+  await new Promise(r => setTimeout(r, 30));
+
+  assert.equal(Object.hasOwn(state.character.globalLore[33], 'folder'), false);
+  assert.equal(Object.hasOwn(state.character.globalLore[34], 'folder'), false);
+  assert.equal(state.character.globalLore[33].content, '살아있는 본문 A');
+  assert.equal(findAll(n => n.tagName === 'BUTTON' && n.textContent.includes('최상위로 복구')).length, 0, 'rescue banner clears after recovery');
+
+  // 2. Ask LLM to move lorebooks into existing folder at index 35 -> LLM receives folder at index 35 in context!
+  doc.querySelector('.rh-composer-input').value = '배경설정 폴더에 담아줘';
+  findAll(n => n.tagName === 'BUTTON' && n.textContent === '전송')[0].click();
+  await new Promise(r => setTimeout(r, 40));
+
+  assert.ok(capturedMessages, 'LLM should be called');
+  assert.match(capturedMessages[0].content, /배경설정/, 'folder past index 30 must be visible to LLM');
+
+  const applyBtn = findAll(n => n.tagName === 'BUTTON' && n.textContent === '적용')[0];
+  assert.ok(applyBtn, 'organize_lorebook proposal should validate cleanly and render Apply button');
+  applyBtn.click();
+  await new Promise(r => setTimeout(r, 30));
+
+  assert.equal(state.character.globalLore[0].folder, existingFolderKey);
+  assert.equal(state.character.globalLore[33].folder, existingFolderKey);
+  assert.equal(state.character.globalLore[34].folder, existingFolderKey);
+  assert.equal(state.character.globalLore.length, 36, 'must reuse existing folder without duplicating it');
+
+  // 3. 1-click Undo reverts all 3 moved entries in one step
+  const undoCardBtn = findAll(n => n.tagName === 'BUTTON' && n.textContent === '되돌리기')[0];
+  assert.ok(undoCardBtn);
+  undoCardBtn.click();
+  await new Promise(r => setTimeout(r, 30));
+
+  assert.equal(Object.hasOwn(state.character.globalLore[0], 'folder'), false);
+  assert.equal(Object.hasOwn(state.character.globalLore[33], 'folder'), false);
+  assert.equal(Object.hasOwn(state.character.globalLore[34], 'folder'), false);
+});
+
