@@ -1,4 +1,4 @@
-import { VERSION, STORAGE_KEY, PRESET_STORAGE_KEY, CHAR_FIELD_META, SCREEN_LABELS } from './version.js';
+import { VERSION, STORAGE_KEY, PRESET_STORAGE_KEY, CHAR_FIELD_META, MODULE_FIELD_META, CONFIG_FIELD_META, SCREEN_LABELS } from './version.js';
 import { STYLES } from './style.js';
 import { FocusTracker, normalizeChipPos, MIN_DOCK_VIEWPORT_PX } from './focus-detector.js';
 import { HostAdapter } from './host-adapter.js';
@@ -109,6 +109,9 @@ class RisuHelperApp {
       ctx.loreIndex ?? '',
       ctx.loreScope || '',
       ctx.regexIndex ?? '',
+      ctx.greetingIndex ?? '',
+      ctx.messageIndex ?? '',
+      ctx.moduleIndex ?? '',
       ctx.labelText || '',
     ].join('|');
   }
@@ -654,22 +657,34 @@ class RisuHelperApp {
     const opts = [
       { value: 'auto', label: this.detectedContext ? `📍 자동 감지: ${this.detectedContext.labelText}` : '📍 자동 감지 (미감지 · 일반)' },
       { value: 'char_field:desc', label: '캐릭터 · 설명 (Description)' },
+      { value: 'char_field:additionalText', label: '캐릭터 · 추가 디스크립션' },
       { value: 'char_field:firstMessage', label: '캐릭터 · 첫 메시지 (First Message)' },
+      { value: 'char_alt_greeting:', label: '캐릭터 · 추가 첫 메시지 (Alternate Greetings)' },
       { value: 'chat_note:', label: "채팅 · 작가의 노트 (Author's Note)" },
+      { value: 'chat_message:', label: '채팅 · 메시지 수정 (말풍선)' },
       { value: 'char_field:systemPrompt', label: '캐릭터 · 시스템 프롬프트' },
       { value: 'char_field:replaceGlobalNote', label: '캐릭터 · 글로벌 노트 덮어쓰기' },
+      { value: 'char_field:depthPrompt', label: '캐릭터 · 깊이 프롬프트 (Depth Prompt)' },
+      { value: 'char_field:defaultVariables', label: '캐릭터 · 기본 변수 (Default Variables)' },
+      { value: 'char_field:customModuleToggle', label: '캐릭터 · 커스텀 토글' },
+      { value: 'char_field:translatorNote', label: '캐릭터 · 번역가의 노트' },
       { value: 'char_field:creatorNotes', label: '캐릭터 · 제작자 코멘트' },
+      { value: 'char_field:nickname', label: '캐릭터 · 닉네임' },
       { value: 'char_field:backgroundHTML', label: '캐릭터 · 백그라운드 임베딩 (HTML)' },
       { value: 'char_lorebook:', label: '캐릭터 로어북 (목록 / 생성)' },
       { value: 'chat_lorebook:', label: '채팅 로컬 로어북 (목록 / 생성)' },
       { value: 'char_lua:', label: '캐릭터 Lua 트리거 스크립트' },
       { value: 'char_regex:', label: '캐릭터 정규식 스크립트' },
       { value: 'persona:', label: '페르소나 (목록 / 생성 · 수정)' },
+      { value: 'module_field:backgroundEmbedding', label: '모듈 · 백그라운드 임베딩 (HTML)' },
+      { value: 'module_field:customModuleToggle', label: '모듈 · 커스텀 토글' },
+      { value: 'module_field:description', label: '모듈 · 설명' },
       { value: 'module_lorebook:', label: '모듈 로어북' },
       { value: 'module_lua:', label: '모듈 Lua 트리거 스크립트' },
       { value: 'module_regex:', label: '모듈 정규식 스크립트' },
       { value: 'config:', label: 'RisuAI 설정 / 컨피그 진단' },
-      { value: 'config:customCSS', label: '설정 · Custom CSS' },
+      { value: 'config:customCSS', label: '설정 · 커스텀 CSS (customCSS)' },
+      { value: 'config:guiHTML', label: '설정 · 채팅 HTML (guiHTML)' },
       { value: 'general:', label: '일반 질문 / 사용법 안내' },
     ];
     return opts;
@@ -680,7 +695,8 @@ class RisuHelperApp {
     const k = this.manualTarget.targetKind;
     const f = this.manualTarget.fieldKey || '';
     if (k === 'char_field') return `char_field:${f}`;
-    if (k === 'config' && f === 'customCSS') return 'config:customCSS';
+    if (k === 'module_field') return `module_field:${f || 'backgroundEmbedding'}`;
+    if (k === 'config' && (f === 'customCSS' || f === 'guiHTML')) return `config:${f}`;
     return `${k}:`;
   }
 
@@ -691,12 +707,15 @@ class RisuHelperApp {
       const [kind, field] = val.split(':');
       const screenMap = {
         char_field: 'character',
+        char_alt_greeting: 'character',
         chat_note: 'character',
+        chat_message: 'chat',
         char_lorebook: 'lorebook',
         chat_lorebook: 'lorebook',
         char_lua: 'scripts',
         char_regex: 'scripts',
         persona: 'persona',
+        module_field: 'module',
         module_lorebook: 'module',
         module_lua: 'module',
         module_regex: 'module',
@@ -708,6 +727,9 @@ class RisuHelperApp {
         targetKind: kind,
         fieldKey: field || (
           kind === 'chat_note' ? 'note' :
+          kind === 'chat_message' ? 'data' :
+          kind === 'char_alt_greeting' ? 'alternateGreetings' :
+          kind === 'module_field' ? 'backgroundEmbedding' :
           kind === 'char_lorebook' || kind === 'chat_lorebook' || kind === 'module_lorebook' ? 'content' :
           kind === 'persona' ? 'personaPrompt' :
           null
@@ -716,9 +738,17 @@ class RisuHelperApp {
         loreScope: kind === 'chat_lorebook' ? 'chat' : kind === 'module_lorebook' ? 'module' : kind === 'char_lorebook' ? 'character' : null,
         labelText: kind === 'char_field'
           ? (CHAR_FIELD_META[field]?.label || field)
-          : kind === 'chat_note'
-            ? '작가의 노트 (현재 채팅)'
-            : (SCREEN_LABELS[screenMap[kind]] || kind),
+          : kind === 'char_alt_greeting'
+            ? '캐릭터 · 추가 첫 메시지'
+            : kind === 'chat_note'
+              ? '작가의 노트 (현재 채팅)'
+              : kind === 'chat_message'
+                ? '채팅 · 메시지 수정'
+                : kind === 'module_field'
+                  ? (MODULE_FIELD_META[field]?.label || `모듈 · ${field}`)
+                  : kind === 'config' && field
+                    ? (CONFIG_FIELD_META[field]?.label || `설정 · ${field}`)
+                    : (SCREEN_LABELS[screenMap[kind]] || kind),
         warnings: [],
       };
     }
@@ -916,7 +946,52 @@ class RisuHelperApp {
       );
     }
 
-    if ((ctx.targetKind === 'module_lorebook' || ctx.targetKind === 'module_lua' || ctx.targetKind === 'module_regex') && Array.isArray(this.activeSnapshot.modulesSummary)) {
+    if (ctx.targetKind === 'char_alt_greeting' && Array.isArray(this.activeSnapshot.altGreetingsSummary) && this.activeSnapshot.altGreetingsSummary.length > 0) {
+      const selectedIdx = ctx.greetingIndex ?? this.activeSnapshot.target?.greetingIndex ?? 0;
+      return h(doc, 'select', {
+        class: 'rh-select',
+        onchange: async (e) => {
+          const base = this.manualTarget || { ...ctx };
+          base.greetingIndex = Number(e.target.value);
+          this.manualTarget = base;
+          await this.refreshContextSnapshot();
+          this.render();
+        },
+      },
+        ...this.activeSnapshot.altGreetingsSummary.map(item =>
+          h(doc, 'option', {
+            value: String(item.index),
+            selected: selectedIdx === item.index,
+          }, `추가 첫 메시지 #${item.index + 1}${item.preview ? ` · ${item.preview}` : ' (비어 있음)'}`)
+        )
+      );
+    }
+
+    if (ctx.targetKind === 'chat_message' && Array.isArray(this.activeSnapshot.messagesSummary) && this.activeSnapshot.messagesSummary.length > 0) {
+      const selectedIdx = ctx.messageIndex ?? this.activeSnapshot.target?.messageIndex;
+      return h(doc, 'select', {
+        class: 'rh-select',
+        onchange: async (e) => {
+          const base = this.manualTarget || { ...ctx };
+          base.messageIndex = Number(e.target.value);
+          this.manualTarget = base;
+          await this.refreshContextSnapshot();
+          this.render();
+        },
+      },
+        ...this.activeSnapshot.messagesSummary.map(item =>
+          h(doc, 'option', {
+            value: String(item.index),
+            selected: selectedIdx === item.index,
+          }, `#${item.index + 1} [${item.role}] ${item.preview || '(비어 있음)'}`)
+        )
+      );
+    }
+
+    if (
+      (ctx.targetKind === 'module_field' || ctx.targetKind === 'module_lorebook' || ctx.targetKind === 'module_lua' || ctx.targetKind === 'module_regex') &&
+      Array.isArray(this.activeSnapshot.modulesSummary)
+    ) {
       return h(doc, 'select', {
         class: 'rh-select',
         onchange: async (e) => {

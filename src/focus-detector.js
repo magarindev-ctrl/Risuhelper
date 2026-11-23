@@ -1,4 +1,4 @@
-import { SCREEN_LABELS, CHAR_FIELD_META } from './version.js';
+import { SCREEN_LABELS, CHAR_FIELD_META, MODULE_FIELD_META, CONFIG_FIELD_META } from './version.js';
 
 const FOCUS_SELECTOR = 'textarea:focus, input:focus, [contenteditable="true"]:focus, [contenteditable=""]:focus';
 const CHAT_INPUT_SELECTOR = 'textarea.text-input-area, textarea#messageInputTranslate, .text-input-area, .chat-input textarea';
@@ -122,6 +122,36 @@ async function isLuaModeBar(el, className) {
 }
 
 /**
+ * Extracts a short field label from PocketRisu's SettingFieldLabel wrapper
+ * (`<div class="flex flex-col ..."><span class="text-sm text-textcolor">Label</span><p>...</p></div>`).
+ */
+async function extractLabelFromColWrapper(el, className) {
+  const cls = String(className || '');
+  if (!cls.includes('flex-col')) return '';
+  if (cls.includes('border-darkborderc') || cls.includes('n-scroll') || cls.includes('border-selected')) {
+    return '';
+  }
+  try {
+    const kids = await el.getChildren();
+    const len = kids ? await kids.length() : 0;
+    if (len === 0 || len > 3) return '';
+    for (let k = 0; k < len; k++) {
+      const child = await kids.at(k);
+      if (!child) continue;
+      const cName = String(await child.nodeName()).toLowerCase();
+      if (cName === 'span' || cName === 'label') {
+        const st = String((await child.textContent()) || '').trim();
+        const cCls = String((await child.getClassName()) || '');
+        if (st && st.length <= 60 && !isMutedHelperSpan(cCls, st)) {
+          return st;
+        }
+      }
+    }
+  } catch {}
+  return '';
+}
+
+/**
  * Pure classification logic: takes DOM snapshot signals gathered from SafeElement traversal
  * and resolves a structured FocusContext suitable for RisuHelper's host adapter & LLM.
  */
@@ -140,10 +170,15 @@ function classifyDomSignals(signals) {
     hasRegexContainer = false,
     hasTriggerContainer = false,
     isChatInput = false,
+    settingId = '',
+    chatIndex = null,
+    isChatMessageEdit = false,
+    tableRowIndex = null,
   } = signals || {};
 
   const headingText = headings.join(' | ');
   const activeTabText = activeTabs.join(' | ');
+  const normSettingId = String(settingId || '').trim().toLowerCase();
   const warnings = [];
 
   // 0. Explicit chat input textarea (DefaultChatScreen.svelte: textarea.text-input-area / #messageInputTranslate)
@@ -157,6 +192,45 @@ function classifyDomSignals(signals) {
       loreIndex: null,
       loreScope: null,
       labelText: '채팅 입력 화면',
+      placeholder,
+      liveTextPreview,
+      warnings,
+    };
+  }
+
+  // 0.5. Chat bubble message editor (Chat.svelte: .risu-chat[data-chat-index] / textarea.message-edit-area)
+  if (isChatMessageEdit) {
+    const idx = Number.isInteger(chatIndex) ? chatIndex : null;
+    return {
+      detectedAt: Date.now(),
+      screen: 'chat',
+      targetKind: 'chat_message',
+      fieldKey: 'data',
+      loreIndex: null,
+      loreScope: null,
+      messageIndex: idx,
+      labelText: idx === -1
+        ? '채팅 · 첫 메시지 수정'
+        : idx !== null && idx >= 0
+          ? `채팅 메시지 #${idx + 1} 수정`
+          : '채팅 메시지 수정',
+      placeholder,
+      liveTextPreview,
+      warnings,
+    };
+  }
+
+  // 0.75. Deterministic PocketRisu data-setting-id detection for Display HTML/CSS
+  if (normSettingId === 'display.guihtml' || normSettingId === 'display.customcss') {
+    const fieldKey = normSettingId === 'display.guihtml' ? 'guiHTML' : 'customCSS';
+    return {
+      detectedAt: Date.now(),
+      screen: 'settings',
+      targetKind: 'config',
+      fieldKey,
+      loreIndex: null,
+      loreScope: null,
+      labelText: CONFIG_FIELD_META[fieldKey]?.label || `설정 · ${fieldKey}`,
       placeholder,
       liveTextPreview,
       warnings,
@@ -194,7 +268,7 @@ function classifyDomSignals(signals) {
 
   // 2. Module settings / edit screen
   const isModuleEdit = matchAny(headingText, ['모듈 수정', 'edit module', '모듈 생성', 'create module']);
-  const isModuleScreen = isModuleEdit || matchAny(headingText, ['모듈', 'modules']);
+  const isModuleScreen = isModuleEdit || matchAny(headingText, ['모듈', 'modules']) || normSettingId.startsWith('module.');
 
   if (isModuleEdit) {
     warnings.push('모듈 편집 화면(tempModule)이 열려 있습니다. 플러그인에서 모듈을 저장한 뒤 하단 "모듈 수정" 버튼을 누르면 플러그인 변경이 덮어써질 수 있으니, 편집창을 닫고 다시 확인하세요.');
@@ -278,29 +352,48 @@ function classifyDomSignals(signals) {
     };
   }
 
-  // 6. Module screen non-lorebook fields
+  // 6. Module screen non-lorebook fields (dedicated module_field target)
   if (isModuleScreen) {
     let fieldKey = 'description';
-    if (matchAny(nearbyLabel, ['백그라운드 임베딩', 'background embedding'])) fieldKey = 'backgroundEmbedding';
-    else if (matchAny(nearbyLabel, ['토글', 'toggle'])) fieldKey = 'customModuleToggle';
-    else if (matchAny(nearbyLabel, ['이름', 'name'])) fieldKey = 'name';
+    if (
+      normSettingId === 'module.backgroundembedding' ||
+      matchAny(nearbyLabel, ['백그라운드 임베딩', 'background embedding', 'background html']) ||
+      matchAny(placeholder, ['백그라운드 임베딩', 'background embedding'])
+    ) {
+      fieldKey = 'backgroundEmbedding';
+    } else if (
+      normSettingId === 'module.custommoduletoggle' ||
+      matchAny(nearbyLabel, ['커스텀 토글', 'custom toggle', '토글', 'toggle'])
+    ) {
+      fieldKey = 'customModuleToggle';
+    } else if (
+      normSettingId === 'module.namespace' ||
+      matchAny(nearbyLabel, ['네임스페이스', 'namespace'])
+    ) {
+      fieldKey = 'namespace';
+    } else if (
+      normSettingId === 'module.name' ||
+      matchAny(nearbyLabel, ['이름', 'name'])
+    ) {
+      fieldKey = 'name';
+    }
     return {
       detectedAt: Date.now(),
       screen: 'module',
-      targetKind: 'module_lorebook',
+      targetKind: 'module_field',
       fieldKey,
       loreIndex: null,
-      loreScope: 'module',
-      labelText: `모듈 설정 · ${nearbyLabel || fieldKey}`,
+      loreScope: null,
+      labelText: MODULE_FIELD_META[fieldKey]?.label || `모듈 · ${nearbyLabel || fieldKey}`,
       placeholder,
       liveTextPreview,
       warnings,
     };
   }
 
-  // 7. Explicit config CSS/HTML fields
-  if (matchAny(nearbyLabel, ['커스텀 css', 'custom css', 'gui html'])) {
-    const fieldKey = matchAny(nearbyLabel, ['gui html']) ? 'guiHTML' : 'customCSS';
+  // 7. Explicit config CSS/HTML fields (upstream RisuAI & PocketRisu labels)
+  if (matchAny(nearbyLabel, ['커스텀 css', 'custom css', '채팅 html', 'chat html', 'gui html'])) {
+    const fieldKey = matchAny(nearbyLabel, ['채팅 html', 'chat html', 'gui html']) ? 'guiHTML' : 'customCSS';
     return {
       detectedAt: Date.now(),
       screen: 'settings',
@@ -308,7 +401,7 @@ function classifyDomSignals(signals) {
       fieldKey,
       loreIndex: null,
       loreScope: null,
-      labelText: `설정 · ${fieldKey}`,
+      labelText: CONFIG_FIELD_META[fieldKey]?.label || `설정 · ${fieldKey}`,
       placeholder,
       liveTextPreview,
       warnings,
@@ -331,10 +424,30 @@ function classifyDomSignals(signals) {
     };
   }
 
+  // 8.5. Character Alternate Greetings (checked BEFORE firstMessage because '추가 첫 메시지' contains '첫 메시지')
+  if (matchAny(nearbyLabel, ['추가 첫 메시지', 'alternate greetings', 'alt greet'])) {
+    const gIdx = Number.isInteger(tableRowIndex) && tableRowIndex >= 0 ? tableRowIndex : null;
+    return {
+      detectedAt: Date.now(),
+      screen: 'character',
+      targetKind: 'char_alt_greeting',
+      fieldKey: 'alternateGreetings',
+      loreIndex: null,
+      loreScope: null,
+      greetingIndex: gIdx,
+      labelText: gIdx !== null ? `캐릭터 · 추가 첫 메시지 #${gIdx + 1}` : '캐릭터 · 추가 첫 메시지',
+      placeholder,
+      liveTextPreview,
+      warnings,
+    };
+  }
+
   // 9. Character config fields (CharConfig.svelte — checked BEFORE generic Settings headings
   //    because CharConfig's Advanced tab also renders <h2>고급 설정</h2>)
   const charFieldChecks = [
     ['name', ['character name', 'group name', '캐릭터 이름', '그룹 이름']],
+    ['nickname', ['닉네임', 'nickname']],
+    ['additionalText', ['추가 디스크립션', 'additional description', 'additional text']],
     ['desc', ['설명', 'description', '캐릭터 설명']],
     ['firstMessage', ['첫 메시지', 'first message']],
     ['creatorNotes', ['제작자 코멘트', "creator's comment", 'creator notes']],
@@ -344,11 +457,18 @@ function classifyDomSignals(signals) {
     ['exampleMessage', ['예시 대화', 'example message']],
     ['personality', ['성격', 'personality']],
     ['scenario', ['시나리오', 'scenario']],
+    ['defaultVariables', ['기본 변수', 'default variables']],
+    ['translatorNote', ['번역가의 노트', 'translator note', "translator's note"]],
+    ['customModuleToggle', ['커스텀 토글', 'custom toggle', 'custom prompt template toggle']],
+    ['depthPrompt', ['깊이 프롬프트', 'depth prompt']],
     ['backgroundHTML', ['백그라운드 임베딩', 'background embedding', 'background html']],
     ['virtualscript', ['캐릭터js', '캐릭터 js', 'charjs', 'character js']],
   ];
 
   for (const [key, terms] of charFieldChecks) {
+    if (key === 'depthPrompt' && String(inputType || '').toLowerCase() === 'number') {
+      continue;
+    }
     if (matchAny(nearbyLabel, terms) || matchAny(placeholder, terms)) {
       const meta = CHAR_FIELD_META[key];
       return {
@@ -462,39 +582,64 @@ async function inspectFocusedElement(rootDoc) {
     const activeTabs = [];
     let nearbyLabel = '';
     let loreIdx = null;
+    let settingId = attrs['data-setting-id'] || '';
+    let chatIndex = null;
+    let tableRowIndex = null;
     let luaButtonActive = false;
     let hasRegexContainer = false;
     let hasTriggerContainer = false;
     // Check the focused element itself first (DefaultChatScreen puts `text-input-area` directly on <textarea>)
     let isChatInput = isChatElementAttrs(attrs);
+    let isChatMessageEdit = String(attrs.class || '').includes('message-edit-area');
 
-    // Walk up ancestors (bounded to 8 hops to stay fast over iframe RPC)
+    // Walk up ancestors (bounded to 12 hops; child scans stay strictly bounded to close containers)
     let cur = el;
     let curOuter = outerHtml;
     let curTag = tag;
-    for (let depth = 0; depth < 8 && cur; depth++) {
+    for (let depth = 0; depth < 12 && cur; depth++) {
       const parent = await cur.getParent();
       if (!parent) break;
 
       const pOuter = await parent.getOuterHTML();
       const pAttrs = parseOpeningTagAttrs(pOuter);
+      const pTag = pAttrs._tag || '';
 
       if (loreIdx === null && pAttrs['data-risu-idx'] !== undefined) {
         const parsed = parseInt(pAttrs['data-risu-idx'], 10);
         if (!Number.isNaN(parsed)) loreIdx = parsed;
       }
 
+      if (!settingId && pAttrs['data-setting-id']) {
+        settingId = pAttrs['data-setting-id'];
+      }
+
+      if (chatIndex === null && pAttrs['data-chat-index'] !== undefined) {
+        const parsed = parseInt(pAttrs['data-chat-index'], 10);
+        if (!Number.isNaN(parsed)) {
+          chatIndex = parsed;
+          isChatMessageEdit = true;
+        }
+      }
+
+      if (!isChatMessageEdit && String(pAttrs.class || '').split(/\s+/).includes('risu-chat')) {
+        isChatMessageEdit = true;
+      }
+
+      const trackTableRow = tableRowIndex === null && curTag === 'tr' && (pTag === 'tbody' || pTag === 'table') && depth <= 5;
+      const needAltGreetingLabel = tableRowIndex !== null && !nearbyLabel && depth <= 8;
+      const shouldScanChildren = depth <= 4 || trackTableRow || needAltGreetingLabel;
+
       // Inspect direct children of close ancestors for labels, headings, and Lua/Regex/tab markers
-      if (depth <= 4) {
+      if (shouldScanChildren) {
         const children = await parent.getChildren();
         const len = children ? await children.length() : 0;
         const limit = Math.min(len, 64);
-        const checkLocalContext = depth <= 3;
+        const checkLocalContext = depth <= 3 || needAltGreetingLabel;
 
         // When depth > 0, check if SafeElement.querySelector(':focus') resolves the exact descendant branch.
         // This disambiguates sibling TextAreaInput wrappers that share identical outerHTML (e.g. PocketRisu).
         let focusQueryWorks = false;
-        if (checkLocalContext && depth > 0 && typeof parent.querySelector === 'function') {
+        if ((checkLocalContext || trackTableRow) && depth > 0 && typeof parent.querySelector === 'function') {
           try {
             focusQueryWorks = Boolean(await parent.querySelector(FOCUS_SELECTOR));
           } catch {}
@@ -504,6 +649,7 @@ async function inspectFocusedElement(rootDoc) {
         let prevFallbackSpan = '';
         let prevSiblingWasLuaBar = false;
         let foundCur = false;
+        let seenTrCount = 0;
         const containerSpanLabels = [];
 
         for (let i = 0; i < limit; i++) {
@@ -513,7 +659,7 @@ async function inspectFocusedElement(rootDoc) {
 
           // 1. Identify the exact sibling matching `cur`
           let isCur = false;
-          if (checkLocalContext && !foundCur && (!curTag || cName === curTag)) {
+          if ((checkLocalContext || trackTableRow) && !foundCur && (!curTag || cName === curTag)) {
             if (depth > 0 && focusQueryWorks) {
               try {
                 isCur = Boolean(await child.querySelector(FOCUS_SELECTOR));
@@ -534,6 +680,10 @@ async function inspectFocusedElement(rootDoc) {
 
           if (isCur) {
             foundCur = true;
+            if (trackTableRow && seenTrCount >= 1) {
+              // Row 0 is the <th> header row in CharConfig's alternateGreetings table
+              tableRowIndex = seenTrCount - 1;
+            }
             const candidateLabel = prevPrimarySpan || prevFallbackSpan;
             if (!nearbyLabel && candidateLabel) {
               nearbyLabel = candidateLabel;
@@ -542,6 +692,11 @@ async function inspectFocusedElement(rootDoc) {
               luaButtonActive = true;
               hasTriggerContainer = true;
             }
+            continue;
+          }
+
+          if (trackTableRow && !foundCur && cName === 'tr') {
+            seenTrCount++;
             continue;
           }
 
@@ -589,7 +744,11 @@ async function inspectFocusedElement(rootDoc) {
                 prevSiblingWasLuaBar = true;
               } else {
                 prevSiblingWasLuaBar = false;
-                if (
+                const colLabel = await extractLabelFromColWrapper(child, cClass);
+                if (colLabel) {
+                  prevPrimarySpan = colLabel;
+                  prevFallbackSpan = '';
+                } else if (
                   cClass.includes('border-darkborderc') ||
                   cClass.includes('n-scroll') ||
                   cClass.includes('border-selected')
@@ -619,7 +778,7 @@ async function inspectFocusedElement(rootDoc) {
         }
       }
 
-      if (depth === 4 || depth === 6) {
+      if (depth === 4 || depth === 6 || depth === 8) {
         try {
           const h2 = await parent.querySelector('h2');
           if (h2) {
@@ -635,11 +794,11 @@ async function inspectFocusedElement(rootDoc) {
 
       cur = parent;
       curOuter = pOuter;
-      curTag = pAttrs._tag || '';
+      curTag = pTag;
     }
 
     // Also look at top-level headings in rootDoc if none found locally
-    if (!isChatInput && headings.length === 0) {
+    if (!isChatInput && !isChatMessageEdit && headings.length === 0) {
       try {
         const allH2 = await rootDoc.querySelectorAll('h2');
         const count = allH2 ? Math.min(await allH2.length(), 4) : 0;
@@ -665,6 +824,10 @@ async function inspectFocusedElement(rootDoc) {
       hasRegexContainer,
       hasTriggerContainer,
       isChatInput,
+      settingId,
+      chatIndex,
+      isChatMessageEdit,
+      tableRowIndex,
     });
   } catch {
     return null;

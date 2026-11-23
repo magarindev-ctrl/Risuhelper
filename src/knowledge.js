@@ -6,13 +6,14 @@ const KNOWLEDGE_SECTIONS = {
 - 주요 공개 포크: 원본(kwaroran/Risuai), PocketRisu(셀프호스팅), RisuBard(PocketRisu 기반 + BardWiki 서사 메모리), HaejeokRisuai(해적리스, 메모리/도메인 스토어 최적화), RisuNest(네이티브 앱).`,
 
   character: `[캐릭터 설정 필드 가이드]
-- desc (설명): 캐릭터의 핵심 외형·성격·세계관·관계·말투를 담는 메인 프롬프트. personality/scenario 필드는 구버전 호환용으로 비워 두고 desc에 통합하는 것이 권장됩니다.
+- desc (설명) / additionalText (추가 디스크립션): 캐릭터의 핵심 외형·성격·세계관·관계·말투를 담는 메인 프롬프트. personality/scenario 필드는 구버전 호환용으로 비워 두고 desc에 통합하는 것이 권장됩니다.
 - firstMessage (첫 메시지) / alternateGreetings (추가 첫 메시지): 대화 시작 시 AI가 보내는 첫 출력. 문체와 서술 시점(1인칭/3인칭)을 결정합니다.
 - systemPrompt (시스템 프롬프트): 비어 있지 않으면 전역 메인 프롬프트를 대체합니다.
-- replaceGlobalNote (글로벌 노트 덮어쓰기): 비어 있지 않으면 전역 UJB/글로벌 노트를 대체합니다.
+- replaceGlobalNote (글로벌 노트 덮어쓰기) / depth_prompt (깊이 프롬프트): 전역 노트 대체 또는 지정된 채팅 깊이(depth)에 프롬프트를 주입합니다.
+- defaultVariables (기본 변수) / customModuleToggle (커스텀 토글): 상태창·Lua·CBS에서 쓰는 기본 채팅 변수(key=value)와 캐릭터 전용 토글을 정의합니다.
 - backgroundHTML (백그라운드 임베딩): 채팅 배경에 삽입되는 HTML/CSS/마크다운. {{bg::에셋명}}, {{audio::에셋명}} 등을 사용할 수 있습니다.
-- chat.note (작가의 노트): 현재 채팅 세션에만 주입되는 방향성·문체·전개 지시 메모입니다.
-- creatorNotes (제작자 코멘트): 프롬프트에 직접 들어가지 않는 제작자 안내 메모입니다.`,
+- chat.note (작가의 노트) / translatorNote (번역가의 노트): 현재 채팅 방향성 지시 및 번역기 참고 메모입니다.
+- creatorNotes (제작자 코멘트) / nickname (닉네임): 제작자 안내 메모 및 표시/치환용 닉네임입니다.`,
 
   lorebook: `[로어북 (Lorebook) 가이드]
 - 3가지 스코프: (1) 캐릭터 로어북(char.globalLore), (2) 현재 채팅 로컬 로어북(chat.localLore), (3) 모듈 로어북(db.modules[i].lorebook).
@@ -80,7 +81,7 @@ const KNOWLEDGE_SECTIONS = {
   - maxResponse: AI 한 번의 응답 최대 출력 토큰 수
   - frequencyPenalty / PresensePenalty: 반복 억제 페널티 (RisuAI 원본 키 철자가 'PresensePenalty'임에 주의)
   - theme / textTheme / colorSchemeName / lineHeight: UI 테마 및 가독성
-  - customCSS / guiHTML: 화면 커스텀 CSS 및 GUI HTML (문제 발생 시 Ctrl+. 로 Custom CSS 토글)
+  - customCSS / guiHTML: 디스플레이 설정의 커스텀 CSS 및 채팅 HTML(theme === 'customHTML'일 때 적용; CSS 문제 시 Ctrl+. 로 토글)
   - enabledModules / moduleIntergration: 전역 활성화 모듈 ID 목록 및 모듈 통합 문자열
   - seperateModels / seperateModelsForAxModels: 보조 작업별 별도 모델 설정
 - 플러그인이 보안상 직접 접근할 수 없는 설정(사용자가 RisuAI 설정 메뉴에서 직접 변경해야 함): API 키, 메인 모델 선택(aiModel), 프롬프트 템플릿 순서(formatingOrder), 로어북 기본 스캔 깊이/예산(loreBookDepth/loreBookToken — 단 캐릭터별 char.loreSettings는 수정 가능).`,
@@ -91,7 +92,7 @@ function buildKnowledgeForContext(context) {
   const screen = context?.screen || 'unknown';
   const kind = context?.targetKind || 'general';
 
-  if (screen === 'character' || kind === 'char_field') {
+  if (screen === 'character' || kind === 'char_field' || kind === 'char_alt_greeting') {
     keys.add('character');
     keys.add('cbs');
   }
@@ -116,6 +117,9 @@ function buildKnowledgeForContext(context) {
   }
   if (screen === 'settings' || kind === 'config') {
     keys.add('config');
+    if (context?.fieldKey === 'guiHTML' || context?.fieldKey === 'customCSS') {
+      keys.add('cbs');
+    }
   }
   if (screen === 'chat' || screen === 'unknown' || kind === 'general' || kind === 'chat_message') {
     keys.add('character');
@@ -145,6 +149,20 @@ function getQuickPromptsForContext(context) {
       { label: '정규식 사용법', prompt: 'editinput, editoutput, editprocess, editdisplay의 차이와 안전한 작성 요령을 알려 줘.' },
     ];
   }
+  if (kind === 'module_field') {
+    return [
+      { label: '모듈 필드 다듬기', prompt: '현재 선택된 모듈 필드(백그라운드 임베딩/커스텀 토글/설명 등)의 문법과 구조를 점검하고 개선안을 제안해 줘.' },
+      { label: '토글/임베딩 작성', prompt: '이 모듈에 맞는 깔끔한 백그라운드 임베딩 HTML/CSS 또는 커스텀 토글 구문을 작성해 줘.' },
+      { label: '모듈 작성 팁', prompt: 'RisuAI 모듈의 백그라운드 임베딩과 커스텀 토글 작성 시 주의할 점을 알려 줘.' },
+    ];
+  }
+  if (kind === 'chat_message') {
+    return [
+      { label: '문장 다듬기', prompt: '현재 선택된 채팅 메시지의 문맥과 캐릭터 말투를 살리면서 문장을 자연스럽게 다듬는 부분 수정안을 제안해 줘.' },
+      { label: '오타 · 서식 교정', prompt: '현재 채팅 메시지에서 오타, 어색한 번역투, 깨진 마크다운/HTML 태그를 교정하는 수정안을 제안해 줘.' },
+      { label: '분위기/묘사 보강', prompt: '현재 채팅 메시지의 핵심 전개는 유지하면서 감정선과 장면 묘사를 더 생생하게 보강해 줘.' },
+    ];
+  }
   if (kind === 'char_lorebook' || kind === 'chat_lorebook' || kind === 'module_lorebook' || screen === 'lorebook') {
     return [
       { label: '현재 로어북 다듬기', prompt: '현재 선택된 로어북 항목의 키워드, 배치 순서, 본문을 토큰 효율적이고 명확하게 다듬는 수정안을 제안해 줘.' },
@@ -159,6 +177,20 @@ function getQuickPromptsForContext(context) {
       { label: '페르소나/바인딩 안내', prompt: '페르소나 작성 팁과 채팅별 페르소나 바인딩(bindedPersona) 활용법을 알려 줘.' },
     ];
   }
+  if (kind === 'config' && context?.fieldKey === 'guiHTML') {
+    return [
+      { label: '채팅 HTML 점검', prompt: '현재 디스플레이 채팅 HTML(guiHTML)의 구조와 스타일 깨짐 여부를 점검하고 개선안을 제안해 줘.' },
+      { label: '레이아웃 개선', prompt: '현재 채팅 HTML(guiHTML)의 가독성과 모바일 대응을 높이는 수정안을 제안해 줘.' },
+      { label: '채팅 HTML 가이드', prompt: 'RisuAI 커스텀 채팅 HTML(guiHTML) 작성 시 자주 쓰는 클래스와 주의사항을 알려 줘.' },
+    ];
+  }
+  if (kind === 'config' && context?.fieldKey === 'customCSS') {
+    return [
+      { label: '커스텀 CSS 점검', prompt: '현재 커스텀 CSS(customCSS)에서 선택자 충돌이나 다크/라이트 테마 문제가 있는지 점검하고 수정안을 제안해 줘.' },
+      { label: '가독성 CSS 보강', prompt: '채팅 말풍선 줄간격, 강조 색상, 폰트 가독성을 깔끔하게 다듬는 커스텀 CSS 수정안을 제안해 줘.' },
+      { label: 'CSS 토글/복구 팁', prompt: '커스텀 CSS가 화면을 깨뜨렸을 때 Ctrl+. 로 끄는 방법과 안전한 선택자 작성 요령을 알려 줘.' },
+    ];
+  }
   if (kind === 'config' || screen === 'settings') {
     return [
       { label: '내 설정 진단', prompt: '현재 읽어온 내 RisuAI 설정값(temperature, maxContext, maxResponse, 페널티, 모듈 등)을 보고 개선할 점이 있는지 진단해 줘.' },
@@ -166,7 +198,7 @@ function getQuickPromptsForContext(context) {
       { label: 'Custom CSS 수정', prompt: '현재 Custom CSS를 확인하고 가독성을 높이는 수정안을 제안해 줘.' },
     ];
   }
-  if (kind === 'char_field' || screen === 'character') {
+  if (kind === 'char_field' || kind === 'char_alt_greeting' || screen === 'character') {
     return [
       { label: '현재 필드 다듬기', prompt: '현재 선택된 캐릭터 필드의 문장과 구조를 더 선명하고 토큰 효율적으로 다듬는 부분 수정안을 제안해 줘.' },
       { label: '전체 재작성', prompt: '현재 캐릭터 설정을 바탕으로 이 필드를 더 몰입감 있게 새로 작성한 덮어쓰기 안을 제안해 줘.' },

@@ -1,21 +1,21 @@
 //@name risuhelper
 //@display-name RisuHelper
 //@api 3.0
-//@version 0.3.1
+//@version 0.3.2
 //@update-url https://raw.githubusercontent.com/magarindev-ctrl/Risuhelper/main/dist/risuhelper.js
 //@link https://github.com/magarindev-ctrl/Risuhelper RisuHelper GitHub
 
 /*
- * RisuHelper v0.3.1 — RisuAI Plugin API v3
+ * RisuHelper v0.3.2 — RisuAI Plugin API v3
  * License: GPL-3.0-only
  * https://github.com/magarindev-ctrl/Risuhelper
  */
 (() => {
   'use strict';
-  const __RISUHELPER_VERSION__ = "0.3.1";
+  const __RISUHELPER_VERSION__ = "0.3.2";
   const __modules = {
   "src/version.js"(__require, __exports) {
-    const VERSION = '0.3.1';
+    const VERSION = '0.3.2';
     const PLUGIN_NAME = 'risuhelper';
     const STORAGE_KEY = 'risuhelper_state_v1';
     const PRESET_STORAGE_KEY = 'risuhelper_preset_v1';
@@ -65,7 +65,9 @@
 
     const CHAR_FIELD_META = {
       name: { label: '캐릭터 이름', path: 'char.name', multiline: false },
+      nickname: { label: '캐릭터 닉네임 (Nickname)', path: 'char.nickname', multiline: false },
       desc: { label: '캐릭터 설명 (Description)', path: 'char.desc', multiline: true },
+      additionalText: { label: '추가 디스크립션 (Additional Description)', path: 'char.additionalText', multiline: true },
       firstMessage: { label: '첫 메시지 (First Message)', path: 'char.firstMessage', multiline: true },
       creatorNotes: { label: '제작자 코멘트 (Creator Notes)', path: 'char.creatorNotes', multiline: true },
       systemPrompt: { label: '시스템 프롬프트 (System Prompt)', path: 'char.systemPrompt', multiline: true },
@@ -74,12 +76,30 @@
       exampleMessage: { label: '예시 대화 (Example Message)', path: 'char.exampleMessage', multiline: true },
       personality: { label: '성격 (Personality)', path: 'char.personality', multiline: true },
       scenario: { label: '시나리오 (Scenario)', path: 'char.scenario', multiline: true },
+      defaultVariables: { label: '기본 변수 (Default Variables)', path: 'char.defaultVariables', multiline: true },
+      translatorNote: { label: '번역가의 노트 (Translator Note)', path: 'char.translatorNote', multiline: true },
+      customModuleToggle: { label: '캐릭터 커스텀 토글 (Custom Toggle)', path: 'char.customModuleToggle', multiline: true },
+      depthPrompt: { label: '깊이 프롬프트 (Depth Prompt)', path: 'char.depth_prompt.prompt', multiline: true },
       backgroundHTML: { label: '백그라운드 임베딩 (Background HTML)', path: 'char.backgroundHTML', multiline: true },
       virtualscript: { label: '캐릭터 스크립트 (virtualscript)', path: 'char.virtualscript', multiline: true },
     };
 
+    const MODULE_FIELD_META = {
+      backgroundEmbedding: { label: '모듈 · 백그라운드 임베딩 (HTML)', path: 'module.backgroundEmbedding', multiline: true },
+      customModuleToggle: { label: '모듈 · 커스텀 토글', path: 'module.customModuleToggle', multiline: true },
+      description: { label: '모듈 · 설명', path: 'module.description', multiline: true },
+      name: { label: '모듈 · 이름', path: 'module.name', multiline: false },
+      namespace: { label: '모듈 · 네임스페이스', path: 'module.namespace', multiline: false },
+    };
+
+    const CONFIG_FIELD_META = {
+      customCSS: { label: '설정 · 커스텀 CSS (customCSS)' },
+      guiHTML: { label: '설정 · 채팅 HTML (guiHTML)' },
+    };
+
     const MAX_LLM_CONTENT_CHARS = 24000;
     const ALLOWED_CHAR_FIELDS = Object.keys(CHAR_FIELD_META);
+    const ALLOWED_MODULE_FIELDS = Object.keys(MODULE_FIELD_META);
     const ALLOWED_LORE_TEXT_FIELDS = ['comment', 'key', 'secondkey', 'content', 'insertorder'];
     const ALLOWED_PERSONA_TEXT_FIELDS = ['name', 'note', 'personaPrompt'];
 
@@ -102,7 +122,10 @@
       __exports.ALLOWED_CONFIG_KEYS = ALLOWED_CONFIG_KEYS;
       __exports.CONFIG_KEY_TYPES = CONFIG_KEY_TYPES;
       __exports.CHAR_FIELD_META = CHAR_FIELD_META;
+      __exports.MODULE_FIELD_META = MODULE_FIELD_META;
+      __exports.CONFIG_FIELD_META = CONFIG_FIELD_META;
       __exports.ALLOWED_CHAR_FIELDS = ALLOWED_CHAR_FIELDS;
+      __exports.ALLOWED_MODULE_FIELDS = ALLOWED_MODULE_FIELDS;
       __exports.ALLOWED_LORE_TEXT_FIELDS = ALLOWED_LORE_TEXT_FIELDS;
       __exports.ALLOWED_PERSONA_TEXT_FIELDS = ALLOWED_PERSONA_TEXT_FIELDS;
       __exports.SCREEN_LABELS = SCREEN_LABELS;
@@ -1333,7 +1356,7 @@
 
   },
   "src/focus-detector.js"(__require, __exports) {
-    const { SCREEN_LABELS, CHAR_FIELD_META } = __require("src/version.js");
+    const { SCREEN_LABELS, CHAR_FIELD_META, MODULE_FIELD_META, CONFIG_FIELD_META } = __require("src/version.js");
 
     const FOCUS_SELECTOR = 'textarea:focus, input:focus, [contenteditable="true"]:focus, [contenteditable=""]:focus';
     const CHAT_INPUT_SELECTOR = 'textarea.text-input-area, textarea#messageInputTranslate, .text-input-area, .chat-input textarea';
@@ -1457,6 +1480,36 @@
     }
 
     /**
+     * Extracts a short field label from PocketRisu's SettingFieldLabel wrapper
+     * (`<div class="flex flex-col ..."><span class="text-sm text-textcolor">Label</span><p>...</p></div>`).
+     */
+    async function extractLabelFromColWrapper(el, className) {
+      const cls = String(className || '');
+      if (!cls.includes('flex-col')) return '';
+      if (cls.includes('border-darkborderc') || cls.includes('n-scroll') || cls.includes('border-selected')) {
+        return '';
+      }
+      try {
+        const kids = await el.getChildren();
+        const len = kids ? await kids.length() : 0;
+        if (len === 0 || len > 3) return '';
+        for (let k = 0; k < len; k++) {
+          const child = await kids.at(k);
+          if (!child) continue;
+          const cName = String(await child.nodeName()).toLowerCase();
+          if (cName === 'span' || cName === 'label') {
+            const st = String((await child.textContent()) || '').trim();
+            const cCls = String((await child.getClassName()) || '');
+            if (st && st.length <= 60 && !isMutedHelperSpan(cCls, st)) {
+              return st;
+            }
+          }
+        }
+      } catch {}
+      return '';
+    }
+
+    /**
      * Pure classification logic: takes DOM snapshot signals gathered from SafeElement traversal
      * and resolves a structured FocusContext suitable for RisuHelper's host adapter & LLM.
      */
@@ -1475,10 +1528,15 @@
         hasRegexContainer = false,
         hasTriggerContainer = false,
         isChatInput = false,
+        settingId = '',
+        chatIndex = null,
+        isChatMessageEdit = false,
+        tableRowIndex = null,
       } = signals || {};
 
       const headingText = headings.join(' | ');
       const activeTabText = activeTabs.join(' | ');
+      const normSettingId = String(settingId || '').trim().toLowerCase();
       const warnings = [];
 
       // 0. Explicit chat input textarea (DefaultChatScreen.svelte: textarea.text-input-area / #messageInputTranslate)
@@ -1492,6 +1550,45 @@
           loreIndex: null,
           loreScope: null,
           labelText: '채팅 입력 화면',
+          placeholder,
+          liveTextPreview,
+          warnings,
+        };
+      }
+
+      // 0.5. Chat bubble message editor (Chat.svelte: .risu-chat[data-chat-index] / textarea.message-edit-area)
+      if (isChatMessageEdit) {
+        const idx = Number.isInteger(chatIndex) ? chatIndex : null;
+        return {
+          detectedAt: Date.now(),
+          screen: 'chat',
+          targetKind: 'chat_message',
+          fieldKey: 'data',
+          loreIndex: null,
+          loreScope: null,
+          messageIndex: idx,
+          labelText: idx === -1
+            ? '채팅 · 첫 메시지 수정'
+            : idx !== null && idx >= 0
+              ? `채팅 메시지 #${idx + 1} 수정`
+              : '채팅 메시지 수정',
+          placeholder,
+          liveTextPreview,
+          warnings,
+        };
+      }
+
+      // 0.75. Deterministic PocketRisu data-setting-id detection for Display HTML/CSS
+      if (normSettingId === 'display.guihtml' || normSettingId === 'display.customcss') {
+        const fieldKey = normSettingId === 'display.guihtml' ? 'guiHTML' : 'customCSS';
+        return {
+          detectedAt: Date.now(),
+          screen: 'settings',
+          targetKind: 'config',
+          fieldKey,
+          loreIndex: null,
+          loreScope: null,
+          labelText: CONFIG_FIELD_META[fieldKey]?.label || `설정 · ${fieldKey}`,
           placeholder,
           liveTextPreview,
           warnings,
@@ -1529,7 +1626,7 @@
 
       // 2. Module settings / edit screen
       const isModuleEdit = matchAny(headingText, ['모듈 수정', 'edit module', '모듈 생성', 'create module']);
-      const isModuleScreen = isModuleEdit || matchAny(headingText, ['모듈', 'modules']);
+      const isModuleScreen = isModuleEdit || matchAny(headingText, ['모듈', 'modules']) || normSettingId.startsWith('module.');
 
       if (isModuleEdit) {
         warnings.push('모듈 편집 화면(tempModule)이 열려 있습니다. 플러그인에서 모듈을 저장한 뒤 하단 "모듈 수정" 버튼을 누르면 플러그인 변경이 덮어써질 수 있으니, 편집창을 닫고 다시 확인하세요.');
@@ -1613,29 +1710,48 @@
         };
       }
 
-      // 6. Module screen non-lorebook fields
+      // 6. Module screen non-lorebook fields (dedicated module_field target)
       if (isModuleScreen) {
         let fieldKey = 'description';
-        if (matchAny(nearbyLabel, ['백그라운드 임베딩', 'background embedding'])) fieldKey = 'backgroundEmbedding';
-        else if (matchAny(nearbyLabel, ['토글', 'toggle'])) fieldKey = 'customModuleToggle';
-        else if (matchAny(nearbyLabel, ['이름', 'name'])) fieldKey = 'name';
+        if (
+          normSettingId === 'module.backgroundembedding' ||
+          matchAny(nearbyLabel, ['백그라운드 임베딩', 'background embedding', 'background html']) ||
+          matchAny(placeholder, ['백그라운드 임베딩', 'background embedding'])
+        ) {
+          fieldKey = 'backgroundEmbedding';
+        } else if (
+          normSettingId === 'module.custommoduletoggle' ||
+          matchAny(nearbyLabel, ['커스텀 토글', 'custom toggle', '토글', 'toggle'])
+        ) {
+          fieldKey = 'customModuleToggle';
+        } else if (
+          normSettingId === 'module.namespace' ||
+          matchAny(nearbyLabel, ['네임스페이스', 'namespace'])
+        ) {
+          fieldKey = 'namespace';
+        } else if (
+          normSettingId === 'module.name' ||
+          matchAny(nearbyLabel, ['이름', 'name'])
+        ) {
+          fieldKey = 'name';
+        }
         return {
           detectedAt: Date.now(),
           screen: 'module',
-          targetKind: 'module_lorebook',
+          targetKind: 'module_field',
           fieldKey,
           loreIndex: null,
-          loreScope: 'module',
-          labelText: `모듈 설정 · ${nearbyLabel || fieldKey}`,
+          loreScope: null,
+          labelText: MODULE_FIELD_META[fieldKey]?.label || `모듈 · ${nearbyLabel || fieldKey}`,
           placeholder,
           liveTextPreview,
           warnings,
         };
       }
 
-      // 7. Explicit config CSS/HTML fields
-      if (matchAny(nearbyLabel, ['커스텀 css', 'custom css', 'gui html'])) {
-        const fieldKey = matchAny(nearbyLabel, ['gui html']) ? 'guiHTML' : 'customCSS';
+      // 7. Explicit config CSS/HTML fields (upstream RisuAI & PocketRisu labels)
+      if (matchAny(nearbyLabel, ['커스텀 css', 'custom css', '채팅 html', 'chat html', 'gui html'])) {
+        const fieldKey = matchAny(nearbyLabel, ['채팅 html', 'chat html', 'gui html']) ? 'guiHTML' : 'customCSS';
         return {
           detectedAt: Date.now(),
           screen: 'settings',
@@ -1643,7 +1759,7 @@
           fieldKey,
           loreIndex: null,
           loreScope: null,
-          labelText: `설정 · ${fieldKey}`,
+          labelText: CONFIG_FIELD_META[fieldKey]?.label || `설정 · ${fieldKey}`,
           placeholder,
           liveTextPreview,
           warnings,
@@ -1666,10 +1782,30 @@
         };
       }
 
+      // 8.5. Character Alternate Greetings (checked BEFORE firstMessage because '추가 첫 메시지' contains '첫 메시지')
+      if (matchAny(nearbyLabel, ['추가 첫 메시지', 'alternate greetings', 'alt greet'])) {
+        const gIdx = Number.isInteger(tableRowIndex) && tableRowIndex >= 0 ? tableRowIndex : null;
+        return {
+          detectedAt: Date.now(),
+          screen: 'character',
+          targetKind: 'char_alt_greeting',
+          fieldKey: 'alternateGreetings',
+          loreIndex: null,
+          loreScope: null,
+          greetingIndex: gIdx,
+          labelText: gIdx !== null ? `캐릭터 · 추가 첫 메시지 #${gIdx + 1}` : '캐릭터 · 추가 첫 메시지',
+          placeholder,
+          liveTextPreview,
+          warnings,
+        };
+      }
+
       // 9. Character config fields (CharConfig.svelte — checked BEFORE generic Settings headings
       //    because CharConfig's Advanced tab also renders <h2>고급 설정</h2>)
       const charFieldChecks = [
         ['name', ['character name', 'group name', '캐릭터 이름', '그룹 이름']],
+        ['nickname', ['닉네임', 'nickname']],
+        ['additionalText', ['추가 디스크립션', 'additional description', 'additional text']],
         ['desc', ['설명', 'description', '캐릭터 설명']],
         ['firstMessage', ['첫 메시지', 'first message']],
         ['creatorNotes', ['제작자 코멘트', "creator's comment", 'creator notes']],
@@ -1679,11 +1815,18 @@
         ['exampleMessage', ['예시 대화', 'example message']],
         ['personality', ['성격', 'personality']],
         ['scenario', ['시나리오', 'scenario']],
+        ['defaultVariables', ['기본 변수', 'default variables']],
+        ['translatorNote', ['번역가의 노트', 'translator note', "translator's note"]],
+        ['customModuleToggle', ['커스텀 토글', 'custom toggle', 'custom prompt template toggle']],
+        ['depthPrompt', ['깊이 프롬프트', 'depth prompt']],
         ['backgroundHTML', ['백그라운드 임베딩', 'background embedding', 'background html']],
         ['virtualscript', ['캐릭터js', '캐릭터 js', 'charjs', 'character js']],
       ];
 
       for (const [key, terms] of charFieldChecks) {
+        if (key === 'depthPrompt' && String(inputType || '').toLowerCase() === 'number') {
+          continue;
+        }
         if (matchAny(nearbyLabel, terms) || matchAny(placeholder, terms)) {
           const meta = CHAR_FIELD_META[key];
           return {
@@ -1797,39 +1940,64 @@
         const activeTabs = [];
         let nearbyLabel = '';
         let loreIdx = null;
+        let settingId = attrs['data-setting-id'] || '';
+        let chatIndex = null;
+        let tableRowIndex = null;
         let luaButtonActive = false;
         let hasRegexContainer = false;
         let hasTriggerContainer = false;
         // Check the focused element itself first (DefaultChatScreen puts `text-input-area` directly on <textarea>)
         let isChatInput = isChatElementAttrs(attrs);
+        let isChatMessageEdit = String(attrs.class || '').includes('message-edit-area');
 
-        // Walk up ancestors (bounded to 8 hops to stay fast over iframe RPC)
+        // Walk up ancestors (bounded to 12 hops; child scans stay strictly bounded to close containers)
         let cur = el;
         let curOuter = outerHtml;
         let curTag = tag;
-        for (let depth = 0; depth < 8 && cur; depth++) {
+        for (let depth = 0; depth < 12 && cur; depth++) {
           const parent = await cur.getParent();
           if (!parent) break;
 
           const pOuter = await parent.getOuterHTML();
           const pAttrs = parseOpeningTagAttrs(pOuter);
+          const pTag = pAttrs._tag || '';
 
           if (loreIdx === null && pAttrs['data-risu-idx'] !== undefined) {
             const parsed = parseInt(pAttrs['data-risu-idx'], 10);
             if (!Number.isNaN(parsed)) loreIdx = parsed;
           }
 
+          if (!settingId && pAttrs['data-setting-id']) {
+            settingId = pAttrs['data-setting-id'];
+          }
+
+          if (chatIndex === null && pAttrs['data-chat-index'] !== undefined) {
+            const parsed = parseInt(pAttrs['data-chat-index'], 10);
+            if (!Number.isNaN(parsed)) {
+              chatIndex = parsed;
+              isChatMessageEdit = true;
+            }
+          }
+
+          if (!isChatMessageEdit && String(pAttrs.class || '').split(/\s+/).includes('risu-chat')) {
+            isChatMessageEdit = true;
+          }
+
+          const trackTableRow = tableRowIndex === null && curTag === 'tr' && (pTag === 'tbody' || pTag === 'table') && depth <= 5;
+          const needAltGreetingLabel = tableRowIndex !== null && !nearbyLabel && depth <= 8;
+          const shouldScanChildren = depth <= 4 || trackTableRow || needAltGreetingLabel;
+
           // Inspect direct children of close ancestors for labels, headings, and Lua/Regex/tab markers
-          if (depth <= 4) {
+          if (shouldScanChildren) {
             const children = await parent.getChildren();
             const len = children ? await children.length() : 0;
             const limit = Math.min(len, 64);
-            const checkLocalContext = depth <= 3;
+            const checkLocalContext = depth <= 3 || needAltGreetingLabel;
 
             // When depth > 0, check if SafeElement.querySelector(':focus') resolves the exact descendant branch.
             // This disambiguates sibling TextAreaInput wrappers that share identical outerHTML (e.g. PocketRisu).
             let focusQueryWorks = false;
-            if (checkLocalContext && depth > 0 && typeof parent.querySelector === 'function') {
+            if ((checkLocalContext || trackTableRow) && depth > 0 && typeof parent.querySelector === 'function') {
               try {
                 focusQueryWorks = Boolean(await parent.querySelector(FOCUS_SELECTOR));
               } catch {}
@@ -1839,6 +2007,7 @@
             let prevFallbackSpan = '';
             let prevSiblingWasLuaBar = false;
             let foundCur = false;
+            let seenTrCount = 0;
             const containerSpanLabels = [];
 
             for (let i = 0; i < limit; i++) {
@@ -1848,7 +2017,7 @@
 
               // 1. Identify the exact sibling matching `cur`
               let isCur = false;
-              if (checkLocalContext && !foundCur && (!curTag || cName === curTag)) {
+              if ((checkLocalContext || trackTableRow) && !foundCur && (!curTag || cName === curTag)) {
                 if (depth > 0 && focusQueryWorks) {
                   try {
                     isCur = Boolean(await child.querySelector(FOCUS_SELECTOR));
@@ -1869,6 +2038,10 @@
 
               if (isCur) {
                 foundCur = true;
+                if (trackTableRow && seenTrCount >= 1) {
+                  // Row 0 is the <th> header row in CharConfig's alternateGreetings table
+                  tableRowIndex = seenTrCount - 1;
+                }
                 const candidateLabel = prevPrimarySpan || prevFallbackSpan;
                 if (!nearbyLabel && candidateLabel) {
                   nearbyLabel = candidateLabel;
@@ -1877,6 +2050,11 @@
                   luaButtonActive = true;
                   hasTriggerContainer = true;
                 }
+                continue;
+              }
+
+              if (trackTableRow && !foundCur && cName === 'tr') {
+                seenTrCount++;
                 continue;
               }
 
@@ -1924,7 +2102,11 @@
                     prevSiblingWasLuaBar = true;
                   } else {
                     prevSiblingWasLuaBar = false;
-                    if (
+                    const colLabel = await extractLabelFromColWrapper(child, cClass);
+                    if (colLabel) {
+                      prevPrimarySpan = colLabel;
+                      prevFallbackSpan = '';
+                    } else if (
                       cClass.includes('border-darkborderc') ||
                       cClass.includes('n-scroll') ||
                       cClass.includes('border-selected')
@@ -1954,7 +2136,7 @@
             }
           }
 
-          if (depth === 4 || depth === 6) {
+          if (depth === 4 || depth === 6 || depth === 8) {
             try {
               const h2 = await parent.querySelector('h2');
               if (h2) {
@@ -1970,11 +2152,11 @@
 
           cur = parent;
           curOuter = pOuter;
-          curTag = pAttrs._tag || '';
+          curTag = pTag;
         }
 
         // Also look at top-level headings in rootDoc if none found locally
-        if (!isChatInput && headings.length === 0) {
+        if (!isChatInput && !isChatMessageEdit && headings.length === 0) {
           try {
             const allH2 = await rootDoc.querySelectorAll('h2');
             const count = allH2 ? Math.min(await allH2.length(), 4) : 0;
@@ -2000,6 +2182,10 @@
           hasRegexContainer,
           hasTriggerContainer,
           isChatInput,
+          settingId,
+          chatIndex,
+          isChatMessageEdit,
+          tableRowIndex,
         });
       } catch {
         return null;
@@ -3158,10 +3344,12 @@
 
   },
   "src/host-adapter.js"(__require, __exports) {
-    const { ALLOWED_CONFIG_KEYS, CONFIG_KEY_TYPES, CHAR_FIELD_META, MAX_LLM_CONTENT_CHARS, ALLOWED_CHAR_FIELDS, ALLOWED_LORE_TEXT_FIELDS, ALLOWED_PERSONA_TEXT_FIELDS } = __require("src/version.js");
+    const { ALLOWED_CONFIG_KEYS, CONFIG_KEY_TYPES, CHAR_FIELD_META, MODULE_FIELD_META, CONFIG_FIELD_META, MAX_LLM_CONTENT_CHARS, ALLOWED_CHAR_FIELDS, ALLOWED_MODULE_FIELDS, ALLOWED_LORE_TEXT_FIELDS, ALLOWED_PERSONA_TEXT_FIELDS } = __require("src/version.js");
     const { applyTextEdits } = __require("src/text-edits.js");
 
     const BAD_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+    const DB_PERMISSION_ERROR =
+      'DB 읽기 권한(db)이 필요합니다. 이전에 권한을 거부(취소)했다면 RisuAI/PocketRisu 설정 → 플러그인에서 권한 초기화 후 다시 허용해 주세요.';
 
     const LORE_META_SPECS = [
       ['comment', '이름'],
@@ -3236,17 +3424,26 @@
       if (kind === 'char_field' && !ALLOWED_CHAR_FIELDS.includes(fieldKey)) {
         return `허용되지 않는 캐릭터 필드입니다: ${fieldKey}`;
       }
+      if (kind === 'char_alt_greeting' && fieldKey !== 'alternateGreetings') {
+        return `허용되지 않는 추가 첫 메시지 필드입니다: ${fieldKey}`;
+      }
       if (
         (kind === 'char_lorebook' || kind === 'chat_lorebook' || kind === 'module_lorebook') &&
         !ALLOWED_LORE_TEXT_FIELDS.includes(fieldKey)
       ) {
         return `허용되지 않는 로어북 필드입니다: ${fieldKey}`;
       }
+      if (kind === 'module_field' && !ALLOWED_MODULE_FIELDS.includes(fieldKey)) {
+        return `허용되지 않는 모듈 필드입니다: ${fieldKey}`;
+      }
       if (kind === 'persona' && !ALLOWED_PERSONA_TEXT_FIELDS.includes(fieldKey)) {
         return `허용되지 않는 페르소나 필드입니다: ${fieldKey}`;
       }
       if (kind === 'chat_note' && fieldKey !== 'note') {
         return `허용되지 않는 작가의 노트 필드입니다: ${fieldKey}`;
+      }
+      if (kind === 'chat_message' && fieldKey !== 'data') {
+        return `허용되지 않는 채팅 메시지 필드입니다: ${fieldKey}`;
       }
       if (kind === 'config' && !ALLOWED_CONFIG_KEYS.includes(fieldKey)) {
         return `허용되지 않는 설정 키입니다: ${fieldKey}`;
@@ -3640,7 +3837,10 @@
         if (proposal?.action === 'patch_text' || proposal?.action === 'replace_text') {
           // Never allow LLM proposal.target to redirect a direct text edit to a different field or target
           if (pt) {
-            const guardedKeys = ['targetKind', 'fieldKey', 'loreIndex', 'loreScope', 'personaIndex', 'moduleIndex', 'regexIndex'];
+            const guardedKeys = [
+              'targetKind', 'fieldKey', 'loreIndex', 'loreScope',
+              'personaIndex', 'moduleIndex', 'regexIndex', 'greetingIndex', 'messageIndex',
+            ];
             for (const k of guardedKeys) {
               if (pt[k] !== undefined && pt[k] !== null && pt[k] !== base[k]) {
                 throw new Error(`보안상 제안 블록의 target.${k}(${String(pt[k])})로 현재 선택 대상을 덮어쓸 수 없습니다.`);
@@ -3725,13 +3925,40 @@
           const fieldKey = t.fieldKey || 'desc';
           const fieldErr = validateAllowedFieldKey('char_field', fieldKey);
           if (fieldErr) return { ok: false, reason: fieldErr, content: '' };
-          const content = String(char[fieldKey] ?? '');
+          const content = fieldKey === 'depthPrompt'
+            ? String(char.depth_prompt?.prompt ?? '')
+            : String(char[fieldKey] ?? '');
           return {
             ok: true,
             target: { ...t, fieldKey },
             hostBinding: { charIndex, ...getCharIdentity(char) },
             label: CHAR_FIELD_META[fieldKey]?.label || fieldKey,
             content,
+            charName: char.name || '(이름 없음)',
+          };
+        }
+
+        if (t.targetKind === 'char_alt_greeting') {
+          const { char, charIndex } = await this.readActiveCharacter();
+          if (!char) return { ok: false, reason: '선택된 캐릭터가 없습니다.', content: '' };
+          const list = Array.isArray(char.alternateGreetings) ? char.alternateGreetings : [];
+          const idx =
+            Number.isInteger(t.greetingIndex) && t.greetingIndex >= 0 && t.greetingIndex < list.length
+              ? t.greetingIndex
+              : (list.length > 0 ? 0 : null);
+          return {
+            ok: true,
+            target: { ...t, fieldKey: 'alternateGreetings', greetingIndex: idx },
+            hostBinding: { charIndex, greetingIndex: idx, ...getCharIdentity(char) },
+            label: idx !== null
+              ? `캐릭터 · 추가 첫 메시지 #${idx + 1} (${char.name || '무제'})`
+              : `캐릭터 · 추가 첫 메시지 (없음 · ${char.name || '무제'})`,
+            content: idx !== null ? String(list[idx] ?? '') : '',
+            greetingCount: list.length,
+            altGreetingsSummary: list.slice(0, 40).map((g, i) => ({
+              index: i,
+              preview: String(g ?? '').replace(/\s+/g, ' ').trim().slice(0, 40),
+            })),
             charName: char.name || '(이름 없음)',
           };
         }
@@ -3748,6 +3975,54 @@
             hostBinding: { charIndex, chatIndex, ...getCharIdentity(char) },
             label: '작가의 노트 (현재 채팅)',
             content: String(chat.note ?? ''),
+            charName: char?.name || '(이름 없음)',
+          };
+        }
+
+        if (t.targetKind === 'chat_message') {
+          const { chat, char, charIndex, chatIndex } = await this.readActiveChat();
+          if (!chat) return { ok: false, reason: '활성 채팅을 찾을 수 없습니다.', content: '' };
+          // In Chat.svelte, data-chat-index="-1" represents the active greeting (firstMessage or alternateGreetings[fmIndex])
+          if (t.messageIndex === -1 && char) {
+            const fmIndex = Number.isInteger(chat.fmIndex) ? chat.fmIndex : -1;
+            if (fmIndex >= 0 && Array.isArray(char.alternateGreetings) && char.alternateGreetings[fmIndex] !== undefined) {
+              return await this.readTargetSnapshot({
+                ...t,
+                screen: 'character',
+                targetKind: 'char_alt_greeting',
+                fieldKey: 'alternateGreetings',
+                greetingIndex: fmIndex,
+                messageIndex: undefined,
+              });
+            }
+            return await this.readTargetSnapshot({
+              ...t,
+              screen: 'character',
+              targetKind: 'char_field',
+              fieldKey: 'firstMessage',
+              messageIndex: undefined,
+            });
+          }
+          const list = Array.isArray(chat.message) ? chat.message : [];
+          const idx =
+            Number.isInteger(t.messageIndex) && t.messageIndex >= 0 && t.messageIndex < list.length
+              ? t.messageIndex
+              : (list.length > 0 ? list.length - 1 : null);
+          const msg = idx !== null ? list[idx] : null;
+          const roleLabel = msg?.role === 'user' ? '유저' : '캐릭터';
+          const startOffset = Math.max(0, list.length - 30);
+          return {
+            ok: true,
+            target: { ...t, fieldKey: 'data', messageIndex: idx },
+            hostBinding: { charIndex, chatIndex, messageIndex: idx, chatId: msg?.chatId || null, ...getCharIdentity(char) },
+            label: msg ? `채팅 메시지 #${idx + 1} (${roleLabel})` : '채팅 메시지 (없음)',
+            content: msg ? String(msg.data ?? '') : '',
+            messageCount: list.length,
+            messagesSummary: list.slice(startOffset).map((m, i) => ({
+              index: startOffset + i,
+              role: m?.role === 'user' ? '유저' : '캐릭터',
+              preview: String(m?.data ?? '').replace(/\s+/g, ' ').trim().slice(0, 36),
+            })),
             charName: char?.name || '(이름 없음)',
           };
         }
@@ -3842,7 +4117,7 @@
 
         if (t.targetKind === 'persona') {
           const { personas, selectedPersona, permissionDenied } = await this.readPersonas();
-          if (permissionDenied) return { ok: false, reason: 'DB 읽기 권한(db)이 필요합니다.', content: '' };
+          if (permissionDenied) return { ok: false, reason: DB_PERMISSION_ERROR, content: '' };
           const idx = Number.isInteger(t.personaIndex) ? t.personaIndex : selectedPersona;
           const entry = personas[idx] ?? null;
           const fieldKey = t.fieldKey || 'personaPrompt';
@@ -3866,9 +4141,14 @@
           };
         }
 
-        if (t.targetKind === 'module_lorebook' || t.targetKind === 'module_lua' || t.targetKind === 'module_regex') {
+        if (
+          t.targetKind === 'module_field' ||
+          t.targetKind === 'module_lorebook' ||
+          t.targetKind === 'module_lua' ||
+          t.targetKind === 'module_regex'
+        ) {
           const { modules, enabledModules, permissionDenied } = await this.readModules();
-          if (permissionDenied) return { ok: false, reason: 'DB 읽기 권한(db)이 필요합니다.', content: '' };
+          if (permissionDenied) return { ok: false, reason: DB_PERMISSION_ERROR, content: '' };
           const modIdx = Number.isInteger(t.moduleIndex) ? t.moduleIndex : (modules.length > 0 ? 0 : null);
           const mod = modIdx !== null ? modules[modIdx] : null;
           if (!mod) return { ok: true, target: t, label: '설치된 모듈 없음', content: '', modulesSummary: [] };
@@ -3879,8 +4159,17 @@
           let isLua = false;
           let hasOtherTriggers = false;
           let otherTriggerCount = 0;
+          let resolvedFieldKey = t.fieldKey;
 
-          if (t.targetKind === 'module_lua') {
+          if (t.targetKind === 'module_field') {
+            const fieldKey = t.fieldKey || 'backgroundEmbedding';
+            const fieldErr = validateAllowedFieldKey('module_field', fieldKey);
+            if (fieldErr) return { ok: false, reason: fieldErr, content: '' };
+            resolvedFieldKey = fieldKey;
+            content = String(mod[fieldKey] ?? '');
+            const metaLabel = MODULE_FIELD_META[fieldKey]?.label || `모듈 · ${fieldKey}`;
+            label = `${metaLabel} (${mod.name || '무제'})`;
+          } else if (t.targetKind === 'module_lua') {
             const lua = extractLuaFromTriggers(mod.trigger);
             content = lua.code;
             isLua = lua.isLua;
@@ -3900,12 +4189,13 @@
             const fieldKey = t.fieldKey || 'content';
             const fieldErr = validateAllowedFieldKey('module_lorebook', fieldKey);
             if (fieldErr) return { ok: false, reason: fieldErr, content: '' };
+            resolvedFieldKey = fieldKey;
             content = entry ? String(entry[fieldKey] ?? '') : '';
             label = entry ? `모듈 로어북 (${mod.name} #${lIdx + 1})` : `모듈 로어북 (${mod.name}, ${list.length}개)`;
           }
           return {
             ok: true,
-            target: { ...t, moduleIndex: modIdx },
+            target: { ...t, moduleIndex: modIdx, fieldKey: resolvedFieldKey },
             hostBinding: { moduleIndex: modIdx, moduleId: mod.id || null },
             label,
             content,
@@ -3926,14 +4216,14 @@
 
         if (t.targetKind === 'config') {
           const cfg = await this.readAllowedConfig();
-          if (!cfg) return { ok: false, reason: 'DB 읽기 권한(db)이 필요합니다.', content: '' };
+          if (!cfg) return { ok: false, reason: DB_PERMISSION_ERROR, content: '' };
           const fieldKey = t.fieldKey || null;
           const fieldErr = validateAllowedFieldKey('config', fieldKey);
           if (fieldErr) return { ok: false, reason: fieldErr, content: '' };
           return {
             ok: true,
             target: { ...t, fieldKey },
-            label: fieldKey ? `설정 · ${fieldKey}` : 'RisuAI 설정 (허용 키)',
+            label: fieldKey ? (CONFIG_FIELD_META[fieldKey]?.label || `설정 · ${fieldKey}`) : 'RisuAI 설정 (허용 키)',
             content: fieldKey ? String(cfg[fieldKey] ?? '') : JSON.stringify(cfg, null, 2),
             config: cfg,
           };
@@ -4009,6 +4299,30 @@
             return {
               ok: false,
               error: '수정할 로어북 항목이 선택되지 않았습니다. 상단에서 로어북 항목을 선택하거나 create_lorebook을 사용하세요.',
+              label: snap.label,
+              target: snap.target,
+            };
+          }
+          if (kind === 'char_alt_greeting' && !Number.isInteger(snap.target?.greetingIndex)) {
+            return {
+              ok: false,
+              error: '수정할 추가 첫 메시지 항목이 없습니다. RisuAI 캐릭터 고급 설정에서 추가 첫 메시지를 하나 이상 만든 뒤 시도해 주세요.',
+              label: snap.label,
+              target: snap.target,
+            };
+          }
+          if (kind === 'chat_message' && !Number.isInteger(snap.target?.messageIndex)) {
+            return {
+              ok: false,
+              error: '수정할 채팅 메시지가 없습니다. 채팅 대화가 있는 상태에서 메시지를 선택해 주세요.',
+              label: snap.label,
+              target: snap.target,
+            };
+          }
+          if (kind === 'module_field' && !snap.module) {
+            return {
+              ok: false,
+              error: '수정할 설치 모듈이 없습니다.',
               label: snap.label,
               target: snap.target,
             };
@@ -4255,7 +4569,7 @@
 
         if (proposal.action === 'update_config') {
           const cfg = await this.readAllowedConfig();
-          if (!cfg) return { ok: false, error: 'DB 읽기 권한(db)이 필요합니다.' };
+          if (!cfg) return { ok: false, error: DB_PERMISSION_ERROR };
           const changes = proposal.changes || {};
           const invalidKeys = Object.keys(changes).filter(k => !ALLOWED_CONFIG_KEYS.includes(k));
           if (invalidKeys.length > 0) {
@@ -4324,9 +4638,32 @@
           const fieldKey = target.fieldKey || 'desc';
           assertAllowedFieldKey('char_field', fieldKey);
           const { char, charIndex } = await this._requireSameActiveCharacter(options.hostBinding, '적용');
+          const charBinding = { charIndex, ...getCharIdentity(char) };
+
+          if (fieldKey === 'depthPrompt') {
+            const hadKey = Object.hasOwn(char, 'depth_prompt');
+            const prevValue = clone(char.depth_prompt);
+            const nextChar = clone(char);
+            const curDepth = Number.isFinite(Number(nextChar.depth_prompt?.depth)) ? Number(nextChar.depth_prompt.depth) : 0;
+            const nextPrompt = compute(String(nextChar.depth_prompt?.prompt ?? ''), '깊이 프롬프트');
+            nextChar.depth_prompt = { ...(nextChar.depth_prompt || {}), depth: curDepth, prompt: nextPrompt };
+            await this._setCharacter(nextChar);
+
+            const undoId = this._pushUndo({
+              label: '캐릭터 깊이 프롬프트 수정',
+              restore: async () => {
+                const { char: latest } = await this._requireSameActiveCharacter(charBinding, '되돌리기');
+                const restored = clone(latest);
+                if (hadKey) restored.depth_prompt = clone(prevValue);
+                else delete restored.depth_prompt;
+                await this._setCharacter(restored);
+              },
+            });
+            return { ok: true, undoId, summary: '캐릭터 깊이 프롬프트에 적용했습니다.' };
+          }
+
           const hadKey = Object.hasOwn(char, fieldKey);
           const prevValue = clone(char[fieldKey]);
-          const charBinding = { charIndex, ...getCharIdentity(char) };
 
           const nextChar = clone(char);
           nextChar[fieldKey] = compute(String(nextChar[fieldKey] ?? ''), fieldKey);
@@ -4343,6 +4680,35 @@
             },
           });
           return { ok: true, undoId, summary: `캐릭터 ${CHAR_FIELD_META[fieldKey]?.label || fieldKey}에 적용했습니다.` };
+        }
+
+        if (kind === 'char_alt_greeting') {
+          const { char, charIndex } = await this._requireSameActiveCharacter(options.hostBinding, '적용');
+          const list = Array.isArray(char.alternateGreetings) ? char.alternateGreetings : [];
+          const idx = target.greetingIndex;
+          if (!Number.isInteger(idx) || idx < 0 || idx >= list.length) {
+            throw new Error('수정할 추가 첫 메시지 인덱스가 올바르지 않습니다.');
+          }
+          const prevValue = clone(list[idx]);
+          const charBinding = { charIndex, ...getCharIdentity(char) };
+
+          const nextChar = clone(char);
+          nextChar.alternateGreetings[idx] = compute(String(nextChar.alternateGreetings[idx] ?? ''), `추가 첫 메시지 #${idx + 1}`);
+          await this._setCharacter(nextChar);
+
+          const undoId = this._pushUndo({
+            label: `추가 첫 메시지 #${idx + 1} 수정`,
+            restore: async () => {
+              const { char: latest } = await this._requireSameActiveCharacter(charBinding, '되돌리기');
+              if (!Array.isArray(latest.alternateGreetings) || idx >= latest.alternateGreetings.length) {
+                throw new Error('되돌릴 추가 첫 메시지 항목을 찾을 수 없습니다.');
+              }
+              const restored = clone(latest);
+              restored.alternateGreetings[idx] = clone(prevValue);
+              await this._setCharacter(restored);
+            },
+          });
+          return { ok: true, undoId, summary: `캐릭터 추가 첫 메시지 #${idx + 1}에 적용했습니다.` };
         }
 
         if (kind === 'chat_note') {
@@ -4368,6 +4734,48 @@
             },
           });
           return { ok: true, undoId, summary: '현재 채팅의 작가의 노트에 적용했습니다.' };
+        }
+
+        if (kind === 'chat_message') {
+          const { chat, charIndex, chatIndex } = await this._requireSameActiveChat(options.hostBinding, '적용');
+          const idx = target.messageIndex;
+          if (!Number.isInteger(idx) || idx < 0 || !chat.message?.[idx]) {
+            throw new Error('수정할 채팅 메시지 인덱스가 올바르지 않습니다.');
+          }
+          const pinnedChatId = options.hostBinding?.chatId || null;
+          if (pinnedChatId && chat.message[idx].chatId && chat.message[idx].chatId !== pinnedChatId) {
+            throw new Error('대상 채팅 메시지가 변경되어 적용을 중단했습니다. 다시 제안받아 주세요.');
+          }
+          const prevData = clone(chat.message[idx].data);
+          const hasSwipe = Array.isArray(chat.message[idx].swipes) && Number.isInteger(chat.message[idx].swipeId);
+          const swipeId = hasSwipe ? chat.message[idx].swipeId : null;
+          const prevSwipeVal = hasSwipe ? clone(chat.message[idx].swipes[swipeId]) : undefined;
+
+          const nextChat = clone(chat);
+          const nextText = compute(String(nextChat.message[idx].data ?? ''), `채팅 메시지 #${idx + 1}`);
+          nextChat.message[idx].data = nextText;
+          if (hasSwipe) {
+            nextChat.message[idx].swipes[swipeId] = nextText;
+          }
+          await this._setChat(charIndex, chatIndex, nextChat);
+
+          const undoId = this._pushUndo({
+            label: `채팅 메시지 #${idx + 1} 수정`,
+            restore: async () => {
+              const latestChat = await this._readChatAt(charIndex, chatIndex);
+              if (!latestChat?.message?.[idx]) throw new Error('되돌릴 채팅 메시지를 찾을 수 없습니다.');
+              if (pinnedChatId && latestChat.message[idx].chatId && latestChat.message[idx].chatId !== pinnedChatId) {
+                throw new Error('되돌릴 채팅 메시지가 변경되어 복구를 중단했습니다.');
+              }
+              const restored = clone(latestChat);
+              restored.message[idx].data = clone(prevData);
+              if (hasSwipe && Array.isArray(restored.message[idx].swipes)) {
+                restored.message[idx].swipes[swipeId] = clone(prevSwipeVal);
+              }
+              await this._setChat(charIndex, chatIndex, restored);
+            },
+          });
+          return { ok: true, undoId, summary: `채팅 메시지 #${idx + 1}에 적용했습니다.` };
         }
 
         if (kind === 'char_lorebook') {
@@ -4460,6 +4868,46 @@
           }, target, options);
         }
 
+        if (kind === 'module_field') {
+          const fieldKey = target.fieldKey || 'backgroundEmbedding';
+          assertAllowedFieldKey('module_field', fieldKey);
+          const { modules, permissionDenied } = await this.readModules();
+          if (permissionDenied) throw new Error(DB_PERMISSION_ERROR);
+          const pinnedId = options.hostBinding?.moduleId || null;
+          let modIdx = Number.isInteger(target.moduleIndex) ? target.moduleIndex : 0;
+          if (pinnedId) {
+            const byId = modules.findIndex(m => m.id === pinnedId);
+            if (byId !== -1) modIdx = byId;
+          }
+          if (!modules[modIdx]) throw new Error('수정할 모듈을 찾을 수 없습니다.');
+          const moduleId = modules[modIdx].id;
+          const moduleName = modules[modIdx].name || '무제';
+          const hadKey = Object.hasOwn(modules[modIdx], fieldKey);
+          const prevValue = clone(modules[modIdx][fieldKey]);
+
+          const nextModules = clone(modules);
+          nextModules[modIdx][fieldKey] = compute(String(nextModules[modIdx][fieldKey] ?? ''), `모듈 ${fieldKey}`);
+          await this.writeDbSubset({ modules: nextModules });
+
+          const undoId = this._pushUndo({
+            label: `모듈 "${moduleName}" ${fieldKey} 수정`,
+            restore: async () => {
+              const { modules: latestModules } = await this.readModules();
+              const idx = moduleId ? latestModules.findIndex(m => m.id === moduleId) : modIdx;
+              if (idx === -1 || !latestModules[idx]) throw new Error('되돌릴 모듈을 찾을 수 없습니다.');
+              const restored = clone(latestModules);
+              if (hadKey) restored[idx][fieldKey] = clone(prevValue);
+              else delete restored[idx][fieldKey];
+              await this.writeDbSubset({ modules: restored });
+            },
+          });
+          return {
+            ok: true,
+            undoId,
+            summary: `${MODULE_FIELD_META[fieldKey]?.label || `모듈 ${fieldKey}`} (${moduleName})에 적용했습니다.`,
+          };
+        }
+
         if (kind === 'module_lorebook') {
           const fieldKey = target.fieldKey || 'content';
           assertAllowedFieldKey('module_lorebook', fieldKey);
@@ -4475,7 +4923,7 @@
 
         if (kind === 'config' && target.fieldKey && ALLOWED_CONFIG_KEYS.includes(target.fieldKey)) {
           const cfg = await this.readAllowedConfig();
-          if (!cfg) throw new Error('DB 읽기 권한(db)이 필요합니다.');
+          if (!cfg) throw new Error(DB_PERMISSION_ERROR);
           const nextVal = compute(String(cfg[target.fieldKey] ?? ''), target.fieldKey);
           return await this._applyUpdateConfig({ changes: { [target.fieldKey]: nextVal } });
         }
@@ -4513,7 +4961,7 @@
 
         if (scope === 'module') {
           const { modules, permissionDenied } = await this.readModules();
-          if (permissionDenied) throw new Error('DB 읽기 권한(db)이 필요합니다.');
+          if (permissionDenied) throw new Error(DB_PERMISSION_ERROR);
           const modIdx = Number.isInteger(proposal.moduleIndex) ? proposal.moduleIndex : (target.moduleIndex ?? 0);
           if (!modules[modIdx]) throw new Error('대상 모듈을 찾을 수 없습니다.');
           const moduleId = modules[modIdx].id;
@@ -4615,7 +5063,7 @@
 
         if (scope === 'module') {
           const { modules, permissionDenied } = await this.readModules();
-          if (permissionDenied) throw new Error('DB 읽기 권한(db)이 필요합니다.');
+          if (permissionDenied) throw new Error(DB_PERMISSION_ERROR);
           const modIdx = Number.isInteger(proposal.moduleIndex) ? proposal.moduleIndex : (target.moduleIndex ?? 0);
           if (!modules[modIdx]?.lorebook?.[loreIndex]) throw new Error('대상 모듈 로어북 항목을 찾을 수 없습니다.');
           const moduleId = modules[modIdx].id;
@@ -4664,7 +5112,7 @@
 
         if (scope === 'module') {
           const { modules, permissionDenied } = await this.readModules();
-          if (permissionDenied) throw new Error('DB 읽기 권한(db)이 필요합니다.');
+          if (permissionDenied) throw new Error(DB_PERMISSION_ERROR);
           const modIdx = Number.isInteger(proposal.moduleIndex) ? proposal.moduleIndex : (target.moduleIndex ?? 0);
           if (!modules[modIdx]) throw new Error('대상 모듈을 찾을 수 없습니다.');
           const luaInfo = extractLuaFromTriggers(modules[modIdx].trigger);
@@ -4736,7 +5184,7 @@
 
         if (scope === 'module') {
           const { modules, permissionDenied } = await this.readModules();
-          if (permissionDenied) throw new Error('DB 읽기 권한(db)이 필요합니다.');
+          if (permissionDenied) throw new Error(DB_PERMISSION_ERROR);
           const modIdx = Number.isInteger(proposal.moduleIndex) ? proposal.moduleIndex : (target.moduleIndex ?? 0);
           if (!modules[modIdx]) throw new Error('대상 모듈을 찾을 수 없습니다.');
           const moduleId = modules[modIdx].id;
@@ -4830,7 +5278,7 @@
 
       async _applyCreatePersona(proposal, options) {
         const { personas, permissionDenied } = await this.readPersonas();
-        if (permissionDenied) throw new Error('DB 읽기 권한(db)이 필요합니다.');
+        if (permissionDenied) throw new Error(DB_PERMISSION_ERROR);
         const nextPersonas = clone(personas);
         const newPersona = {
           name: String(proposal.name || 'New Persona'),
@@ -4873,7 +5321,7 @@
 
       async _applyUpdatePersona(proposal, target, options) {
         const { personas, selectedPersona, permissionDenied } = await this.readPersonas();
-        if (permissionDenied) throw new Error('DB 읽기 권한(db)이 필요합니다.');
+        if (permissionDenied) throw new Error(DB_PERMISSION_ERROR);
         const idx = Number.isInteger(proposal.personaIndex)
           ? proposal.personaIndex
           : (Number.isInteger(target.personaIndex) ? target.personaIndex : selectedPersona);
@@ -4944,7 +5392,7 @@
         if (keys.length === 0) throw new Error('변경할 설정 항목이 없습니다.');
 
         const cfg = await this.readAllowedConfig();
-        if (!cfg) throw new Error('DB 읽기 권한(db)이 필요합니다.');
+        if (!cfg) throw new Error(DB_PERMISSION_ERROR);
 
         const prev = {};
         const next = {};
@@ -5006,13 +5454,14 @@
     - 주요 공개 포크: 원본(kwaroran/Risuai), PocketRisu(셀프호스팅), RisuBard(PocketRisu 기반 + BardWiki 서사 메모리), HaejeokRisuai(해적리스, 메모리/도메인 스토어 최적화), RisuNest(네이티브 앱).`,
 
       character: `[캐릭터 설정 필드 가이드]
-    - desc (설명): 캐릭터의 핵심 외형·성격·세계관·관계·말투를 담는 메인 프롬프트. personality/scenario 필드는 구버전 호환용으로 비워 두고 desc에 통합하는 것이 권장됩니다.
+    - desc (설명) / additionalText (추가 디스크립션): 캐릭터의 핵심 외형·성격·세계관·관계·말투를 담는 메인 프롬프트. personality/scenario 필드는 구버전 호환용으로 비워 두고 desc에 통합하는 것이 권장됩니다.
     - firstMessage (첫 메시지) / alternateGreetings (추가 첫 메시지): 대화 시작 시 AI가 보내는 첫 출력. 문체와 서술 시점(1인칭/3인칭)을 결정합니다.
     - systemPrompt (시스템 프롬프트): 비어 있지 않으면 전역 메인 프롬프트를 대체합니다.
-    - replaceGlobalNote (글로벌 노트 덮어쓰기): 비어 있지 않으면 전역 UJB/글로벌 노트를 대체합니다.
+    - replaceGlobalNote (글로벌 노트 덮어쓰기) / depth_prompt (깊이 프롬프트): 전역 노트 대체 또는 지정된 채팅 깊이(depth)에 프롬프트를 주입합니다.
+    - defaultVariables (기본 변수) / customModuleToggle (커스텀 토글): 상태창·Lua·CBS에서 쓰는 기본 채팅 변수(key=value)와 캐릭터 전용 토글을 정의합니다.
     - backgroundHTML (백그라운드 임베딩): 채팅 배경에 삽입되는 HTML/CSS/마크다운. {{bg::에셋명}}, {{audio::에셋명}} 등을 사용할 수 있습니다.
-    - chat.note (작가의 노트): 현재 채팅 세션에만 주입되는 방향성·문체·전개 지시 메모입니다.
-    - creatorNotes (제작자 코멘트): 프롬프트에 직접 들어가지 않는 제작자 안내 메모입니다.`,
+    - chat.note (작가의 노트) / translatorNote (번역가의 노트): 현재 채팅 방향성 지시 및 번역기 참고 메모입니다.
+    - creatorNotes (제작자 코멘트) / nickname (닉네임): 제작자 안내 메모 및 표시/치환용 닉네임입니다.`,
 
       lorebook: `[로어북 (Lorebook) 가이드]
     - 3가지 스코프: (1) 캐릭터 로어북(char.globalLore), (2) 현재 채팅 로컬 로어북(chat.localLore), (3) 모듈 로어북(db.modules[i].lorebook).
@@ -5080,7 +5529,7 @@
       - maxResponse: AI 한 번의 응답 최대 출력 토큰 수
       - frequencyPenalty / PresensePenalty: 반복 억제 페널티 (RisuAI 원본 키 철자가 'PresensePenalty'임에 주의)
       - theme / textTheme / colorSchemeName / lineHeight: UI 테마 및 가독성
-      - customCSS / guiHTML: 화면 커스텀 CSS 및 GUI HTML (문제 발생 시 Ctrl+. 로 Custom CSS 토글)
+      - customCSS / guiHTML: 디스플레이 설정의 커스텀 CSS 및 채팅 HTML(theme === 'customHTML'일 때 적용; CSS 문제 시 Ctrl+. 로 토글)
       - enabledModules / moduleIntergration: 전역 활성화 모듈 ID 목록 및 모듈 통합 문자열
       - seperateModels / seperateModelsForAxModels: 보조 작업별 별도 모델 설정
     - 플러그인이 보안상 직접 접근할 수 없는 설정(사용자가 RisuAI 설정 메뉴에서 직접 변경해야 함): API 키, 메인 모델 선택(aiModel), 프롬프트 템플릿 순서(formatingOrder), 로어북 기본 스캔 깊이/예산(loreBookDepth/loreBookToken — 단 캐릭터별 char.loreSettings는 수정 가능).`,
@@ -5091,7 +5540,7 @@
       const screen = context?.screen || 'unknown';
       const kind = context?.targetKind || 'general';
 
-      if (screen === 'character' || kind === 'char_field') {
+      if (screen === 'character' || kind === 'char_field' || kind === 'char_alt_greeting') {
         keys.add('character');
         keys.add('cbs');
       }
@@ -5116,6 +5565,9 @@
       }
       if (screen === 'settings' || kind === 'config') {
         keys.add('config');
+        if (context?.fieldKey === 'guiHTML' || context?.fieldKey === 'customCSS') {
+          keys.add('cbs');
+        }
       }
       if (screen === 'chat' || screen === 'unknown' || kind === 'general' || kind === 'chat_message') {
         keys.add('character');
@@ -5145,6 +5597,20 @@
           { label: '정규식 사용법', prompt: 'editinput, editoutput, editprocess, editdisplay의 차이와 안전한 작성 요령을 알려 줘.' },
         ];
       }
+      if (kind === 'module_field') {
+        return [
+          { label: '모듈 필드 다듬기', prompt: '현재 선택된 모듈 필드(백그라운드 임베딩/커스텀 토글/설명 등)의 문법과 구조를 점검하고 개선안을 제안해 줘.' },
+          { label: '토글/임베딩 작성', prompt: '이 모듈에 맞는 깔끔한 백그라운드 임베딩 HTML/CSS 또는 커스텀 토글 구문을 작성해 줘.' },
+          { label: '모듈 작성 팁', prompt: 'RisuAI 모듈의 백그라운드 임베딩과 커스텀 토글 작성 시 주의할 점을 알려 줘.' },
+        ];
+      }
+      if (kind === 'chat_message') {
+        return [
+          { label: '문장 다듬기', prompt: '현재 선택된 채팅 메시지의 문맥과 캐릭터 말투를 살리면서 문장을 자연스럽게 다듬는 부분 수정안을 제안해 줘.' },
+          { label: '오타 · 서식 교정', prompt: '현재 채팅 메시지에서 오타, 어색한 번역투, 깨진 마크다운/HTML 태그를 교정하는 수정안을 제안해 줘.' },
+          { label: '분위기/묘사 보강', prompt: '현재 채팅 메시지의 핵심 전개는 유지하면서 감정선과 장면 묘사를 더 생생하게 보강해 줘.' },
+        ];
+      }
       if (kind === 'char_lorebook' || kind === 'chat_lorebook' || kind === 'module_lorebook' || screen === 'lorebook') {
         return [
           { label: '현재 로어북 다듬기', prompt: '현재 선택된 로어북 항목의 키워드, 배치 순서, 본문을 토큰 효율적이고 명확하게 다듬는 수정안을 제안해 줘.' },
@@ -5159,6 +5625,20 @@
           { label: '페르소나/바인딩 안내', prompt: '페르소나 작성 팁과 채팅별 페르소나 바인딩(bindedPersona) 활용법을 알려 줘.' },
         ];
       }
+      if (kind === 'config' && context?.fieldKey === 'guiHTML') {
+        return [
+          { label: '채팅 HTML 점검', prompt: '현재 디스플레이 채팅 HTML(guiHTML)의 구조와 스타일 깨짐 여부를 점검하고 개선안을 제안해 줘.' },
+          { label: '레이아웃 개선', prompt: '현재 채팅 HTML(guiHTML)의 가독성과 모바일 대응을 높이는 수정안을 제안해 줘.' },
+          { label: '채팅 HTML 가이드', prompt: 'RisuAI 커스텀 채팅 HTML(guiHTML) 작성 시 자주 쓰는 클래스와 주의사항을 알려 줘.' },
+        ];
+      }
+      if (kind === 'config' && context?.fieldKey === 'customCSS') {
+        return [
+          { label: '커스텀 CSS 점검', prompt: '현재 커스텀 CSS(customCSS)에서 선택자 충돌이나 다크/라이트 테마 문제가 있는지 점검하고 수정안을 제안해 줘.' },
+          { label: '가독성 CSS 보강', prompt: '채팅 말풍선 줄간격, 강조 색상, 폰트 가독성을 깔끔하게 다듬는 커스텀 CSS 수정안을 제안해 줘.' },
+          { label: 'CSS 토글/복구 팁', prompt: '커스텀 CSS가 화면을 깨뜨렸을 때 Ctrl+. 로 끄는 방법과 안전한 선택자 작성 요령을 알려 줘.' },
+        ];
+      }
       if (kind === 'config' || screen === 'settings') {
         return [
           { label: '내 설정 진단', prompt: '현재 읽어온 내 RisuAI 설정값(temperature, maxContext, maxResponse, 페널티, 모듈 등)을 보고 개선할 점이 있는지 진단해 줘.' },
@@ -5166,7 +5646,7 @@
           { label: 'Custom CSS 수정', prompt: '현재 Custom CSS를 확인하고 가독성을 높이는 수정안을 제안해 줘.' },
         ];
       }
-      if (kind === 'char_field' || screen === 'character') {
+      if (kind === 'char_field' || kind === 'char_alt_greeting' || screen === 'character') {
         return [
           { label: '현재 필드 다듬기', prompt: '현재 선택된 캐릭터 필드의 문장과 구조를 더 선명하고 토큰 효율적으로 다듬는 부분 수정안을 제안해 줘.' },
           { label: '전체 재작성', prompt: '현재 캐릭터 설정을 바탕으로 이 필드를 더 몰입감 있게 새로 작성한 덮어쓰기 안을 제안해 줘.' },
@@ -8404,7 +8884,7 @@
 
   },
   "src/ui.js"(__require, __exports) {
-    const { VERSION, STORAGE_KEY, PRESET_STORAGE_KEY, CHAR_FIELD_META, SCREEN_LABELS } = __require("src/version.js");
+    const { VERSION, STORAGE_KEY, PRESET_STORAGE_KEY, CHAR_FIELD_META, MODULE_FIELD_META, CONFIG_FIELD_META, SCREEN_LABELS } = __require("src/version.js");
     const { STYLES } = __require("src/style.js");
     const { FocusTracker, normalizeChipPos, MIN_DOCK_VIEWPORT_PX } = __require("src/focus-detector.js");
     const { HostAdapter } = __require("src/host-adapter.js");
@@ -8515,6 +8995,9 @@
           ctx.loreIndex ?? '',
           ctx.loreScope || '',
           ctx.regexIndex ?? '',
+          ctx.greetingIndex ?? '',
+          ctx.messageIndex ?? '',
+          ctx.moduleIndex ?? '',
           ctx.labelText || '',
         ].join('|');
       }
@@ -9060,22 +9543,34 @@
         const opts = [
           { value: 'auto', label: this.detectedContext ? `📍 자동 감지: ${this.detectedContext.labelText}` : '📍 자동 감지 (미감지 · 일반)' },
           { value: 'char_field:desc', label: '캐릭터 · 설명 (Description)' },
+          { value: 'char_field:additionalText', label: '캐릭터 · 추가 디스크립션' },
           { value: 'char_field:firstMessage', label: '캐릭터 · 첫 메시지 (First Message)' },
+          { value: 'char_alt_greeting:', label: '캐릭터 · 추가 첫 메시지 (Alternate Greetings)' },
           { value: 'chat_note:', label: "채팅 · 작가의 노트 (Author's Note)" },
+          { value: 'chat_message:', label: '채팅 · 메시지 수정 (말풍선)' },
           { value: 'char_field:systemPrompt', label: '캐릭터 · 시스템 프롬프트' },
           { value: 'char_field:replaceGlobalNote', label: '캐릭터 · 글로벌 노트 덮어쓰기' },
+          { value: 'char_field:depthPrompt', label: '캐릭터 · 깊이 프롬프트 (Depth Prompt)' },
+          { value: 'char_field:defaultVariables', label: '캐릭터 · 기본 변수 (Default Variables)' },
+          { value: 'char_field:customModuleToggle', label: '캐릭터 · 커스텀 토글' },
+          { value: 'char_field:translatorNote', label: '캐릭터 · 번역가의 노트' },
           { value: 'char_field:creatorNotes', label: '캐릭터 · 제작자 코멘트' },
+          { value: 'char_field:nickname', label: '캐릭터 · 닉네임' },
           { value: 'char_field:backgroundHTML', label: '캐릭터 · 백그라운드 임베딩 (HTML)' },
           { value: 'char_lorebook:', label: '캐릭터 로어북 (목록 / 생성)' },
           { value: 'chat_lorebook:', label: '채팅 로컬 로어북 (목록 / 생성)' },
           { value: 'char_lua:', label: '캐릭터 Lua 트리거 스크립트' },
           { value: 'char_regex:', label: '캐릭터 정규식 스크립트' },
           { value: 'persona:', label: '페르소나 (목록 / 생성 · 수정)' },
+          { value: 'module_field:backgroundEmbedding', label: '모듈 · 백그라운드 임베딩 (HTML)' },
+          { value: 'module_field:customModuleToggle', label: '모듈 · 커스텀 토글' },
+          { value: 'module_field:description', label: '모듈 · 설명' },
           { value: 'module_lorebook:', label: '모듈 로어북' },
           { value: 'module_lua:', label: '모듈 Lua 트리거 스크립트' },
           { value: 'module_regex:', label: '모듈 정규식 스크립트' },
           { value: 'config:', label: 'RisuAI 설정 / 컨피그 진단' },
-          { value: 'config:customCSS', label: '설정 · Custom CSS' },
+          { value: 'config:customCSS', label: '설정 · 커스텀 CSS (customCSS)' },
+          { value: 'config:guiHTML', label: '설정 · 채팅 HTML (guiHTML)' },
           { value: 'general:', label: '일반 질문 / 사용법 안내' },
         ];
         return opts;
@@ -9086,7 +9581,8 @@
         const k = this.manualTarget.targetKind;
         const f = this.manualTarget.fieldKey || '';
         if (k === 'char_field') return `char_field:${f}`;
-        if (k === 'config' && f === 'customCSS') return 'config:customCSS';
+        if (k === 'module_field') return `module_field:${f || 'backgroundEmbedding'}`;
+        if (k === 'config' && (f === 'customCSS' || f === 'guiHTML')) return `config:${f}`;
         return `${k}:`;
       }
 
@@ -9097,12 +9593,15 @@
           const [kind, field] = val.split(':');
           const screenMap = {
             char_field: 'character',
+            char_alt_greeting: 'character',
             chat_note: 'character',
+            chat_message: 'chat',
             char_lorebook: 'lorebook',
             chat_lorebook: 'lorebook',
             char_lua: 'scripts',
             char_regex: 'scripts',
             persona: 'persona',
+            module_field: 'module',
             module_lorebook: 'module',
             module_lua: 'module',
             module_regex: 'module',
@@ -9114,6 +9613,9 @@
             targetKind: kind,
             fieldKey: field || (
               kind === 'chat_note' ? 'note' :
+              kind === 'chat_message' ? 'data' :
+              kind === 'char_alt_greeting' ? 'alternateGreetings' :
+              kind === 'module_field' ? 'backgroundEmbedding' :
               kind === 'char_lorebook' || kind === 'chat_lorebook' || kind === 'module_lorebook' ? 'content' :
               kind === 'persona' ? 'personaPrompt' :
               null
@@ -9122,9 +9624,17 @@
             loreScope: kind === 'chat_lorebook' ? 'chat' : kind === 'module_lorebook' ? 'module' : kind === 'char_lorebook' ? 'character' : null,
             labelText: kind === 'char_field'
               ? (CHAR_FIELD_META[field]?.label || field)
-              : kind === 'chat_note'
-                ? '작가의 노트 (현재 채팅)'
-                : (SCREEN_LABELS[screenMap[kind]] || kind),
+              : kind === 'char_alt_greeting'
+                ? '캐릭터 · 추가 첫 메시지'
+                : kind === 'chat_note'
+                  ? '작가의 노트 (현재 채팅)'
+                  : kind === 'chat_message'
+                    ? '채팅 · 메시지 수정'
+                    : kind === 'module_field'
+                      ? (MODULE_FIELD_META[field]?.label || `모듈 · ${field}`)
+                      : kind === 'config' && field
+                        ? (CONFIG_FIELD_META[field]?.label || `설정 · ${field}`)
+                        : (SCREEN_LABELS[screenMap[kind]] || kind),
             warnings: [],
           };
         }
@@ -9322,7 +9832,52 @@
           );
         }
 
-        if ((ctx.targetKind === 'module_lorebook' || ctx.targetKind === 'module_lua' || ctx.targetKind === 'module_regex') && Array.isArray(this.activeSnapshot.modulesSummary)) {
+        if (ctx.targetKind === 'char_alt_greeting' && Array.isArray(this.activeSnapshot.altGreetingsSummary) && this.activeSnapshot.altGreetingsSummary.length > 0) {
+          const selectedIdx = ctx.greetingIndex ?? this.activeSnapshot.target?.greetingIndex ?? 0;
+          return h(doc, 'select', {
+            class: 'rh-select',
+            onchange: async (e) => {
+              const base = this.manualTarget || { ...ctx };
+              base.greetingIndex = Number(e.target.value);
+              this.manualTarget = base;
+              await this.refreshContextSnapshot();
+              this.render();
+            },
+          },
+            ...this.activeSnapshot.altGreetingsSummary.map(item =>
+              h(doc, 'option', {
+                value: String(item.index),
+                selected: selectedIdx === item.index,
+              }, `추가 첫 메시지 #${item.index + 1}${item.preview ? ` · ${item.preview}` : ' (비어 있음)'}`)
+            )
+          );
+        }
+
+        if (ctx.targetKind === 'chat_message' && Array.isArray(this.activeSnapshot.messagesSummary) && this.activeSnapshot.messagesSummary.length > 0) {
+          const selectedIdx = ctx.messageIndex ?? this.activeSnapshot.target?.messageIndex;
+          return h(doc, 'select', {
+            class: 'rh-select',
+            onchange: async (e) => {
+              const base = this.manualTarget || { ...ctx };
+              base.messageIndex = Number(e.target.value);
+              this.manualTarget = base;
+              await this.refreshContextSnapshot();
+              this.render();
+            },
+          },
+            ...this.activeSnapshot.messagesSummary.map(item =>
+              h(doc, 'option', {
+                value: String(item.index),
+                selected: selectedIdx === item.index,
+              }, `#${item.index + 1} [${item.role}] ${item.preview || '(비어 있음)'}`)
+            )
+          );
+        }
+
+        if (
+          (ctx.targetKind === 'module_field' || ctx.targetKind === 'module_lorebook' || ctx.targetKind === 'module_lua' || ctx.targetKind === 'module_regex') &&
+          Array.isArray(this.activeSnapshot.modulesSummary)
+        ) {
           return h(doc, 'select', {
             class: 'rh-select',
             onchange: async (e) => {

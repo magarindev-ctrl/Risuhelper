@@ -2,14 +2,19 @@ import {
   ALLOWED_CONFIG_KEYS,
   CONFIG_KEY_TYPES,
   CHAR_FIELD_META,
+  MODULE_FIELD_META,
+  CONFIG_FIELD_META,
   MAX_LLM_CONTENT_CHARS,
   ALLOWED_CHAR_FIELDS,
+  ALLOWED_MODULE_FIELDS,
   ALLOWED_LORE_TEXT_FIELDS,
   ALLOWED_PERSONA_TEXT_FIELDS,
 } from './version.js';
 import { applyTextEdits } from './text-edits.js';
 
 const BAD_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+const DB_PERMISSION_ERROR =
+  'DB 읽기 권한(db)이 필요합니다. 이전에 권한을 거부(취소)했다면 RisuAI/PocketRisu 설정 → 플러그인에서 권한 초기화 후 다시 허용해 주세요.';
 
 const LORE_META_SPECS = [
   ['comment', '이름'],
@@ -84,17 +89,26 @@ function validateAllowedFieldKey(kind, fieldKey) {
   if (kind === 'char_field' && !ALLOWED_CHAR_FIELDS.includes(fieldKey)) {
     return `허용되지 않는 캐릭터 필드입니다: ${fieldKey}`;
   }
+  if (kind === 'char_alt_greeting' && fieldKey !== 'alternateGreetings') {
+    return `허용되지 않는 추가 첫 메시지 필드입니다: ${fieldKey}`;
+  }
   if (
     (kind === 'char_lorebook' || kind === 'chat_lorebook' || kind === 'module_lorebook') &&
     !ALLOWED_LORE_TEXT_FIELDS.includes(fieldKey)
   ) {
     return `허용되지 않는 로어북 필드입니다: ${fieldKey}`;
   }
+  if (kind === 'module_field' && !ALLOWED_MODULE_FIELDS.includes(fieldKey)) {
+    return `허용되지 않는 모듈 필드입니다: ${fieldKey}`;
+  }
   if (kind === 'persona' && !ALLOWED_PERSONA_TEXT_FIELDS.includes(fieldKey)) {
     return `허용되지 않는 페르소나 필드입니다: ${fieldKey}`;
   }
   if (kind === 'chat_note' && fieldKey !== 'note') {
     return `허용되지 않는 작가의 노트 필드입니다: ${fieldKey}`;
+  }
+  if (kind === 'chat_message' && fieldKey !== 'data') {
+    return `허용되지 않는 채팅 메시지 필드입니다: ${fieldKey}`;
   }
   if (kind === 'config' && !ALLOWED_CONFIG_KEYS.includes(fieldKey)) {
     return `허용되지 않는 설정 키입니다: ${fieldKey}`;
@@ -488,7 +502,10 @@ class HostAdapter {
     if (proposal?.action === 'patch_text' || proposal?.action === 'replace_text') {
       // Never allow LLM proposal.target to redirect a direct text edit to a different field or target
       if (pt) {
-        const guardedKeys = ['targetKind', 'fieldKey', 'loreIndex', 'loreScope', 'personaIndex', 'moduleIndex', 'regexIndex'];
+        const guardedKeys = [
+          'targetKind', 'fieldKey', 'loreIndex', 'loreScope',
+          'personaIndex', 'moduleIndex', 'regexIndex', 'greetingIndex', 'messageIndex',
+        ];
         for (const k of guardedKeys) {
           if (pt[k] !== undefined && pt[k] !== null && pt[k] !== base[k]) {
             throw new Error(`보안상 제안 블록의 target.${k}(${String(pt[k])})로 현재 선택 대상을 덮어쓸 수 없습니다.`);
@@ -573,13 +590,40 @@ class HostAdapter {
       const fieldKey = t.fieldKey || 'desc';
       const fieldErr = validateAllowedFieldKey('char_field', fieldKey);
       if (fieldErr) return { ok: false, reason: fieldErr, content: '' };
-      const content = String(char[fieldKey] ?? '');
+      const content = fieldKey === 'depthPrompt'
+        ? String(char.depth_prompt?.prompt ?? '')
+        : String(char[fieldKey] ?? '');
       return {
         ok: true,
         target: { ...t, fieldKey },
         hostBinding: { charIndex, ...getCharIdentity(char) },
         label: CHAR_FIELD_META[fieldKey]?.label || fieldKey,
         content,
+        charName: char.name || '(이름 없음)',
+      };
+    }
+
+    if (t.targetKind === 'char_alt_greeting') {
+      const { char, charIndex } = await this.readActiveCharacter();
+      if (!char) return { ok: false, reason: '선택된 캐릭터가 없습니다.', content: '' };
+      const list = Array.isArray(char.alternateGreetings) ? char.alternateGreetings : [];
+      const idx =
+        Number.isInteger(t.greetingIndex) && t.greetingIndex >= 0 && t.greetingIndex < list.length
+          ? t.greetingIndex
+          : (list.length > 0 ? 0 : null);
+      return {
+        ok: true,
+        target: { ...t, fieldKey: 'alternateGreetings', greetingIndex: idx },
+        hostBinding: { charIndex, greetingIndex: idx, ...getCharIdentity(char) },
+        label: idx !== null
+          ? `캐릭터 · 추가 첫 메시지 #${idx + 1} (${char.name || '무제'})`
+          : `캐릭터 · 추가 첫 메시지 (없음 · ${char.name || '무제'})`,
+        content: idx !== null ? String(list[idx] ?? '') : '',
+        greetingCount: list.length,
+        altGreetingsSummary: list.slice(0, 40).map((g, i) => ({
+          index: i,
+          preview: String(g ?? '').replace(/\s+/g, ' ').trim().slice(0, 40),
+        })),
         charName: char.name || '(이름 없음)',
       };
     }
@@ -596,6 +640,54 @@ class HostAdapter {
         hostBinding: { charIndex, chatIndex, ...getCharIdentity(char) },
         label: '작가의 노트 (현재 채팅)',
         content: String(chat.note ?? ''),
+        charName: char?.name || '(이름 없음)',
+      };
+    }
+
+    if (t.targetKind === 'chat_message') {
+      const { chat, char, charIndex, chatIndex } = await this.readActiveChat();
+      if (!chat) return { ok: false, reason: '활성 채팅을 찾을 수 없습니다.', content: '' };
+      // In Chat.svelte, data-chat-index="-1" represents the active greeting (firstMessage or alternateGreetings[fmIndex])
+      if (t.messageIndex === -1 && char) {
+        const fmIndex = Number.isInteger(chat.fmIndex) ? chat.fmIndex : -1;
+        if (fmIndex >= 0 && Array.isArray(char.alternateGreetings) && char.alternateGreetings[fmIndex] !== undefined) {
+          return await this.readTargetSnapshot({
+            ...t,
+            screen: 'character',
+            targetKind: 'char_alt_greeting',
+            fieldKey: 'alternateGreetings',
+            greetingIndex: fmIndex,
+            messageIndex: undefined,
+          });
+        }
+        return await this.readTargetSnapshot({
+          ...t,
+          screen: 'character',
+          targetKind: 'char_field',
+          fieldKey: 'firstMessage',
+          messageIndex: undefined,
+        });
+      }
+      const list = Array.isArray(chat.message) ? chat.message : [];
+      const idx =
+        Number.isInteger(t.messageIndex) && t.messageIndex >= 0 && t.messageIndex < list.length
+          ? t.messageIndex
+          : (list.length > 0 ? list.length - 1 : null);
+      const msg = idx !== null ? list[idx] : null;
+      const roleLabel = msg?.role === 'user' ? '유저' : '캐릭터';
+      const startOffset = Math.max(0, list.length - 30);
+      return {
+        ok: true,
+        target: { ...t, fieldKey: 'data', messageIndex: idx },
+        hostBinding: { charIndex, chatIndex, messageIndex: idx, chatId: msg?.chatId || null, ...getCharIdentity(char) },
+        label: msg ? `채팅 메시지 #${idx + 1} (${roleLabel})` : '채팅 메시지 (없음)',
+        content: msg ? String(msg.data ?? '') : '',
+        messageCount: list.length,
+        messagesSummary: list.slice(startOffset).map((m, i) => ({
+          index: startOffset + i,
+          role: m?.role === 'user' ? '유저' : '캐릭터',
+          preview: String(m?.data ?? '').replace(/\s+/g, ' ').trim().slice(0, 36),
+        })),
         charName: char?.name || '(이름 없음)',
       };
     }
@@ -690,7 +782,7 @@ class HostAdapter {
 
     if (t.targetKind === 'persona') {
       const { personas, selectedPersona, permissionDenied } = await this.readPersonas();
-      if (permissionDenied) return { ok: false, reason: 'DB 읽기 권한(db)이 필요합니다.', content: '' };
+      if (permissionDenied) return { ok: false, reason: DB_PERMISSION_ERROR, content: '' };
       const idx = Number.isInteger(t.personaIndex) ? t.personaIndex : selectedPersona;
       const entry = personas[idx] ?? null;
       const fieldKey = t.fieldKey || 'personaPrompt';
@@ -714,9 +806,14 @@ class HostAdapter {
       };
     }
 
-    if (t.targetKind === 'module_lorebook' || t.targetKind === 'module_lua' || t.targetKind === 'module_regex') {
+    if (
+      t.targetKind === 'module_field' ||
+      t.targetKind === 'module_lorebook' ||
+      t.targetKind === 'module_lua' ||
+      t.targetKind === 'module_regex'
+    ) {
       const { modules, enabledModules, permissionDenied } = await this.readModules();
-      if (permissionDenied) return { ok: false, reason: 'DB 읽기 권한(db)이 필요합니다.', content: '' };
+      if (permissionDenied) return { ok: false, reason: DB_PERMISSION_ERROR, content: '' };
       const modIdx = Number.isInteger(t.moduleIndex) ? t.moduleIndex : (modules.length > 0 ? 0 : null);
       const mod = modIdx !== null ? modules[modIdx] : null;
       if (!mod) return { ok: true, target: t, label: '설치된 모듈 없음', content: '', modulesSummary: [] };
@@ -727,8 +824,17 @@ class HostAdapter {
       let isLua = false;
       let hasOtherTriggers = false;
       let otherTriggerCount = 0;
+      let resolvedFieldKey = t.fieldKey;
 
-      if (t.targetKind === 'module_lua') {
+      if (t.targetKind === 'module_field') {
+        const fieldKey = t.fieldKey || 'backgroundEmbedding';
+        const fieldErr = validateAllowedFieldKey('module_field', fieldKey);
+        if (fieldErr) return { ok: false, reason: fieldErr, content: '' };
+        resolvedFieldKey = fieldKey;
+        content = String(mod[fieldKey] ?? '');
+        const metaLabel = MODULE_FIELD_META[fieldKey]?.label || `모듈 · ${fieldKey}`;
+        label = `${metaLabel} (${mod.name || '무제'})`;
+      } else if (t.targetKind === 'module_lua') {
         const lua = extractLuaFromTriggers(mod.trigger);
         content = lua.code;
         isLua = lua.isLua;
@@ -748,12 +854,13 @@ class HostAdapter {
         const fieldKey = t.fieldKey || 'content';
         const fieldErr = validateAllowedFieldKey('module_lorebook', fieldKey);
         if (fieldErr) return { ok: false, reason: fieldErr, content: '' };
+        resolvedFieldKey = fieldKey;
         content = entry ? String(entry[fieldKey] ?? '') : '';
         label = entry ? `모듈 로어북 (${mod.name} #${lIdx + 1})` : `모듈 로어북 (${mod.name}, ${list.length}개)`;
       }
       return {
         ok: true,
-        target: { ...t, moduleIndex: modIdx },
+        target: { ...t, moduleIndex: modIdx, fieldKey: resolvedFieldKey },
         hostBinding: { moduleIndex: modIdx, moduleId: mod.id || null },
         label,
         content,
@@ -774,14 +881,14 @@ class HostAdapter {
 
     if (t.targetKind === 'config') {
       const cfg = await this.readAllowedConfig();
-      if (!cfg) return { ok: false, reason: 'DB 읽기 권한(db)이 필요합니다.', content: '' };
+      if (!cfg) return { ok: false, reason: DB_PERMISSION_ERROR, content: '' };
       const fieldKey = t.fieldKey || null;
       const fieldErr = validateAllowedFieldKey('config', fieldKey);
       if (fieldErr) return { ok: false, reason: fieldErr, content: '' };
       return {
         ok: true,
         target: { ...t, fieldKey },
-        label: fieldKey ? `설정 · ${fieldKey}` : 'RisuAI 설정 (허용 키)',
+        label: fieldKey ? (CONFIG_FIELD_META[fieldKey]?.label || `설정 · ${fieldKey}`) : 'RisuAI 설정 (허용 키)',
         content: fieldKey ? String(cfg[fieldKey] ?? '') : JSON.stringify(cfg, null, 2),
         config: cfg,
       };
@@ -857,6 +964,30 @@ class HostAdapter {
         return {
           ok: false,
           error: '수정할 로어북 항목이 선택되지 않았습니다. 상단에서 로어북 항목을 선택하거나 create_lorebook을 사용하세요.',
+          label: snap.label,
+          target: snap.target,
+        };
+      }
+      if (kind === 'char_alt_greeting' && !Number.isInteger(snap.target?.greetingIndex)) {
+        return {
+          ok: false,
+          error: '수정할 추가 첫 메시지 항목이 없습니다. RisuAI 캐릭터 고급 설정에서 추가 첫 메시지를 하나 이상 만든 뒤 시도해 주세요.',
+          label: snap.label,
+          target: snap.target,
+        };
+      }
+      if (kind === 'chat_message' && !Number.isInteger(snap.target?.messageIndex)) {
+        return {
+          ok: false,
+          error: '수정할 채팅 메시지가 없습니다. 채팅 대화가 있는 상태에서 메시지를 선택해 주세요.',
+          label: snap.label,
+          target: snap.target,
+        };
+      }
+      if (kind === 'module_field' && !snap.module) {
+        return {
+          ok: false,
+          error: '수정할 설치 모듈이 없습니다.',
           label: snap.label,
           target: snap.target,
         };
@@ -1103,7 +1234,7 @@ class HostAdapter {
 
     if (proposal.action === 'update_config') {
       const cfg = await this.readAllowedConfig();
-      if (!cfg) return { ok: false, error: 'DB 읽기 권한(db)이 필요합니다.' };
+      if (!cfg) return { ok: false, error: DB_PERMISSION_ERROR };
       const changes = proposal.changes || {};
       const invalidKeys = Object.keys(changes).filter(k => !ALLOWED_CONFIG_KEYS.includes(k));
       if (invalidKeys.length > 0) {
@@ -1172,9 +1303,32 @@ class HostAdapter {
       const fieldKey = target.fieldKey || 'desc';
       assertAllowedFieldKey('char_field', fieldKey);
       const { char, charIndex } = await this._requireSameActiveCharacter(options.hostBinding, '적용');
+      const charBinding = { charIndex, ...getCharIdentity(char) };
+
+      if (fieldKey === 'depthPrompt') {
+        const hadKey = Object.hasOwn(char, 'depth_prompt');
+        const prevValue = clone(char.depth_prompt);
+        const nextChar = clone(char);
+        const curDepth = Number.isFinite(Number(nextChar.depth_prompt?.depth)) ? Number(nextChar.depth_prompt.depth) : 0;
+        const nextPrompt = compute(String(nextChar.depth_prompt?.prompt ?? ''), '깊이 프롬프트');
+        nextChar.depth_prompt = { ...(nextChar.depth_prompt || {}), depth: curDepth, prompt: nextPrompt };
+        await this._setCharacter(nextChar);
+
+        const undoId = this._pushUndo({
+          label: '캐릭터 깊이 프롬프트 수정',
+          restore: async () => {
+            const { char: latest } = await this._requireSameActiveCharacter(charBinding, '되돌리기');
+            const restored = clone(latest);
+            if (hadKey) restored.depth_prompt = clone(prevValue);
+            else delete restored.depth_prompt;
+            await this._setCharacter(restored);
+          },
+        });
+        return { ok: true, undoId, summary: '캐릭터 깊이 프롬프트에 적용했습니다.' };
+      }
+
       const hadKey = Object.hasOwn(char, fieldKey);
       const prevValue = clone(char[fieldKey]);
-      const charBinding = { charIndex, ...getCharIdentity(char) };
 
       const nextChar = clone(char);
       nextChar[fieldKey] = compute(String(nextChar[fieldKey] ?? ''), fieldKey);
@@ -1191,6 +1345,35 @@ class HostAdapter {
         },
       });
       return { ok: true, undoId, summary: `캐릭터 ${CHAR_FIELD_META[fieldKey]?.label || fieldKey}에 적용했습니다.` };
+    }
+
+    if (kind === 'char_alt_greeting') {
+      const { char, charIndex } = await this._requireSameActiveCharacter(options.hostBinding, '적용');
+      const list = Array.isArray(char.alternateGreetings) ? char.alternateGreetings : [];
+      const idx = target.greetingIndex;
+      if (!Number.isInteger(idx) || idx < 0 || idx >= list.length) {
+        throw new Error('수정할 추가 첫 메시지 인덱스가 올바르지 않습니다.');
+      }
+      const prevValue = clone(list[idx]);
+      const charBinding = { charIndex, ...getCharIdentity(char) };
+
+      const nextChar = clone(char);
+      nextChar.alternateGreetings[idx] = compute(String(nextChar.alternateGreetings[idx] ?? ''), `추가 첫 메시지 #${idx + 1}`);
+      await this._setCharacter(nextChar);
+
+      const undoId = this._pushUndo({
+        label: `추가 첫 메시지 #${idx + 1} 수정`,
+        restore: async () => {
+          const { char: latest } = await this._requireSameActiveCharacter(charBinding, '되돌리기');
+          if (!Array.isArray(latest.alternateGreetings) || idx >= latest.alternateGreetings.length) {
+            throw new Error('되돌릴 추가 첫 메시지 항목을 찾을 수 없습니다.');
+          }
+          const restored = clone(latest);
+          restored.alternateGreetings[idx] = clone(prevValue);
+          await this._setCharacter(restored);
+        },
+      });
+      return { ok: true, undoId, summary: `캐릭터 추가 첫 메시지 #${idx + 1}에 적용했습니다.` };
     }
 
     if (kind === 'chat_note') {
@@ -1216,6 +1399,48 @@ class HostAdapter {
         },
       });
       return { ok: true, undoId, summary: '현재 채팅의 작가의 노트에 적용했습니다.' };
+    }
+
+    if (kind === 'chat_message') {
+      const { chat, charIndex, chatIndex } = await this._requireSameActiveChat(options.hostBinding, '적용');
+      const idx = target.messageIndex;
+      if (!Number.isInteger(idx) || idx < 0 || !chat.message?.[idx]) {
+        throw new Error('수정할 채팅 메시지 인덱스가 올바르지 않습니다.');
+      }
+      const pinnedChatId = options.hostBinding?.chatId || null;
+      if (pinnedChatId && chat.message[idx].chatId && chat.message[idx].chatId !== pinnedChatId) {
+        throw new Error('대상 채팅 메시지가 변경되어 적용을 중단했습니다. 다시 제안받아 주세요.');
+      }
+      const prevData = clone(chat.message[idx].data);
+      const hasSwipe = Array.isArray(chat.message[idx].swipes) && Number.isInteger(chat.message[idx].swipeId);
+      const swipeId = hasSwipe ? chat.message[idx].swipeId : null;
+      const prevSwipeVal = hasSwipe ? clone(chat.message[idx].swipes[swipeId]) : undefined;
+
+      const nextChat = clone(chat);
+      const nextText = compute(String(nextChat.message[idx].data ?? ''), `채팅 메시지 #${idx + 1}`);
+      nextChat.message[idx].data = nextText;
+      if (hasSwipe) {
+        nextChat.message[idx].swipes[swipeId] = nextText;
+      }
+      await this._setChat(charIndex, chatIndex, nextChat);
+
+      const undoId = this._pushUndo({
+        label: `채팅 메시지 #${idx + 1} 수정`,
+        restore: async () => {
+          const latestChat = await this._readChatAt(charIndex, chatIndex);
+          if (!latestChat?.message?.[idx]) throw new Error('되돌릴 채팅 메시지를 찾을 수 없습니다.');
+          if (pinnedChatId && latestChat.message[idx].chatId && latestChat.message[idx].chatId !== pinnedChatId) {
+            throw new Error('되돌릴 채팅 메시지가 변경되어 복구를 중단했습니다.');
+          }
+          const restored = clone(latestChat);
+          restored.message[idx].data = clone(prevData);
+          if (hasSwipe && Array.isArray(restored.message[idx].swipes)) {
+            restored.message[idx].swipes[swipeId] = clone(prevSwipeVal);
+          }
+          await this._setChat(charIndex, chatIndex, restored);
+        },
+      });
+      return { ok: true, undoId, summary: `채팅 메시지 #${idx + 1}에 적용했습니다.` };
     }
 
     if (kind === 'char_lorebook') {
@@ -1308,6 +1533,46 @@ class HostAdapter {
       }, target, options);
     }
 
+    if (kind === 'module_field') {
+      const fieldKey = target.fieldKey || 'backgroundEmbedding';
+      assertAllowedFieldKey('module_field', fieldKey);
+      const { modules, permissionDenied } = await this.readModules();
+      if (permissionDenied) throw new Error(DB_PERMISSION_ERROR);
+      const pinnedId = options.hostBinding?.moduleId || null;
+      let modIdx = Number.isInteger(target.moduleIndex) ? target.moduleIndex : 0;
+      if (pinnedId) {
+        const byId = modules.findIndex(m => m.id === pinnedId);
+        if (byId !== -1) modIdx = byId;
+      }
+      if (!modules[modIdx]) throw new Error('수정할 모듈을 찾을 수 없습니다.');
+      const moduleId = modules[modIdx].id;
+      const moduleName = modules[modIdx].name || '무제';
+      const hadKey = Object.hasOwn(modules[modIdx], fieldKey);
+      const prevValue = clone(modules[modIdx][fieldKey]);
+
+      const nextModules = clone(modules);
+      nextModules[modIdx][fieldKey] = compute(String(nextModules[modIdx][fieldKey] ?? ''), `모듈 ${fieldKey}`);
+      await this.writeDbSubset({ modules: nextModules });
+
+      const undoId = this._pushUndo({
+        label: `모듈 "${moduleName}" ${fieldKey} 수정`,
+        restore: async () => {
+          const { modules: latestModules } = await this.readModules();
+          const idx = moduleId ? latestModules.findIndex(m => m.id === moduleId) : modIdx;
+          if (idx === -1 || !latestModules[idx]) throw new Error('되돌릴 모듈을 찾을 수 없습니다.');
+          const restored = clone(latestModules);
+          if (hadKey) restored[idx][fieldKey] = clone(prevValue);
+          else delete restored[idx][fieldKey];
+          await this.writeDbSubset({ modules: restored });
+        },
+      });
+      return {
+        ok: true,
+        undoId,
+        summary: `${MODULE_FIELD_META[fieldKey]?.label || `모듈 ${fieldKey}`} (${moduleName})에 적용했습니다.`,
+      };
+    }
+
     if (kind === 'module_lorebook') {
       const fieldKey = target.fieldKey || 'content';
       assertAllowedFieldKey('module_lorebook', fieldKey);
@@ -1323,7 +1588,7 @@ class HostAdapter {
 
     if (kind === 'config' && target.fieldKey && ALLOWED_CONFIG_KEYS.includes(target.fieldKey)) {
       const cfg = await this.readAllowedConfig();
-      if (!cfg) throw new Error('DB 읽기 권한(db)이 필요합니다.');
+      if (!cfg) throw new Error(DB_PERMISSION_ERROR);
       const nextVal = compute(String(cfg[target.fieldKey] ?? ''), target.fieldKey);
       return await this._applyUpdateConfig({ changes: { [target.fieldKey]: nextVal } });
     }
@@ -1361,7 +1626,7 @@ class HostAdapter {
 
     if (scope === 'module') {
       const { modules, permissionDenied } = await this.readModules();
-      if (permissionDenied) throw new Error('DB 읽기 권한(db)이 필요합니다.');
+      if (permissionDenied) throw new Error(DB_PERMISSION_ERROR);
       const modIdx = Number.isInteger(proposal.moduleIndex) ? proposal.moduleIndex : (target.moduleIndex ?? 0);
       if (!modules[modIdx]) throw new Error('대상 모듈을 찾을 수 없습니다.');
       const moduleId = modules[modIdx].id;
@@ -1463,7 +1728,7 @@ class HostAdapter {
 
     if (scope === 'module') {
       const { modules, permissionDenied } = await this.readModules();
-      if (permissionDenied) throw new Error('DB 읽기 권한(db)이 필요합니다.');
+      if (permissionDenied) throw new Error(DB_PERMISSION_ERROR);
       const modIdx = Number.isInteger(proposal.moduleIndex) ? proposal.moduleIndex : (target.moduleIndex ?? 0);
       if (!modules[modIdx]?.lorebook?.[loreIndex]) throw new Error('대상 모듈 로어북 항목을 찾을 수 없습니다.');
       const moduleId = modules[modIdx].id;
@@ -1512,7 +1777,7 @@ class HostAdapter {
 
     if (scope === 'module') {
       const { modules, permissionDenied } = await this.readModules();
-      if (permissionDenied) throw new Error('DB 읽기 권한(db)이 필요합니다.');
+      if (permissionDenied) throw new Error(DB_PERMISSION_ERROR);
       const modIdx = Number.isInteger(proposal.moduleIndex) ? proposal.moduleIndex : (target.moduleIndex ?? 0);
       if (!modules[modIdx]) throw new Error('대상 모듈을 찾을 수 없습니다.');
       const luaInfo = extractLuaFromTriggers(modules[modIdx].trigger);
@@ -1584,7 +1849,7 @@ class HostAdapter {
 
     if (scope === 'module') {
       const { modules, permissionDenied } = await this.readModules();
-      if (permissionDenied) throw new Error('DB 읽기 권한(db)이 필요합니다.');
+      if (permissionDenied) throw new Error(DB_PERMISSION_ERROR);
       const modIdx = Number.isInteger(proposal.moduleIndex) ? proposal.moduleIndex : (target.moduleIndex ?? 0);
       if (!modules[modIdx]) throw new Error('대상 모듈을 찾을 수 없습니다.');
       const moduleId = modules[modIdx].id;
@@ -1678,7 +1943,7 @@ class HostAdapter {
 
   async _applyCreatePersona(proposal, options) {
     const { personas, permissionDenied } = await this.readPersonas();
-    if (permissionDenied) throw new Error('DB 읽기 권한(db)이 필요합니다.');
+    if (permissionDenied) throw new Error(DB_PERMISSION_ERROR);
     const nextPersonas = clone(personas);
     const newPersona = {
       name: String(proposal.name || 'New Persona'),
@@ -1721,7 +1986,7 @@ class HostAdapter {
 
   async _applyUpdatePersona(proposal, target, options) {
     const { personas, selectedPersona, permissionDenied } = await this.readPersonas();
-    if (permissionDenied) throw new Error('DB 읽기 권한(db)이 필요합니다.');
+    if (permissionDenied) throw new Error(DB_PERMISSION_ERROR);
     const idx = Number.isInteger(proposal.personaIndex)
       ? proposal.personaIndex
       : (Number.isInteger(target.personaIndex) ? target.personaIndex : selectedPersona);
@@ -1792,7 +2057,7 @@ class HostAdapter {
     if (keys.length === 0) throw new Error('변경할 설정 항목이 없습니다.');
 
     const cfg = await this.readAllowedConfig();
-    if (!cfg) throw new Error('DB 읽기 권한(db)이 필요합니다.');
+    if (!cfg) throw new Error(DB_PERMISSION_ERROR);
 
     const prev = {};
     const next = {};

@@ -20,11 +20,11 @@ RisuAI 및 공개 포크(`PocketRisu`, `RisuBard`, `HaejeokRisuai`, `RisuNest`, 
   - 제안 생성 시점의 대상과 캐릭터/채팅 식별자를 카드에 고정해 커서 이동 후 적용해도 의도치 않은 필드가 덮어써지지 않으며, 허용 필드 화이트리스트·24,000자 초과 원문의 전체 덮어쓰기 차단·기존 V1/V2 트리거 삭제 확인 체크박스로 안전성을 보장합니다.
   - **되돌리기(Undo)**는 최신 상태를 다시 읽어 변경했던 필드/항목만 정밀 복원하므로 적용 이후 나눈 채팅 메시지나 새로 추가된 항목을 유실하지 않습니다.
 - **광범위한 편집 · 생성 지원**
-  - 캐릭터/채팅 설정: 이름(`name`), 설명(`desc`), 첫 메시지(`firstMessage`), **작가의 노트(`chat.note`)**, 시스템 프롬프트, 글로벌 노트 덮어쓰기, 제작자 코멘트, 백그라운드 임베딩, 캐릭터JS(`virtualscript`) 등
+  - 캐릭터/채팅 설정: 이름(`name`), 닉네임(`nickname`), 설명(`desc`), 추가 디스크립션(`additionalText`), 첫 메시지(`firstMessage`), **추가 첫 메시지(`alternateGreetings`)**, **작가의 노트(`chat.note`)**, **채팅 말풍선 메시지 수정(`chat.message[i]`)**, 시스템 프롬프트, 글로벌 노트 덮어쓰기, **깊이 프롬프트(`depth_prompt.prompt`)**, **기본 변수(`defaultVariables`)**, **캐릭터 커스텀 토글(`customModuleToggle`)**, **번역가의 노트(`translatorNote`)**, 제작자 코멘트, 백그라운드 임베딩, 캐릭터JS(`virtualscript`) 등
   - 로어북: 캐릭터 로어북(`globalLore`), 채팅 로컬 로어북(`localLore`), 모듈 로어북(`modules[].lorebook`) 생성·수정
-  - 스크립트: 캐릭터/모듈 **Lua 트리거 스크립트(`triggerlua`)** 및 **정규식 스크립트(`customscript`)** 생성·부분편집·덮어쓰기
+  - 모듈 & 스크립트: 모듈 **백그라운드 임베딩(`backgroundEmbedding`)**·**커스텀 토글(`customModuleToggle`)**·설명/이름/네임스페이스, 캐릭터/모듈 **Lua 트리거 스크립트(`triggerlua`)** 및 **정규식 스크립트(`customscript`)** 생성·부분편집·덮어쓰기
   - 페르소나: 새 페르소나 생성, 기존 페르소나 수정, **현재 채팅 바인딩(`bindedPersona`)** 1-클릭 옵션
-  - 설정/컨피그: `allowedDbKeys` 범위의 설정 진단 및 안전한 수정(`temperature`, `maxContext`, `maxResponse`, `customCSS`, `enabledModules` 등)
+  - 설정/컨피그: `allowedDbKeys` 범위의 설정 진단 및 안전한 수정(디스플레이 **채팅 HTML(`guiHTML`)** · **커스텀 CSS(`customCSS`)**, `temperature`, `maxContext`, `maxResponse`, `enabledModules` 등)
 - **프롬프트 프리셋 적용 / 직접 보내기 전환 (BotBuilder 호환)**
   - 상단 바에서 **직접 보내기 (`direct`) ↔ 프리셋 적용 (`preset`)** 모드를 1-클릭으로 전환할 수 있습니다.
   - `.risup` / `.risupreset` / `.json` / `.preset` 파일을 외부 의존성 없이 순수 WebCrypto·`DecompressionStream`·MessagePack·RPack으로 복호화해 가져옵니다(본체 프리셋은 변경하지 않음).

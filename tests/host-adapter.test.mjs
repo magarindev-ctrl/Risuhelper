@@ -487,5 +487,172 @@ test('HostAdapter does not misidentify catch-all Plugin v3 Proxy as RisuNest and
   assert.equal(flavor.activePersonaAutoSyncs, false);
 });
 
+test('HostAdapter supports Display guiHTML/customCSS, depthPrompt, alternateGreetings, module_field, chat_message (with swipes sync & -1 redirect), and friendly DB permission hint', async () => {
+  let allowDb = false;
+  const db = {
+    guiHTML: '<div class="chat">{{slot}}</div>',
+    customCSS: '.risu-chat { font-size: 14px; }',
+    modules: [
+      {
+        id: 'mod-hud-1',
+        name: '상태창 모듈',
+        description: '기존 모듈 설명',
+        backgroundEmbedding: '<style>.hud{color:red}</style>',
+        customModuleToggle: 'hp=HP 표시=switch',
+        lorebook: [],
+        regex: [],
+        trigger: [],
+      },
+    ],
+    enabledModules: ['mod-hud-1'],
+    personas: [],
+    selectedPersona: 0,
+  };
+
+  const state = {
+    character: {
+      chaId: 'char-adv-1',
+      name: '에린',
+      firstMessage: '기본 첫 메시지',
+      alternateGreetings: ['추가 인사 1', '추가 인사 2 (수정 전)'],
+      additionalText: '추가 설명 원본',
+      defaultVariables: 'hp=100\nmp=50',
+      depth_prompt: { depth: 4, prompt: '기존 깊이 지시' },
+      globalLore: [],
+      customscript: [],
+      triggerscript: [],
+      chatPage: 0,
+      chats: [
+        {
+          fmIndex: 1,
+          note: '',
+          localLore: [],
+          message: [
+            { role: 'user', data: '안녕', chatId: 'm-0' },
+            { role: 'char', data: '오타가 잇는 응답', chatId: 'm-1', swipeId: 0, swipes: ['오타가 잇는 응답', '다른 스와이프'] },
+          ],
+        },
+      ],
+    },
+  };
+
+  const api = {
+    async getCharacter() { return structuredClone(state.character); },
+    async setCharacter(c) { state.character = structuredClone(c); },
+    async getCurrentCharacterIndex() { return 0; },
+    async getCurrentChatIndex() { return 0; },
+    async getChatFromIndex(_ci, chIdx) { return structuredClone(state.character.chats[chIdx]); },
+    async setChatToIndex(_ci, chIdx, nextChat) { state.character.chats[chIdx] = structuredClone(nextChat); },
+    async getDatabase(keys) {
+      if (!allowDb) return null;
+      const out = {};
+      for (const k of keys) out[k] = structuredClone(db[k]);
+      return out;
+    },
+    async setDatabase(partial) {
+      for (const [k, v] of Object.entries(partial)) db[k] = structuredClone(v);
+    },
+  };
+
+  const adapter = new HostAdapter(api);
+
+  // 1. Denied DB permission gives clear PocketRisu/RisuAI permission reset hint
+  const deniedSnap = await adapter.readTargetSnapshot({ targetKind: 'config', fieldKey: 'guiHTML' });
+  assert.equal(deniedSnap.ok, false);
+  assert.match(deniedSnap.reason, /권한 초기화/);
+
+  // 2. Display guiHTML patch + Undo
+  allowDb = true;
+  const guiPrev = await adapter.previewProposal(
+    { action: 'patch_text', edits: [{ before: 'class="chat"', after: 'class="chat-v2"' }] },
+    { targetKind: 'config', fieldKey: 'guiHTML' }
+  );
+  assert.equal(guiPrev.ok, true);
+  assert.equal(guiPrev.label, '설정 · 채팅 HTML (guiHTML)');
+  const guiRes = await adapter.applyProposal(
+    { action: 'patch_text', edits: [{ before: 'class="chat"', after: 'class="chat-v2"' }] },
+    guiPrev.target
+  );
+  assert.equal(db.guiHTML, '<div class="chat-v2">{{slot}}</div>');
+  await adapter.undo(guiRes.undoId);
+  assert.equal(db.guiHTML, '<div class="chat">{{slot}}</div>');
+
+  // 3. Character depthPrompt preserves numeric depth and restores on Undo
+  const depthPrev = await adapter.previewProposal(
+    { action: 'replace_text', content: '새 깊이 지시' },
+    { targetKind: 'char_field', fieldKey: 'depthPrompt' }
+  );
+  assert.equal(depthPrev.ok, true);
+  assert.equal(depthPrev.before, '기존 깊이 지시');
+  const depthRes = await adapter.applyProposal(
+    { action: 'replace_text', content: '새 깊이 지시' },
+    depthPrev.target,
+    { hostBinding: depthPrev.hostBinding }
+  );
+  assert.deepEqual(state.character.depth_prompt, { depth: 4, prompt: '새 깊이 지시' });
+  await adapter.undo(depthRes.undoId);
+  assert.deepEqual(state.character.depth_prompt, { depth: 4, prompt: '기존 깊이 지시' });
+
+  // 4. Character alternateGreetings #2 + surgical Undo (leaves #1 intact)
+  const altPrev = await adapter.previewProposal(
+    { action: 'patch_text', edits: [{ before: '(수정 전)', after: '(수정 후)' }] },
+    { targetKind: 'char_alt_greeting', greetingIndex: 1 }
+  );
+  assert.equal(altPrev.ok, true);
+  const altRes = await adapter.applyProposal(
+    { action: 'patch_text', edits: [{ before: '(수정 전)', after: '(수정 후)' }] },
+    altPrev.target,
+    { hostBinding: altPrev.hostBinding }
+  );
+  assert.equal(state.character.alternateGreetings[1], '추가 인사 2 (수정 후)');
+  await adapter.undo(altRes.undoId);
+  assert.equal(state.character.alternateGreetings[1], '추가 인사 2 (수정 전)');
+  assert.equal(state.character.alternateGreetings[0], '추가 인사 1');
+
+  // 5. Module field (backgroundEmbedding) patch + Undo by moduleId
+  const modPrev = await adapter.previewProposal(
+    { action: 'patch_text', edits: [{ before: 'color:red', after: 'color:cyan' }] },
+    { targetKind: 'module_field', fieldKey: 'backgroundEmbedding', moduleIndex: 0 }
+  );
+  assert.equal(modPrev.ok, true);
+  const modRes = await adapter.applyProposal(
+    { action: 'patch_text', edits: [{ before: 'color:red', after: 'color:cyan' }] },
+    modPrev.target,
+    { hostBinding: modPrev.hostBinding }
+  );
+  assert.equal(db.modules[0].backgroundEmbedding, '<style>.hud{color:cyan}</style>');
+  await adapter.undo(modRes.undoId);
+  assert.equal(db.modules[0].backgroundEmbedding, '<style>.hud{color:red}</style>');
+
+  // 6. Chat message edit syncs swipes[swipeId] and surgical Undo preserves newer messages
+  const msgPrev = await adapter.previewProposal(
+    { action: 'patch_text', edits: [{ before: '오타가 잇는 응답', after: '오타를 고친 응답' }] },
+    { targetKind: 'chat_message', messageIndex: 1 }
+  );
+  assert.equal(msgPrev.ok, true);
+  const msgRes = await adapter.applyProposal(
+    { action: 'patch_text', edits: [{ before: '오타가 잇는 응답', after: '오타를 고친 응답' }] },
+    msgPrev.target,
+    { hostBinding: msgPrev.hostBinding }
+  );
+  assert.equal(state.character.chats[0].message[1].data, '오타를 고친 응답');
+  assert.equal(state.character.chats[0].message[1].swipes[0], '오타를 고친 응답');
+  assert.equal(state.character.chats[0].message[1].swipes[1], '다른 스와이프');
+
+  // Newer message arrives before Undo
+  state.character.chats[0].message.push({ role: 'user', data: '이후 새 메시지', chatId: 'm-2' });
+  await adapter.undo(msgRes.undoId);
+  assert.equal(state.character.chats[0].message[1].data, '오타가 잇는 응답');
+  assert.equal(state.character.chats[0].message[1].swipes[0], '오타가 잇는 응답');
+  assert.equal(state.character.chats[0].message.length, 3);
+
+  // 7. Chat messageIndex -1 redirects to active alternateGreeting when chat.fmIndex === 1
+  const fmSnap = await adapter.readTargetSnapshot({ targetKind: 'chat_message', messageIndex: -1 });
+  assert.equal(fmSnap.ok, true);
+  assert.equal(fmSnap.target.targetKind, 'char_alt_greeting');
+  assert.equal(fmSnap.target.greetingIndex, 1);
+  assert.equal(fmSnap.content, '추가 인사 2 (수정 전)');
+});
+
 
 

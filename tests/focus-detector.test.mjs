@@ -896,6 +896,248 @@ test('FocusTracker PC right-dock self-verifies own iframe among multiple plugin 
   assert.equal(mainStyles.width, '');
 });
 
+test('PocketRisu DisplaySettings detects 채팅 HTML (guiHTML) and 커스텀 CSS (customCSS) via data-setting-id and flex-col label wrappers', async () => {
+  const guiHtmlTa = makePocketRisuTextArea({ contentEditable: false });
+  const customCssTa = makePocketRisuTextArea({ contentEditable: false });
+  const upstreamChatHtmlTa = makePocketRisuTextArea({ contentEditable: false });
+
+  createInteractiveSafeNode({
+    tag: 'div',
+    outerHtml: '<div class="py-3 border-t border-darkborderc" data-setting-id="display.guiHTML"></div>',
+    children: [
+      createInteractiveSafeNode({
+        tag: 'div',
+        className: 'flex flex-col',
+        children: [
+          createInteractiveSafeNode({ tag: 'span', className: 'text-sm text-textcolor', text: '채팅 HTML' }),
+          createInteractiveSafeNode({ tag: 'p', className: 'text-xs text-textcolor2', text: '도움말' }),
+        ],
+      }),
+      guiHtmlTa.outerWrap,
+    ],
+  });
+
+  createInteractiveSafeNode({
+    tag: 'div',
+    outerHtml: '<div class="py-3 border-t border-darkborderc" data-setting-id="display.customCSS"></div>',
+    children: [
+      createInteractiveSafeNode({
+        tag: 'div',
+        className: 'flex flex-col',
+        children: [
+          createInteractiveSafeNode({ tag: 'span', className: 'text-sm text-textcolor', text: '커스텀 CSS' }),
+        ],
+      }),
+      customCssTa.outerWrap,
+    ],
+  });
+
+  // Upstream RisuAI stacked layout without data-setting-id (label-only)
+  createInteractiveSafeNode({
+    tag: 'div',
+    className: 'flex flex-col',
+    children: [
+      createInteractiveSafeNode({ tag: 'span', className: 'text-textcolor', text: '채팅 HTML' }),
+      upstreamChatHtmlTa.outerWrap,
+    ],
+  });
+
+  guiHtmlTa.editor._focused = true;
+  const guiCtx = await inspectFocusedElement(makeMockRootDoc(guiHtmlTa.editor));
+  assert.equal(guiCtx.targetKind, 'config');
+  assert.equal(guiCtx.fieldKey, 'guiHTML');
+  assert.equal(guiCtx.screen, 'settings');
+
+  guiHtmlTa.editor._focused = false;
+  customCssTa.editor._focused = true;
+  const cssCtx = await inspectFocusedElement(makeMockRootDoc(customCssTa.editor));
+  assert.equal(cssCtx.targetKind, 'config');
+  assert.equal(cssCtx.fieldKey, 'customCSS');
+
+  customCssTa.editor._focused = false;
+  upstreamChatHtmlTa.editor._focused = true;
+  const upCtx = await inspectFocusedElement(makeMockRootDoc(upstreamChatHtmlTa.editor));
+  assert.equal(upCtx.targetKind, 'config');
+  assert.equal(upCtx.fieldKey, 'guiHTML');
+});
+
+test('CharConfig Advanced tab detects additionalText, defaultVariables, customModuleToggle, translatorNote, nickname, depthPrompt, and alternateGreetings row indices', async () => {
+  const addDescTa = makePocketRisuTextArea({ contentEditable: true });
+  const defVarsTa = makePocketRisuTextArea({ contentEditable: false });
+  const toggleTa = makePocketRisuTextArea({ contentEditable: false });
+  const transTa = makePocketRisuTextArea({ contentEditable: false });
+  const nickInput = createInteractiveSafeNode({ tag: 'input', outerHtml: '<input type="text">' });
+  const depthNum = createInteractiveSafeNode({ tag: 'input', outerHtml: '<input type="number">' });
+  const depthPromptInput = createInteractiveSafeNode({ tag: 'input', outerHtml: '<input type="text">' });
+  const altGreet0 = makePocketRisuTextArea({ contentEditable: true });
+  const altGreet1 = makePocketRisuTextArea({ contentEditable: true });
+
+  const allEditors = [
+    addDescTa.editor, defVarsTa.editor, toggleTa.editor, transTa.editor,
+    nickInput, depthNum, depthPromptInput, altGreet0.editor, altGreet1.editor,
+  ];
+  const focusOnly = (target) => {
+    for (const e of allEditors) e._focused = (e === target);
+  };
+
+  const altTable = createInteractiveSafeNode({
+    tag: 'div',
+    className: 'w-full max-w-full border border-selected rounded-md p-2',
+    children: [
+      createInteractiveSafeNode({
+        tag: 'table',
+        children: [
+          createInteractiveSafeNode({
+            tag: 'tbody',
+            children: [
+              createInteractiveSafeNode({ tag: 'tr', children: [createInteractiveSafeNode({ tag: 'th', text: '값' })] }),
+              createInteractiveSafeNode({ tag: 'tr', children: [createInteractiveSafeNode({ tag: 'td', children: [altGreet0.outerWrap] })] }),
+              createInteractiveSafeNode({ tag: 'tr', children: [createInteractiveSafeNode({ tag: 'td', children: [altGreet1.outerWrap] })] }),
+            ],
+          }),
+        ],
+      }),
+    ],
+  });
+
+  createInteractiveSafeNode({
+    tag: 'div',
+    className: 'char-advanced',
+    children: [
+      createInteractiveSafeNode({ tag: 'h2', text: '고급 설정' }),
+      createInteractiveSafeNode({ tag: 'span', className: 'text-textcolor', text: '추가 디스크립션' }),
+      addDescTa.outerWrap,
+      createInteractiveSafeNode({ tag: 'span', className: 'text-textcolor', text: '기본 변수' }),
+      defVarsTa.outerWrap,
+      createInteractiveSafeNode({ tag: 'span', className: 'text-textcolor', text: '커스텀 토글' }),
+      toggleTa.outerWrap,
+      createInteractiveSafeNode({ tag: 'span', className: 'text-textcolor', text: '번역가의 노트' }),
+      transTa.outerWrap,
+      createInteractiveSafeNode({ tag: 'span', className: 'text-textcolor', text: '닉네임' }),
+      nickInput,
+      createInteractiveSafeNode({ tag: 'span', className: 'text-textcolor', text: '깊이 프롬프트' }),
+      createInteractiveSafeNode({ tag: 'div', className: 'flex justify-center items-center', children: [depthNum, depthPromptInput] }),
+      createInteractiveSafeNode({ tag: 'span', className: 'text-textcolor', text: '추가 첫 메시지' }),
+      altTable,
+    ],
+  });
+
+  focusOnly(addDescTa.editor);
+  assert.equal((await inspectFocusedElement(makeMockRootDoc(addDescTa.editor))).fieldKey, 'additionalText');
+
+  focusOnly(defVarsTa.editor);
+  assert.equal((await inspectFocusedElement(makeMockRootDoc(defVarsTa.editor))).fieldKey, 'defaultVariables');
+
+  focusOnly(toggleTa.editor);
+  assert.equal((await inspectFocusedElement(makeMockRootDoc(toggleTa.editor))).fieldKey, 'customModuleToggle');
+
+  focusOnly(transTa.editor);
+  assert.equal((await inspectFocusedElement(makeMockRootDoc(transTa.editor))).fieldKey, 'translatorNote');
+
+  focusOnly(nickInput);
+  assert.equal((await inspectFocusedElement(makeMockRootDoc(nickInput))).fieldKey, 'nickname');
+
+  focusOnly(depthPromptInput);
+  const depthCtx = await inspectFocusedElement(makeMockRootDoc(depthPromptInput));
+  assert.equal(depthCtx.targetKind, 'char_field');
+  assert.equal(depthCtx.fieldKey, 'depthPrompt');
+
+  // Number input for depth must NOT be misclassified as depthPrompt string editor
+  focusOnly(depthNum);
+  assert.notEqual((await inspectFocusedElement(makeMockRootDoc(depthNum))).fieldKey, 'depthPrompt');
+
+  focusOnly(altGreet0.editor);
+  const g0 = await inspectFocusedElement(makeMockRootDoc(altGreet0.editor));
+  assert.equal(g0.targetKind, 'char_alt_greeting');
+  assert.equal(g0.greetingIndex, 0);
+
+  focusOnly(altGreet1.editor);
+  const g1 = await inspectFocusedElement(makeMockRootDoc(altGreet1.editor));
+  assert.equal(g1.targetKind, 'char_alt_greeting');
+  assert.equal(g1.greetingIndex, 1);
+});
+
+test('ModuleMenu fields resolve to module_field and Chat.svelte bubble editors resolve to chat_message with exact data-chat-index', async () => {
+  const modBgTa = makePocketRisuTextArea({ contentEditable: false });
+  const modToggleTa = makePocketRisuTextArea({ contentEditable: false });
+  const modNameInput = createInteractiveSafeNode({ tag: 'input', outerHtml: '<input type="text">' });
+
+  createInteractiveSafeNode({
+    tag: 'div',
+    children: [
+      createInteractiveSafeNode({ tag: 'h2', text: '모듈 수정' }),
+      createInteractiveSafeNode({
+        tag: 'div',
+        outerHtml: '<div class="flex justify-between py-3 border-t border-darkborderc" data-setting-id="module.name"></div>',
+        children: [
+          createInteractiveSafeNode({
+            tag: 'div',
+            className: 'flex flex-col min-w-0',
+            children: [createInteractiveSafeNode({ tag: 'span', className: 'text-sm text-textcolor', text: '이름' })],
+          }),
+          createInteractiveSafeNode({ tag: 'div', className: 'shrink-0', children: [modNameInput] }),
+        ],
+      }),
+      createInteractiveSafeNode({
+        tag: 'div',
+        className: 'py-3 border-t border-darkborderc',
+        children: [
+          createInteractiveSafeNode({ tag: 'span', className: 'text-sm text-textcolor', text: '커스텀 토글' }),
+          modToggleTa.outerWrap,
+        ],
+      }),
+      createInteractiveSafeNode({
+        tag: 'div',
+        className: 'flex flex-col',
+        children: [
+          createInteractiveSafeNode({ tag: 'span', className: 'text-sm text-textcolor', text: '백그라운드 임베딩' }),
+          modBgTa.outerWrap,
+        ],
+      }),
+    ],
+  });
+
+  modBgTa.editor._focused = true;
+  const bgCtx = await inspectFocusedElement(makeMockRootDoc(modBgTa.editor));
+  assert.equal(bgCtx.targetKind, 'module_field');
+  assert.equal(bgCtx.fieldKey, 'backgroundEmbedding');
+
+  modBgTa.editor._focused = false;
+  modToggleTa.editor._focused = true;
+  const togCtx = await inspectFocusedElement(makeMockRootDoc(modToggleTa.editor));
+  assert.equal(togCtx.targetKind, 'module_field');
+  assert.equal(togCtx.fieldKey, 'customModuleToggle');
+
+  modToggleTa.editor._focused = false;
+  modNameInput._focused = true;
+  const nameCtx = await inspectFocusedElement(makeMockRootDoc(modNameInput));
+  assert.equal(nameCtx.targetKind, 'module_field');
+  assert.equal(nameCtx.fieldKey, 'name');
+
+  // Chat.svelte standard bubble edit inside .risu-chat[data-chat-index="2"]
+  const bubbleEditTa = createInteractiveSafeNode({ tag: 'textarea', outerHtml: '<textarea></textarea>' });
+  createInteractiveSafeNode({
+    tag: 'div',
+    outerHtml: '<div class="flex max-w-full justify-center risu-chat" data-chat-index="2"></div>',
+    children: [
+      createInteractiveSafeNode({
+        tag: 'div',
+        children: [
+          createInteractiveSafeNode({
+            tag: 'div',
+            children: [bubbleEditTa],
+          }),
+        ],
+      }),
+    ],
+  });
+  bubbleEditTa._focused = true;
+  const msgCtx = await inspectFocusedElement(makeMockRootDoc(bubbleEditTa));
+  assert.equal(msgCtx.targetKind, 'chat_message');
+  assert.equal(msgCtx.messageIndex, 2);
+  assert.equal(msgCtx.labelText, '채팅 메시지 #3 수정');
+});
+
 
 
 
