@@ -102,12 +102,14 @@ class RisuHelperApp {
     this.hostModuleCatalog = [];
     this.lastPresetPreview = null;
     this.busy = false;
+    this.applyingGroup = false;
     this.currentJob = null;
     this.detectedContext = null;
     this.manualTarget = null;
     this.activeSnapshot = null;
     this.messages = [];
     this.toastTimer = null;
+    this._undoSaveTimer = null;
     this.toastText = '';
     this.registeredIds = [];
     this.hostActionButtonId = null;
@@ -159,6 +161,9 @@ class RisuHelperApp {
     await this.loadUndoState();
     this.adapter.onUndoChange = (info) => {
       this.scheduleSaveUndoState();
+      if (info?.evictedIds?.length) {
+        this.markEvictedCards(info.evictedIds);
+      }
       if (info?.evicted?.length) {
         this.showToast(`되돌리기 기록이 가득 차 가장 오래된 ${info.evicted.length}건을 정리했습니다. (정리된 변경은 더 이상 되돌릴 수 없습니다)`);
       }
@@ -301,25 +306,56 @@ class RisuHelperApp {
     } catch {}
   }
 
+  async flushUndoState() {
+    if (this._undoSaveTimer) {
+      clearTimeout(this._undoSaveTimer);
+      this._undoSaveTimer = null;
+    }
+    if (!this.api.pluginStorage?.setItem) return;
+    try {
+      await this.api.pluginStorage.setItem(UNDO_STORAGE_KEY, JSON.stringify(this.adapter.exportUndoState()));
+    } catch {}
+  }
+
   scheduleSaveUndoState() {
     if (!this.api.pluginStorage?.setItem) return;
     clearTimeout(this._undoSaveTimer);
-    this._undoSaveTimer = setTimeout(async () => {
-      try {
-        await this.api.pluginStorage.setItem(UNDO_STORAGE_KEY, JSON.stringify(this.adapter.exportUndoState()));
-      } catch {}
+    this._undoSaveTimer = setTimeout(() => {
+      this._undoSaveTimer = null;
+      this.flushUndoState();
     }, 120);
   }
 
-  /** Clears "applied" on cards whose undo record no longer exists (undone globally or evicted). */
-  syncAppliedCards() {
+  /** Marks cards whose undo records were evicted so they stay applied without a dead Undo button. */
+  markEvictedCards(evictedIds) {
+    const expired = new Set(evictedIds || []);
+    if (expired.size === 0) return;
+    for (const msg of this.messages) {
+      for (const item of msg.proposals || []) {
+        if (item.applied && item.undoId && expired.has(item.undoId)) {
+          item.undoId = null;
+          item.statusMessage = '적용됨 (되돌리기 기록 만료)';
+        }
+      }
+      if (msg.groupId && !this.adapter.undoStack.some(r => r.groupId === msg.groupId)) {
+        msg.groupId = null;
+      }
+    }
+  }
+
+  /** Reconciles applied cards whose undo record was removed (undone or skipped due to conflict). */
+  syncAppliedCards({ conflict = false } = {}) {
     const liveIds = new Set(this.adapter.undoStack.map(r => r.id));
     for (const msg of this.messages) {
       for (const item of msg.proposals || []) {
         if (item.applied && item.undoId && !liveIds.has(item.undoId)) {
-          item.applied = false;
           item.undoId = null;
-          item.statusMessage = '되돌림 완료';
+          if (conflict) {
+            item.statusMessage = '적용됨 (이후 직접 수정되어 되돌리지 않음)';
+          } else {
+            item.applied = false;
+            item.statusMessage = '되돌림 완료';
+          }
         }
       }
       if (msg.groupId && !this.adapter.undoStack.some(r => r.groupId === msg.groupId)) {
@@ -336,23 +372,35 @@ class RisuHelperApp {
   }
 
   applicableProposals(msg) {
-    return (msg.proposals || []).filter(item => item.preview?.ok && !item.applied);
+    return (msg.proposals || []).filter(item =>
+      item.preview?.ok && !item.applied && (!item.preview.requiresConfirm || item.destructiveConfirmed)
+    );
   }
 
   /** Applies every applicable proposal of one reply as a single undo unit. */
   async applyAllProposals(msg) {
+    if (this.busy || this.applyingGroup) return;
+    this.applyingGroup = true;
     const attempted = new Set();
-    const { groupId } = await this.adapter.runGroup(`묶음 적용`, async () => {
-      for (let guard = 0; guard < 200; guard++) {
-        const next = this.applicableProposals(msg).find(item => !attempted.has(item));
-        if (!next) break;
-        attempted.add(next);
-        await this.applyProposalItem(next);
+    try {
+      const { groupId } = await this.adapter.runGroup(`묶음 적용`, async () => {
+        for (let guard = 0; guard < 200; guard++) {
+          const next = this.applicableProposals(msg).find(item => !attempted.has(item));
+          if (!next) break;
+          attempted.add(next);
+          await this.applyProposalItem(next);
+        }
+      });
+      const appliedCount = [...attempted].filter(item => item.applied).length;
+      if (appliedCount > 0) {
+        msg.groupId = groupId;
+        this.showToast(`${appliedCount}건을 한 번에 적용했습니다. "묶음 되돌리기" 한 번으로 모두 되돌릴 수 있습니다.`);
+      } else {
+        this.showToast('적용된 제안이 없습니다. 각 카드의 오류 또는 확인 체크를 확인해 주세요.');
       }
-    });
-    const appliedCount = [...attempted].filter(item => item.applied).length;
-    msg.groupId = appliedCount > 0 ? groupId : null;
-    this.showToast(`${appliedCount}건을 한 번에 적용했습니다. "묶음 되돌리기" 한 번으로 모두 되돌릴 수 있습니다.`);
+    } finally {
+      this.applyingGroup = false;
+    }
     this.render();
   }
 
@@ -364,7 +412,7 @@ class RisuHelperApp {
       await this.refreshContextSnapshot();
       this.showToast(this.describeUndoResult(res));
     } catch (err) {
-      this.syncAppliedCards();
+      this.syncAppliedCards({ conflict: err?.code === 'UNDO_CONFLICT' });
       this.showToast(`되돌리기 실패: ${err.message}`);
     }
     this.render();
@@ -952,7 +1000,7 @@ class RisuHelperApp {
       }
       this.showToast(this.describeUndoResult(res));
     } catch (err) {
-      this.syncAppliedCards();
+      this.syncAppliedCards({ conflict: err?.code === 'UNDO_CONFLICT' });
       this.showToast(`되돌리기 실패: ${err.message}`);
     }
     this.render();
@@ -1239,12 +1287,14 @@ class RisuHelperApp {
           }, item.moduleDomSynced ? '📝 다시 채우기' : '📝 입력칸에 채우기')
         );
       }
-      rightControls.push(
-        h(doc, 'button', {
-          class: 'rh-btn danger',
-          onclick: () => this.undoProposalItem(item),
-        }, '되돌리기')
-      );
+      if (item.undoId) {
+        rightControls.push(
+          h(doc, 'button', {
+            class: 'rh-btn danger',
+            onclick: () => this.undoProposalItem(item),
+          }, '되돌리기')
+        );
+      }
     } else {
       rightControls.push(
         h(doc, 'button', {
@@ -1708,7 +1758,7 @@ class RisuHelperApp {
               await this.refreshContextSnapshot();
               this.showToast(this.describeUndoResult(res));
             } catch (err) {
-              this.syncAppliedCards();
+              this.syncAppliedCards({ conflict: err?.code === 'UNDO_CONFLICT' });
               this.showToast(err.message);
             }
             this.render();
@@ -1977,7 +2027,7 @@ class RisuHelperApp {
               h(doc, 'div', { class: 'rh-row', style: 'gap:6px;flex-wrap:wrap;' },
                 applicable.length >= 2 && h(doc, 'button', {
                   class: 'rh-btn primary',
-                  disabled: this.busy,
+                  disabled: this.busy || this.applyingGroup,
                   onclick: () => this.applyAllProposals(msg),
                 }, `모두 적용 (${applicable.length})`),
                 msg.groupId && h(doc, 'button', {
@@ -2071,6 +2121,9 @@ class RisuHelperApp {
 
   async destroy() {
     clearTimeout(this.toastTimer);
+    if (this._undoSaveTimer) {
+      await this.flushUndoState();
+    }
     this.currentJob?.stop?.('플러그인이 언로드되었습니다.');
     await this.tracker.stop();
     const win = this.doc.defaultView;

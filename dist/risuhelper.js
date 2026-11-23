@@ -2348,16 +2348,19 @@ function classifyDomSignals(signals) {
 async function inspectFocusedElement(rootDoc, options = {}) {
   if (!rootDoc) return null;
   const diag = options.diagnostics ? { errors: [] } : null;
+  const prevDiagnostics = activeDiagnostics;
   if (diag) activeDiagnostics = diag;
-  let el;
-  try {
-    el = await rootDoc.querySelector(FOCUS_SELECTOR);
-  } catch {
-    return null;
-  }
-  if (!el) return null;
 
   try {
+    let el;
+    try {
+      el = await rootDoc.querySelector(FOCUS_SELECTOR);
+    } catch (err) {
+      noteDetectError(err);
+      return null;
+    }
+    if (!el) return null;
+
     const outerHtml = await el.getOuterHTML();
     const attrs = parseOpeningTagAttrs(outerHtml);
     const tag = attrs._tag || String(await el.nodeName()).toLowerCase();
@@ -2681,7 +2684,7 @@ async function inspectFocusedElement(rootDoc, options = {}) {
     noteDetectError(err);
     return null;
   } finally {
-    if (diag) activeDiagnostics = null;
+    if (diag) activeDiagnostics = prevDiagnostics;
   }
 }
 
@@ -4155,7 +4158,7 @@ function anchorMatches(element, anchor) {
   return Object.keys(anchor).every(k => element[k] === anchor[k]);
 }
 
-function stepInto(container, seg) {
+function stepInto(container, seg, anchorCache = null) {
   if (typeof seg === 'string') {
     if (!isPlainObject(container) || BAD_KEYS.has(seg)) return null;
     return { parent: container, key: seg };
@@ -4169,30 +4172,50 @@ function stepInto(container, seg) {
     return idx === -1 ? null : { parent: container, key: idx };
   }
   if (seg && typeof seg === 'object' && 'i' in seg) {
-    if (seg.i >= 0 && seg.i < container.length && anchorMatches(container[seg.i], seg.a)) {
-      return { parent: container, key: seg.i };
+    const cacheKey = anchorCache ? JSON.stringify(seg) : null;
+    if (anchorCache) {
+      const cached = anchorCache.get(container)?.get(cacheKey);
+      if (cached !== undefined) {
+        const curIdx = container.indexOf(cached);
+        return curIdx === -1 ? null : { parent: container, key: curIdx };
+      }
     }
-    const hits = [];
-    container.forEach((el, idx) => { if (anchorMatches(el, seg.a)) hits.push(idx); });
-    return hits.length === 1 ? { parent: container, key: hits[0] } : null;
+    let foundIdx = -1;
+    if (seg.i >= 0 && seg.i < container.length && anchorMatches(container[seg.i], seg.a)) {
+      foundIdx = seg.i;
+    } else {
+      const hits = [];
+      container.forEach((el, idx) => { if (anchorMatches(el, seg.a)) hits.push(idx); });
+      if (hits.length === 1) foundIdx = hits[0];
+    }
+    if (foundIdx === -1) return null;
+    if (anchorCache) {
+      let bySeg = anchorCache.get(container);
+      if (!bySeg) {
+        bySeg = new Map();
+        anchorCache.set(container, bySeg);
+      }
+      bySeg.set(cacheKey, container[foundIdx]);
+    }
+    return { parent: container, key: foundIdx };
   }
   return null;
 }
 
-function locate(root, path) {
+function locate(root, path, anchorCache = null) {
   let container = root;
   let slot = null;
   for (let n = 0; n < path.length; n++) {
-    slot = stepInto(container, path[n]);
+    slot = stepInto(container, path[n], anchorCache);
     if (!slot) return null;
     if (n < path.length - 1) container = slot.parent[slot.key];
   }
   return slot;
 }
 
-function resolveValue(root, path) {
+function resolveValue(root, path, anchorCache = null) {
   if (path.length === 0) return { found: true, value: root };
-  const slot = locate(root, path);
+  const slot = locate(root, path, anchorCache);
   if (!slot) return { found: false };
   return { found: true, value: slot.parent[slot.key] };
 }
@@ -4214,13 +4237,16 @@ function revertOps(current, ops) {
   let root = cloneDeep(current);
   let reverted = 0;
   const conflicts = [];
+  // Keep anchored element identity stable within a single revert pass so reverting an anchor
+  // property (e.g. `comment` or `key`) never breaks locating the same element for its sibling ops.
+  const anchorCache = new WeakMap();
 
   for (let n = ops.length - 1; n >= 0; n--) {
     const op = ops[n];
     const where = describePath(op.path);
 
     if (op.op === 'insert') {
-      const target = resolveValue(root, op.path);
+      const target = resolveValue(root, op.path, anchorCache);
       if (!target.found || !Array.isArray(target.value)) {
         conflicts.push({ path: where, reason: '추가했던 항목이 들어 있던 목록을 찾을 수 없습니다.' });
         continue;
@@ -4253,7 +4279,7 @@ function revertOps(current, ops) {
       continue;
     }
 
-    const slot = locate(root, op.path);
+    const slot = locate(root, op.path, anchorCache);
     if (!slot) {
       conflicts.push({ path: where, reason: '대상 항목을 찾을 수 없습니다.' });
       continue;
@@ -5986,7 +6012,8 @@ class HostAdapter {
   }
 
   _enforceUndoLimits() {
-    const evicted = [];
+    const labels = [];
+    const ids = [];
     const totalSize = () => this.undoStack.reduce((sum, r) => sum + (r.size || 0), 0);
     let units = this._undoUnits();
     while (units.length > 1 && (units.length > this.maxUndoUnits || totalSize() > this.maxUndoBytes)) {
@@ -5994,10 +6021,11 @@ class HostAdapter {
       for (const rec of oldest.records) {
         const at = this.undoStack.indexOf(rec);
         if (at !== -1) this.undoStack.splice(at, 1);
-        evicted.push(rec.label);
+        labels.push(rec.label);
+        ids.push(rec.id);
       }
     }
-    return evicted;
+    return { labels, ids };
   }
 
   _recordChange(entity, ops, label, opts = {}) {
@@ -6022,8 +6050,8 @@ class HostAdapter {
       size,
     };
     this.undoStack.push(record);
-    const evicted = this._enforceUndoLimits();
-    this._emitUndoChange({ evicted });
+    const { labels: evicted, ids: evictedIds } = this._enforceUndoLimits();
+    this._emitUndoChange({ evicted, evictedIds });
     return record.id;
   }
 
@@ -6051,7 +6079,10 @@ class HostAdapter {
 
   /** Applies several proposals as one undo unit. */
   async runGroup(label, fn) {
-    if (this._activeGroup) return fn();
+    if (this._activeGroup) {
+      const result = await fn();
+      return { groupId: this._activeGroup.id, result };
+    }
     this._activeGroup = { id: makeUuid(), label: String(label || '묶음 적용') };
     const groupId = this._activeGroup.id;
     try {
@@ -6132,22 +6163,31 @@ class HostAdapter {
   async _undoRecords(records) {
     let undone = 0;
     let reverted = 0;
+    let removedAny = false;
     const conflicts = [];
     const labels = [];
-    for (const rec of records) {
-      const res = await this._revertRecord(rec);
-      const at = this.undoStack.indexOf(rec);
-      if (at !== -1) this.undoStack.splice(at, 1);
-      reverted += res.reverted;
-      conflicts.push(...res.conflicts);
-      if (res.reverted > 0) undone++;
-      labels.push(rec.label);
+    try {
+      for (const rec of records) {
+        const res = await this._revertRecord(rec);
+        const at = this.undoStack.indexOf(rec);
+        if (at !== -1) {
+          this.undoStack.splice(at, 1);
+          removedAny = true;
+        }
+        reverted += res.reverted;
+        conflicts.push(...res.conflicts);
+        if (res.reverted > 0) undone++;
+        labels.push(rec.label);
+      }
+    } finally {
+      if (removedAny) this._emitUndoChange({});
     }
-    this._emitUndoChange({});
     if (reverted === 0 && conflicts.length > 0) {
-      throw new Error(
+      const err = new Error(
         `되돌리지 않았습니다: 적용 이후 값이 다시 변경되어 덮어쓰지 않았습니다 (${conflicts.slice(0, 3).map(c => c.path).join(', ')}). 이 기록은 목록에서 제거했습니다.`
       );
+      err.code = 'UNDO_CONFLICT';
+      throw err;
     }
     const label = records.length > 1 ? `${records[records.length - 1].groupLabel || '묶음 적용'} (${records.length}건)` : labels[0];
     return { ok: true, label, undone, reverted, conflicts };
@@ -6226,14 +6266,12 @@ class HostAdapter {
   }
 
   /**
-   * Computes the resulting text, metadata diffs, warnings, and pinned target binding before mutating anything.
-   */
-  /**
    * Every index or id a proposal names must exist before anything is previewed or written.
    * Kept in one place so that a new action cannot forget the check: a reference that does not
    * resolve must fail loudly, never be redirected to another item or stored as-is.
    */
-  async _findReferenceError(proposal, target) {
+  async _findReferenceError(proposal, target, options = {}) {
+    const formatBadIndex = (raw) => (Number.isInteger(raw) ? `#${raw + 1}` : `"${String(raw)}"`);
     let modulesCache = null;
     const loadModules = async () => {
       if (!modulesCache) modulesCache = await this.readModules();
@@ -6244,7 +6282,7 @@ class HostAdapter {
       const { modules, permissionDenied } = await loadModules();
       if (permissionDenied) return DB_PERMISSION_ERROR;
       if (!Number.isInteger(proposal.moduleIndex) || !modules[proposal.moduleIndex]) {
-        return `제안이 가리키는 모듈(#${Number(proposal.moduleIndex) + 1})이 없습니다. (설치된 모듈 ${modules.length}개)`;
+        return `제안이 가리키는 모듈(${formatBadIndex(proposal.moduleIndex)})이 없습니다. (설치된 모듈 ${modules.length}개)`;
       }
     }
 
@@ -6254,7 +6292,7 @@ class HostAdapter {
         const { personas, permissionDenied } = await this.readPersonas();
         if (permissionDenied) return DB_PERMISSION_ERROR;
         if (!Number.isInteger(changes.selectedPersona) || !personas[changes.selectedPersona]) {
-          return `선택하려는 페르소나(#${Number(changes.selectedPersona) + 1})가 없습니다. (등록된 페르소나 ${personas.length}개)`;
+          return `선택하려는 페르소나(${formatBadIndex(changes.selectedPersona)})가 없습니다. (등록된 페르소나 ${personas.length}개)`;
         }
       }
       if (Array.isArray(changes.enabledModules)) {
@@ -6274,16 +6312,25 @@ class HostAdapter {
       if (scope === 'module') {
         const { modules, permissionDenied } = await loadModules();
         if (permissionDenied) return DB_PERMISSION_ERROR;
-        const modIdx = Number.isInteger(proposal.moduleIndex)
-          ? proposal.moduleIndex
-          : resolveModuleIndex(modules, target, this._lastMatchedModuleId).index;
+        let modIdx = null;
+        if (Number.isInteger(proposal.moduleIndex) && modules[proposal.moduleIndex]) {
+          modIdx = proposal.moduleIndex;
+        } else if (options?.hostBinding?.moduleId) {
+          const byId = modules.findIndex(m => m && m.id === options.hostBinding.moduleId);
+          if (byId !== -1) modIdx = byId;
+        }
+        if (modIdx === null) {
+          const resolved = resolveModuleIndex(modules, target, this._lastMatchedModuleId);
+          if (isUncertainModuleMatch(resolved.matchedBy)) return MODULE_UNCERTAIN_ERROR;
+          modIdx = resolved.index;
+        }
         list = Array.isArray(modules[modIdx]?.regex) ? modules[modIdx].regex : [];
       } else {
         const { char } = await this.readActiveCharacter();
         list = Array.isArray(char?.customscript) ? char.customscript : [];
       }
       if (!Number.isInteger(proposal.regexIndex) || !list[proposal.regexIndex]) {
-        return `수정할 정규식 스크립트 #${Number(proposal.regexIndex) + 1}을(를) 찾을 수 없습니다. (현재 ${list.length}개) 새로 만들려면 regexIndex를 빼 주세요.`;
+        return `수정할 정규식 스크립트 ${formatBadIndex(proposal.regexIndex)}을(를) 찾을 수 없습니다. (현재 ${list.length}개) 새로 만들려면 regexIndex를 빼 주세요.`;
       }
     }
 
@@ -6705,7 +6752,7 @@ class HostAdapter {
    */
   async applyProposal(proposal, activeTarget, options = {}) {
     const target = this._resolveSafeTarget(proposal, activeTarget);
-    const referenceError = await this._findReferenceError(proposal, target);
+    const referenceError = await this._findReferenceError(proposal, target, options);
     if (referenceError) throw new Error(referenceError);
 
     switch (proposal.action) {
@@ -10860,12 +10907,14 @@ class RisuHelperApp {
     this.hostModuleCatalog = [];
     this.lastPresetPreview = null;
     this.busy = false;
+    this.applyingGroup = false;
     this.currentJob = null;
     this.detectedContext = null;
     this.manualTarget = null;
     this.activeSnapshot = null;
     this.messages = [];
     this.toastTimer = null;
+    this._undoSaveTimer = null;
     this.toastText = '';
     this.registeredIds = [];
     this.hostActionButtonId = null;
@@ -10917,6 +10966,9 @@ class RisuHelperApp {
     await this.loadUndoState();
     this.adapter.onUndoChange = (info) => {
       this.scheduleSaveUndoState();
+      if (info?.evictedIds?.length) {
+        this.markEvictedCards(info.evictedIds);
+      }
       if (info?.evicted?.length) {
         this.showToast(`되돌리기 기록이 가득 차 가장 오래된 ${info.evicted.length}건을 정리했습니다. (정리된 변경은 더 이상 되돌릴 수 없습니다)`);
       }
@@ -11059,25 +11111,56 @@ class RisuHelperApp {
     } catch {}
   }
 
+  async flushUndoState() {
+    if (this._undoSaveTimer) {
+      clearTimeout(this._undoSaveTimer);
+      this._undoSaveTimer = null;
+    }
+    if (!this.api.pluginStorage?.setItem) return;
+    try {
+      await this.api.pluginStorage.setItem(UNDO_STORAGE_KEY, JSON.stringify(this.adapter.exportUndoState()));
+    } catch {}
+  }
+
   scheduleSaveUndoState() {
     if (!this.api.pluginStorage?.setItem) return;
     clearTimeout(this._undoSaveTimer);
-    this._undoSaveTimer = setTimeout(async () => {
-      try {
-        await this.api.pluginStorage.setItem(UNDO_STORAGE_KEY, JSON.stringify(this.adapter.exportUndoState()));
-      } catch {}
+    this._undoSaveTimer = setTimeout(() => {
+      this._undoSaveTimer = null;
+      this.flushUndoState();
     }, 120);
   }
 
-  /** Clears "applied" on cards whose undo record no longer exists (undone globally or evicted). */
-  syncAppliedCards() {
+  /** Marks cards whose undo records were evicted so they stay applied without a dead Undo button. */
+  markEvictedCards(evictedIds) {
+    const expired = new Set(evictedIds || []);
+    if (expired.size === 0) return;
+    for (const msg of this.messages) {
+      for (const item of msg.proposals || []) {
+        if (item.applied && item.undoId && expired.has(item.undoId)) {
+          item.undoId = null;
+          item.statusMessage = '적용됨 (되돌리기 기록 만료)';
+        }
+      }
+      if (msg.groupId && !this.adapter.undoStack.some(r => r.groupId === msg.groupId)) {
+        msg.groupId = null;
+      }
+    }
+  }
+
+  /** Reconciles applied cards whose undo record was removed (undone or skipped due to conflict). */
+  syncAppliedCards({ conflict = false } = {}) {
     const liveIds = new Set(this.adapter.undoStack.map(r => r.id));
     for (const msg of this.messages) {
       for (const item of msg.proposals || []) {
         if (item.applied && item.undoId && !liveIds.has(item.undoId)) {
-          item.applied = false;
           item.undoId = null;
-          item.statusMessage = '되돌림 완료';
+          if (conflict) {
+            item.statusMessage = '적용됨 (이후 직접 수정되어 되돌리지 않음)';
+          } else {
+            item.applied = false;
+            item.statusMessage = '되돌림 완료';
+          }
         }
       }
       if (msg.groupId && !this.adapter.undoStack.some(r => r.groupId === msg.groupId)) {
@@ -11094,23 +11177,35 @@ class RisuHelperApp {
   }
 
   applicableProposals(msg) {
-    return (msg.proposals || []).filter(item => item.preview?.ok && !item.applied);
+    return (msg.proposals || []).filter(item =>
+      item.preview?.ok && !item.applied && (!item.preview.requiresConfirm || item.destructiveConfirmed)
+    );
   }
 
   /** Applies every applicable proposal of one reply as a single undo unit. */
   async applyAllProposals(msg) {
+    if (this.busy || this.applyingGroup) return;
+    this.applyingGroup = true;
     const attempted = new Set();
-    const { groupId } = await this.adapter.runGroup(`묶음 적용`, async () => {
-      for (let guard = 0; guard < 200; guard++) {
-        const next = this.applicableProposals(msg).find(item => !attempted.has(item));
-        if (!next) break;
-        attempted.add(next);
-        await this.applyProposalItem(next);
+    try {
+      const { groupId } = await this.adapter.runGroup(`묶음 적용`, async () => {
+        for (let guard = 0; guard < 200; guard++) {
+          const next = this.applicableProposals(msg).find(item => !attempted.has(item));
+          if (!next) break;
+          attempted.add(next);
+          await this.applyProposalItem(next);
+        }
+      });
+      const appliedCount = [...attempted].filter(item => item.applied).length;
+      if (appliedCount > 0) {
+        msg.groupId = groupId;
+        this.showToast(`${appliedCount}건을 한 번에 적용했습니다. "묶음 되돌리기" 한 번으로 모두 되돌릴 수 있습니다.`);
+      } else {
+        this.showToast('적용된 제안이 없습니다. 각 카드의 오류 또는 확인 체크를 확인해 주세요.');
       }
-    });
-    const appliedCount = [...attempted].filter(item => item.applied).length;
-    msg.groupId = appliedCount > 0 ? groupId : null;
-    this.showToast(`${appliedCount}건을 한 번에 적용했습니다. "묶음 되돌리기" 한 번으로 모두 되돌릴 수 있습니다.`);
+    } finally {
+      this.applyingGroup = false;
+    }
     this.render();
   }
 
@@ -11122,7 +11217,7 @@ class RisuHelperApp {
       await this.refreshContextSnapshot();
       this.showToast(this.describeUndoResult(res));
     } catch (err) {
-      this.syncAppliedCards();
+      this.syncAppliedCards({ conflict: err?.code === 'UNDO_CONFLICT' });
       this.showToast(`되돌리기 실패: ${err.message}`);
     }
     this.render();
@@ -11710,7 +11805,7 @@ class RisuHelperApp {
       }
       this.showToast(this.describeUndoResult(res));
     } catch (err) {
-      this.syncAppliedCards();
+      this.syncAppliedCards({ conflict: err?.code === 'UNDO_CONFLICT' });
       this.showToast(`되돌리기 실패: ${err.message}`);
     }
     this.render();
@@ -11997,12 +12092,14 @@ class RisuHelperApp {
           }, item.moduleDomSynced ? '📝 다시 채우기' : '📝 입력칸에 채우기')
         );
       }
-      rightControls.push(
-        h(doc, 'button', {
-          class: 'rh-btn danger',
-          onclick: () => this.undoProposalItem(item),
-        }, '되돌리기')
-      );
+      if (item.undoId) {
+        rightControls.push(
+          h(doc, 'button', {
+            class: 'rh-btn danger',
+            onclick: () => this.undoProposalItem(item),
+          }, '되돌리기')
+        );
+      }
     } else {
       rightControls.push(
         h(doc, 'button', {
@@ -12466,7 +12563,7 @@ class RisuHelperApp {
               await this.refreshContextSnapshot();
               this.showToast(this.describeUndoResult(res));
             } catch (err) {
-              this.syncAppliedCards();
+              this.syncAppliedCards({ conflict: err?.code === 'UNDO_CONFLICT' });
               this.showToast(err.message);
             }
             this.render();
@@ -12735,7 +12832,7 @@ class RisuHelperApp {
               h(doc, 'div', { class: 'rh-row', style: 'gap:6px;flex-wrap:wrap;' },
                 applicable.length >= 2 && h(doc, 'button', {
                   class: 'rh-btn primary',
-                  disabled: this.busy,
+                  disabled: this.busy || this.applyingGroup,
                   onclick: () => this.applyAllProposals(msg),
                 }, `모두 적용 (${applicable.length})`),
                 msg.groupId && h(doc, 'button', {
@@ -12829,6 +12926,9 @@ class RisuHelperApp {
 
   async destroy() {
     clearTimeout(this.toastTimer);
+    if (this._undoSaveTimer) {
+      await this.flushUndoState();
+    }
     this.currentJob?.stop?.('플러그인이 언로드되었습니다.');
     await this.tracker.stop();
     const win = this.doc.defaultView;

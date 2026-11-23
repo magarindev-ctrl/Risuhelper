@@ -154,7 +154,7 @@ function anchorMatches(element, anchor) {
   return Object.keys(anchor).every(k => element[k] === anchor[k]);
 }
 
-function stepInto(container, seg) {
+function stepInto(container, seg, anchorCache = null) {
   if (typeof seg === 'string') {
     if (!isPlainObject(container) || BAD_KEYS.has(seg)) return null;
     return { parent: container, key: seg };
@@ -168,30 +168,50 @@ function stepInto(container, seg) {
     return idx === -1 ? null : { parent: container, key: idx };
   }
   if (seg && typeof seg === 'object' && 'i' in seg) {
-    if (seg.i >= 0 && seg.i < container.length && anchorMatches(container[seg.i], seg.a)) {
-      return { parent: container, key: seg.i };
+    const cacheKey = anchorCache ? JSON.stringify(seg) : null;
+    if (anchorCache) {
+      const cached = anchorCache.get(container)?.get(cacheKey);
+      if (cached !== undefined) {
+        const curIdx = container.indexOf(cached);
+        return curIdx === -1 ? null : { parent: container, key: curIdx };
+      }
     }
-    const hits = [];
-    container.forEach((el, idx) => { if (anchorMatches(el, seg.a)) hits.push(idx); });
-    return hits.length === 1 ? { parent: container, key: hits[0] } : null;
+    let foundIdx = -1;
+    if (seg.i >= 0 && seg.i < container.length && anchorMatches(container[seg.i], seg.a)) {
+      foundIdx = seg.i;
+    } else {
+      const hits = [];
+      container.forEach((el, idx) => { if (anchorMatches(el, seg.a)) hits.push(idx); });
+      if (hits.length === 1) foundIdx = hits[0];
+    }
+    if (foundIdx === -1) return null;
+    if (anchorCache) {
+      let bySeg = anchorCache.get(container);
+      if (!bySeg) {
+        bySeg = new Map();
+        anchorCache.set(container, bySeg);
+      }
+      bySeg.set(cacheKey, container[foundIdx]);
+    }
+    return { parent: container, key: foundIdx };
   }
   return null;
 }
 
-function locate(root, path) {
+function locate(root, path, anchorCache = null) {
   let container = root;
   let slot = null;
   for (let n = 0; n < path.length; n++) {
-    slot = stepInto(container, path[n]);
+    slot = stepInto(container, path[n], anchorCache);
     if (!slot) return null;
     if (n < path.length - 1) container = slot.parent[slot.key];
   }
   return slot;
 }
 
-function resolveValue(root, path) {
+function resolveValue(root, path, anchorCache = null) {
   if (path.length === 0) return { found: true, value: root };
-  const slot = locate(root, path);
+  const slot = locate(root, path, anchorCache);
   if (!slot) return { found: false };
   return { found: true, value: slot.parent[slot.key] };
 }
@@ -213,13 +233,16 @@ function revertOps(current, ops) {
   let root = cloneDeep(current);
   let reverted = 0;
   const conflicts = [];
+  // Keep anchored element identity stable within a single revert pass so reverting an anchor
+  // property (e.g. `comment` or `key`) never breaks locating the same element for its sibling ops.
+  const anchorCache = new WeakMap();
 
   for (let n = ops.length - 1; n >= 0; n--) {
     const op = ops[n];
     const where = describePath(op.path);
 
     if (op.op === 'insert') {
-      const target = resolveValue(root, op.path);
+      const target = resolveValue(root, op.path, anchorCache);
       if (!target.found || !Array.isArray(target.value)) {
         conflicts.push({ path: where, reason: '추가했던 항목이 들어 있던 목록을 찾을 수 없습니다.' });
         continue;
@@ -252,7 +275,7 @@ function revertOps(current, ops) {
       continue;
     }
 
-    const slot = locate(root, op.path);
+    const slot = locate(root, op.path, anchorCache);
     if (!slot) {
       conflicts.push({ path: where, reason: '대상 항목을 찾을 수 없습니다.' });
       continue;

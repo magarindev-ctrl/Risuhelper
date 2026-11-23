@@ -1622,3 +1622,19 @@ test('with diagnostics on, detection reports the signals it used and the errors 
   assert.ok(Array.isArray(traced.diagnostics.signals.headings));
   assert.ok(traced.diagnostics.errors.some(e => /rect unavailable/.test(e.message)), 'swallowed errors must be recorded');
 });
+
+test('inspectFocusedElement cleans up activeDiagnostics when nothing is focused or querySelector throws', async () => {
+  const emptyDoc = { async querySelector() { return null; } };
+  const throwingDoc = { async querySelector() { throw new Error('focus probe boom'); } };
+
+  assert.equal(await inspectFocusedElement(emptyDoc, { diagnostics: true }), null);
+  assert.equal(await inspectFocusedElement(throwingDoc, { diagnostics: true }), null);
+
+  // Subsequent diagnostic run must start with a clean error list (no leaked errors from prior runs)
+  const { listFixtures, loadFixture, buildFixtureDocument } = await import('./helpers/fixture-dom.mjs');
+  const file = listFixtures().find(f => f.includes('upstream-ko-char-basic'));
+  const fixture = loadFixture(file);
+  const descCase = fixture.cases.find(c => c.expect.fieldKey === 'desc');
+  const fresh = await inspectFocusedElement(buildFixtureDocument(fixture, descCase.path), { diagnostics: true });
+  assert.equal(fresh.diagnostics.errors.length, 0);
+});

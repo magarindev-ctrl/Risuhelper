@@ -113,3 +113,60 @@ test('streaming a reply updates the message in place without rebuilding the comp
   gates.shift()();
   await ui.waitFor(() => /마지막 조각/.test(ui.bodyText()), 'the last chunk to be shown');
 });
+
+test('unloading immediately after apply flushes pending Undo history to pluginStorage without waiting for debounce', async () => {
+  const state = { character: freshCharacter() };
+  const storage = createMemoryStorage();
+  const first = await bootBundle({ state, storage, runLLMModel: async () => threeProposals });
+  await first.selectTarget('char_field:desc');
+  await first.send('바꿔줘');
+  await first.click('적용');
+  assert.equal(state.character.desc, '새 설명');
+
+  // Unload immediately (<120ms debounce window) -> destroy() MUST flush Undo state
+  await first.unload();
+
+  const reloaded = await bootBundle({ state, storage, runLLMModel: async () => '' });
+  assert.equal(reloaded.buttons(/^되돌리기 \(1\)$/).length, 1);
+  await reloaded.click(/^되돌리기 \(1\)$/);
+  assert.equal(state.character.desc, '원본 설명');
+});
+
+test('a conflict-skipped Undo keeps the card marked applied without falsely showing 되돌림 완료 or re-enabling Apply', async () => {
+  const state = { character: freshCharacter() };
+  const singleReply = '바꿨습니다.\n' + proposalBlock({ action: 'replace_text', title: '설명 교체', content: '플러그인 설명' });
+  const ui = await bootBundle({ state, runLLMModel: async () => singleReply });
+  await ui.selectTarget('char_field:desc');
+  await ui.send('바꿔줘');
+  await ui.click('적용');
+  assert.equal(state.character.desc, '플러그인 설명');
+
+  // User edits desc afterwards -> Undo must refuse to overwrite and keep the card applied (not '되돌림 완료')
+  state.character.desc = '사용자가 나중에 직접 고친 설명';
+  await ui.click(/^되돌리기$/);
+
+  assert.equal(state.character.desc, '사용자가 나중에 직접 고친 설명');
+  assert.match(ui.bodyText(), /이후 직접 수정되어 되돌리지 않음/);
+  assert.doesNotMatch(ui.bodyText(), /되돌림 완료/);
+  assert.equal(ui.buttons('적용').length, 0, 'conflict-skipped card must not re-enable Apply');
+  assert.equal(ui.buttons(/^되돌리기$/).length, 0, 'dead per-card Undo button must disappear');
+});
+
+test('Apply All excludes unconfirmed destructive Lua proposals until confirmed', async () => {
+  const state = { character: freshCharacter() };
+  state.character.triggerscript = [
+    { comment: 'V1 trigger', type: 'start', conditions: [], effect: [{ type: 'setvar', var: 'x', value: '1' }] },
+  ];
+  const reply = [
+    '두 가지 제안입니다.',
+    proposalBlock({ action: 'replace_text', title: '설명 교체', content: '새 설명' }),
+    proposalBlock({ action: 'update_lua', title: 'Lua 전환', scope: 'character', code: 'function onStart(id) end' }),
+  ].join('\n');
+
+  const ui = await bootBundle({ state, runLLMModel: async () => reply });
+  await ui.selectTarget('char_field:desc');
+  await ui.send('둘 다 바꿔줘');
+
+  // Only 1 non-destructive proposal is ready -> '모두 적용' must not include the unconfirmed Lua card
+  assert.equal(ui.buttons(/^모두 적용/).length, 0);
+});

@@ -1714,7 +1714,8 @@ class HostAdapter {
   }
 
   _enforceUndoLimits() {
-    const evicted = [];
+    const labels = [];
+    const ids = [];
     const totalSize = () => this.undoStack.reduce((sum, r) => sum + (r.size || 0), 0);
     let units = this._undoUnits();
     while (units.length > 1 && (units.length > this.maxUndoUnits || totalSize() > this.maxUndoBytes)) {
@@ -1722,10 +1723,11 @@ class HostAdapter {
       for (const rec of oldest.records) {
         const at = this.undoStack.indexOf(rec);
         if (at !== -1) this.undoStack.splice(at, 1);
-        evicted.push(rec.label);
+        labels.push(rec.label);
+        ids.push(rec.id);
       }
     }
-    return evicted;
+    return { labels, ids };
   }
 
   _recordChange(entity, ops, label, opts = {}) {
@@ -1750,8 +1752,8 @@ class HostAdapter {
       size,
     };
     this.undoStack.push(record);
-    const evicted = this._enforceUndoLimits();
-    this._emitUndoChange({ evicted });
+    const { labels: evicted, ids: evictedIds } = this._enforceUndoLimits();
+    this._emitUndoChange({ evicted, evictedIds });
     return record.id;
   }
 
@@ -1779,7 +1781,10 @@ class HostAdapter {
 
   /** Applies several proposals as one undo unit. */
   async runGroup(label, fn) {
-    if (this._activeGroup) return fn();
+    if (this._activeGroup) {
+      const result = await fn();
+      return { groupId: this._activeGroup.id, result };
+    }
     this._activeGroup = { id: makeUuid(), label: String(label || '묶음 적용') };
     const groupId = this._activeGroup.id;
     try {
@@ -1860,22 +1865,31 @@ class HostAdapter {
   async _undoRecords(records) {
     let undone = 0;
     let reverted = 0;
+    let removedAny = false;
     const conflicts = [];
     const labels = [];
-    for (const rec of records) {
-      const res = await this._revertRecord(rec);
-      const at = this.undoStack.indexOf(rec);
-      if (at !== -1) this.undoStack.splice(at, 1);
-      reverted += res.reverted;
-      conflicts.push(...res.conflicts);
-      if (res.reverted > 0) undone++;
-      labels.push(rec.label);
+    try {
+      for (const rec of records) {
+        const res = await this._revertRecord(rec);
+        const at = this.undoStack.indexOf(rec);
+        if (at !== -1) {
+          this.undoStack.splice(at, 1);
+          removedAny = true;
+        }
+        reverted += res.reverted;
+        conflicts.push(...res.conflicts);
+        if (res.reverted > 0) undone++;
+        labels.push(rec.label);
+      }
+    } finally {
+      if (removedAny) this._emitUndoChange({});
     }
-    this._emitUndoChange({});
     if (reverted === 0 && conflicts.length > 0) {
-      throw new Error(
+      const err = new Error(
         `되돌리지 않았습니다: 적용 이후 값이 다시 변경되어 덮어쓰지 않았습니다 (${conflicts.slice(0, 3).map(c => c.path).join(', ')}). 이 기록은 목록에서 제거했습니다.`
       );
+      err.code = 'UNDO_CONFLICT';
+      throw err;
     }
     const label = records.length > 1 ? `${records[records.length - 1].groupLabel || '묶음 적용'} (${records.length}건)` : labels[0];
     return { ok: true, label, undone, reverted, conflicts };
@@ -1954,14 +1968,12 @@ class HostAdapter {
   }
 
   /**
-   * Computes the resulting text, metadata diffs, warnings, and pinned target binding before mutating anything.
-   */
-  /**
    * Every index or id a proposal names must exist before anything is previewed or written.
    * Kept in one place so that a new action cannot forget the check: a reference that does not
    * resolve must fail loudly, never be redirected to another item or stored as-is.
    */
-  async _findReferenceError(proposal, target) {
+  async _findReferenceError(proposal, target, options = {}) {
+    const formatBadIndex = (raw) => (Number.isInteger(raw) ? `#${raw + 1}` : `"${String(raw)}"`);
     let modulesCache = null;
     const loadModules = async () => {
       if (!modulesCache) modulesCache = await this.readModules();
@@ -1972,7 +1984,7 @@ class HostAdapter {
       const { modules, permissionDenied } = await loadModules();
       if (permissionDenied) return DB_PERMISSION_ERROR;
       if (!Number.isInteger(proposal.moduleIndex) || !modules[proposal.moduleIndex]) {
-        return `제안이 가리키는 모듈(#${Number(proposal.moduleIndex) + 1})이 없습니다. (설치된 모듈 ${modules.length}개)`;
+        return `제안이 가리키는 모듈(${formatBadIndex(proposal.moduleIndex)})이 없습니다. (설치된 모듈 ${modules.length}개)`;
       }
     }
 
@@ -1982,7 +1994,7 @@ class HostAdapter {
         const { personas, permissionDenied } = await this.readPersonas();
         if (permissionDenied) return DB_PERMISSION_ERROR;
         if (!Number.isInteger(changes.selectedPersona) || !personas[changes.selectedPersona]) {
-          return `선택하려는 페르소나(#${Number(changes.selectedPersona) + 1})가 없습니다. (등록된 페르소나 ${personas.length}개)`;
+          return `선택하려는 페르소나(${formatBadIndex(changes.selectedPersona)})가 없습니다. (등록된 페르소나 ${personas.length}개)`;
         }
       }
       if (Array.isArray(changes.enabledModules)) {
@@ -2002,16 +2014,25 @@ class HostAdapter {
       if (scope === 'module') {
         const { modules, permissionDenied } = await loadModules();
         if (permissionDenied) return DB_PERMISSION_ERROR;
-        const modIdx = Number.isInteger(proposal.moduleIndex)
-          ? proposal.moduleIndex
-          : resolveModuleIndex(modules, target, this._lastMatchedModuleId).index;
+        let modIdx = null;
+        if (Number.isInteger(proposal.moduleIndex) && modules[proposal.moduleIndex]) {
+          modIdx = proposal.moduleIndex;
+        } else if (options?.hostBinding?.moduleId) {
+          const byId = modules.findIndex(m => m && m.id === options.hostBinding.moduleId);
+          if (byId !== -1) modIdx = byId;
+        }
+        if (modIdx === null) {
+          const resolved = resolveModuleIndex(modules, target, this._lastMatchedModuleId);
+          if (isUncertainModuleMatch(resolved.matchedBy)) return MODULE_UNCERTAIN_ERROR;
+          modIdx = resolved.index;
+        }
         list = Array.isArray(modules[modIdx]?.regex) ? modules[modIdx].regex : [];
       } else {
         const { char } = await this.readActiveCharacter();
         list = Array.isArray(char?.customscript) ? char.customscript : [];
       }
       if (!Number.isInteger(proposal.regexIndex) || !list[proposal.regexIndex]) {
-        return `수정할 정규식 스크립트 #${Number(proposal.regexIndex) + 1}을(를) 찾을 수 없습니다. (현재 ${list.length}개) 새로 만들려면 regexIndex를 빼 주세요.`;
+        return `수정할 정규식 스크립트 ${formatBadIndex(proposal.regexIndex)}을(를) 찾을 수 없습니다. (현재 ${list.length}개) 새로 만들려면 regexIndex를 빼 주세요.`;
       }
     }
 
@@ -2433,7 +2454,7 @@ class HostAdapter {
    */
   async applyProposal(proposal, activeTarget, options = {}) {
     const target = this._resolveSafeTarget(proposal, activeTarget);
-    const referenceError = await this._findReferenceError(proposal, target);
+    const referenceError = await this._findReferenceError(proposal, target, options);
     if (referenceError) throw new Error(referenceError);
 
     switch (proposal.action) {

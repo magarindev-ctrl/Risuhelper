@@ -84,3 +84,19 @@ test('identical values produce no operations', () => {
   const v = { a: 1, b: [lore('One')], c: { d: null } };
   assert.deepEqual(diffValues(v, structuredClone(v)), []);
 });
+
+test('reverting simultaneous edits to anchor keys (key + comment + content) succeeds with zero conflicts regardless of key order', () => {
+  // Standard normalizeLorebookEntry key order: key -> comment -> content
+  const beforeA = { globalLore: [{ key: 'old_key', secondkey: '', insertorder: 100, comment: '구 이름', content: '구 본문', mode: 'normal' }] };
+  const afterA = { globalLore: [{ key: 'new_key', secondkey: '', insertorder: 100, comment: '신 이름', content: '신 본문', mode: 'normal' }] };
+  const resA = roundTrip(beforeA, afterA).result;
+  assert.equal(resA.conflicts.length, 0);
+  assert.deepEqual(resA.value, beforeA);
+
+  // Reversed key order where anchor keys appear last
+  const beforeB = { globalLore: [{ content: '본문 1', key: 'k1', comment: '이름 1' }] };
+  const afterB = { globalLore: [{ content: '본문 2', key: 'k2', comment: '이름 2' }] };
+  const resB = roundTrip(beforeB, afterB).result;
+  assert.equal(resB.conflicts.length, 0);
+  assert.deepEqual(resB.value, beforeB);
+});

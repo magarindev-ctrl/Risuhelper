@@ -984,16 +984,19 @@ function classifyDomSignals(signals) {
 async function inspectFocusedElement(rootDoc, options = {}) {
   if (!rootDoc) return null;
   const diag = options.diagnostics ? { errors: [] } : null;
+  const prevDiagnostics = activeDiagnostics;
   if (diag) activeDiagnostics = diag;
-  let el;
-  try {
-    el = await rootDoc.querySelector(FOCUS_SELECTOR);
-  } catch {
-    return null;
-  }
-  if (!el) return null;
 
   try {
+    let el;
+    try {
+      el = await rootDoc.querySelector(FOCUS_SELECTOR);
+    } catch (err) {
+      noteDetectError(err);
+      return null;
+    }
+    if (!el) return null;
+
     const outerHtml = await el.getOuterHTML();
     const attrs = parseOpeningTagAttrs(outerHtml);
     const tag = attrs._tag || String(await el.nodeName()).toLowerCase();
@@ -1317,7 +1320,7 @@ async function inspectFocusedElement(rootDoc, options = {}) {
     noteDetectError(err);
     return null;
   } finally {
-    if (diag) activeDiagnostics = null;
+    if (diag) activeDiagnostics = prevDiagnostics;
   }
 }
 

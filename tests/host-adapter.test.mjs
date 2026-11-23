@@ -1290,3 +1290,88 @@ test('proposals for another kind of item apply cleanly when the cursor is in a c
     assert.ok(applied(state), `${name}: change was not applied`);
   }
 });
+
+test('nested runGroup returns { groupId, result } and eviction emits evictedIds alongside labels', async () => {
+  const { adapter } = createMockHost();
+  adapter.maxUndoUnits = 2;
+  const events = [];
+  adapter.onUndoChange = (info) => events.push(info);
+
+  let outerId = null;
+  let innerId = null;
+  const outer = await adapter.runGroup('outer', async () => {
+    const inner = await adapter.runGroup('inner', async () => 'ok');
+    innerId = inner.groupId;
+    assert.equal(inner.result, 'ok');
+    return 'done';
+  });
+  outerId = outer.groupId;
+  assert.ok(outerId);
+  assert.equal(innerId, outerId);
+  assert.equal(outer.result, 'done');
+
+  const r1 = await adapter.applyProposal({ action: 'replace_text', content: 'v1' }, { targetKind: 'char_field', fieldKey: 'desc' });
+  await adapter.applyProposal({ action: 'replace_text', content: 'v2' }, { targetKind: 'char_field', fieldKey: 'desc' });
+  await adapter.applyProposal({ action: 'replace_text', content: 'v3' }, { targetKind: 'char_field', fieldKey: 'desc' });
+
+  const evictEvt = events.find(e => e.evictedIds?.length);
+  assert.ok(evictEvt, 'eviction event must include evictedIds');
+  assert.deepEqual(evictEvt.evictedIds, [r1.undoId]);
+});
+
+test('_findReferenceError avoids #NaN, rejects uncertain module upsert_regex with MODULE_UNCERTAIN_ERROR, and honours hostBinding.moduleId', async () => {
+  const { state, adapter } = createTwinModuleHost();
+  state.db.modules[1].regex = [{ comment: 'R1', in: 'a', out: 'b', type: 'editdisplay', flag: 'g', ableFlag: false }];
+
+  // Non-integer index formats cleanly without #NaN
+  const nanPrev = await adapter.previewProposal(
+    { action: 'create_lorebook', scope: 'module', moduleIndex: 'abc', comment: 'X', content: 'Y' },
+    { targetKind: 'module_lorebook' }
+  );
+  assert.equal(nanPrev.ok, false);
+  assert.doesNotMatch(nanPrev.error, /NaN/);
+  assert.match(nanPrev.error, /"abc"/);
+
+  // Uncertain module must fail with MODULE_UNCERTAIN_ERROR, not falsely inspect modules[0]
+  const uncPrev = await adapter.previewProposal(
+    { action: 'upsert_regex', scope: 'module', regexIndex: 0, comment: 'R1', in: 'a', out: 'c' },
+    { targetKind: 'module_regex' }
+  );
+  assert.equal(uncPrev.ok, false);
+  assert.match(uncPrev.error, /모듈을 편집 중인지 자동으로 확정하지 못했습니다/);
+
+  // Reordering modules after preview still resolves via options.hostBinding.moduleId on apply
+  const pinnedPrev = await adapter.previewProposal(
+    { action: 'upsert_regex', scope: 'module', regexIndex: 0, comment: 'R1', in: 'a', out: 'updated' },
+    { targetKind: 'module_regex', moduleIndex: 1 }
+  );
+  assert.equal(pinnedPrev.ok, true);
+  state.db.modules.reverse(); // mod-b is now at index 0, mod-a (with 0 regexes) is at index 1
+  const applied = await adapter.applyProposal(
+    { action: 'upsert_regex', scope: 'module', regexIndex: 0, comment: 'R1', in: 'a', out: 'updated' },
+    pinnedPrev.target,
+    { hostBinding: pinnedPrev.hostBinding }
+  );
+  assert.equal(applied.ok, true);
+  assert.equal(state.db.modules.find(m => m.id === 'mod-b').regex[0].out, 'updated');
+});
+
+test('partial failure while undoing a group still notifies onUndoChange for records already removed', async () => {
+  const { state, adapter } = createMockHost();
+  state.character.chaId = 'char-1';
+  let undoEvents = 0;
+  adapter.onUndoChange = () => { undoEvents++; };
+
+  const { groupId } = await adapter.runGroup('mixed', async () => {
+    await adapter.applyProposal({ action: 'replace_text', content: '변경된 설명' }, { targetKind: 'char_field', fieldKey: 'desc' });
+    await adapter.applyProposal({ action: 'update_config', changes: { temperature: 95 } }, { targetKind: 'config' });
+  });
+
+  // Switch active character so reverting the earlier char record fails AFTER the db config record is reverted
+  state.character.chaId = 'char-other';
+  const beforeEvents = undoEvents;
+  await assert.rejects(() => adapter.undoGroup(groupId), /다른 캐릭터로 전환/);
+  assert.equal(state.db.temperature, 80, 'config record was reverted');
+  assert.equal(adapter.undoStack.length, 1, 'only the un-reverted char record remains');
+  assert.ok(undoEvents > beforeEvents, 'onUndoChange must fire in finally so storage stays in sync');
+});

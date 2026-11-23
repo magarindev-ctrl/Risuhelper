@@ -27,13 +27,14 @@ async function bootBundle({ state, runLLMModel, storage = createMemoryStorage() 
   const code = fs.readFileSync(BUNDLE_PATH, 'utf8');
   const doc = createMockDocument();
   const registeredButtons = [];
+  let unloadHandler = null;
   const risuai = {
     pluginStorage: storage,
     async getColorScheme() { return { scheme: { type: 'dark' } }; },
     async registerButton(meta, cb) { registeredButtons.push({ meta, cb }); return { id: meta.id }; },
     async registerSetting(_name, _cb, _icon, _type, id) { return { id }; },
     async unregisterUIPart() {},
-    async onUnload() {},
+    async onUnload(fn) { unloadHandler = fn; },
     async showContainer() {},
     async hideContainer() {},
     async getCharacter() { return structuredClone(state.character); },
@@ -100,7 +101,8 @@ async function bootBundle({ state, runLLMModel, storage = createMemoryStorage() 
       if (cur !== last) { last = cur; quietSince = Date.now(); }
     }
   };
-  return { doc, storage, findAll, buttons, selectTarget, send, click, bodyText, tick, waitFor, settle };
+  const unload = async () => { if (unloadHandler) await unloadHandler(); };
+  return { doc, storage, findAll, buttons, selectTarget, send, click, bodyText, tick, waitFor, settle, unload };
 }
 
 const proposalBlock = (obj) => '```risuhelper-proposal\n' + JSON.stringify(obj) + '\n```';
