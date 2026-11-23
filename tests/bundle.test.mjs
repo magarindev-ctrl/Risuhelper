@@ -903,3 +903,201 @@ test('dist/risuhelper.js keeps multi-line template literals byte-identical to sr
   assert.ok(literalChunk.includes('\n'), 'chunk must span several lines');
   assert.ok(dist.includes(literalChunk), 'system prompt text in dist differs from src');
 });
+
+test('dist/risuhelper.js warns about stale tempModule after module apply and refills open contenteditable editor via 1-click button', async () => {
+  const code = fs.readFileSync(BUNDLE_PATH, 'utf8');
+  const doc = createMockDocument();
+  const registeredButtons = [];
+
+  const initialBody = 'Initial module lore line\nKeep this line';
+  const patchedBody = 'Updated module lore line\nKeep this line';
+  let liveDomText = initialBody;
+  let editorFocusCount = 0;
+
+  const db = {
+    modules: [
+      {
+        id: 'mod-bg',
+        name: '배경 모듈',
+        description: '설명',
+        lorebook: [
+          { comment: 'ha0', key: '', content: 'init' },
+          { comment: 'Global LoreBook Override', key: '', content: initialBody },
+        ],
+      },
+    ],
+    enabledModules: ['mod-bg'],
+  };
+
+  const makeSafeEl = (tag, outerHtml, textGetter, children = [], className = '', onSet = null, onFocus = null) => {
+    const el = {
+      _tag: tag.toLowerCase(),
+      _outerHtml: outerHtml,
+      _children: children,
+      _className: className,
+      _parent: null,
+      async getOuterHTML() { return outerHtml; },
+      async nodeName() { return tag.toUpperCase(); },
+      async textContent() { return typeof textGetter === 'function' ? textGetter() : textGetter; },
+      async innerText() { return typeof textGetter === 'function' ? textGetter() : textGetter; },
+      async setTextContent(v) { if (onSet) onSet(String(v)); },
+      async focus() { if (onFocus) onFocus(); },
+      async getClassName() { return className; },
+      async getParent() { return el._parent; },
+      async getChildren() {
+        return { async length() { return children.length; }, async at(i) { return children[i] || null; } };
+      },
+      async querySelectorAll(sel) {
+        const parts = sel.split(',').map(s => s.trim());
+        const hits = [];
+        const walk = (n) => {
+          for (const c of n._children) {
+            const match = parts.some(p => {
+              if (p === 'h2') return c._tag === 'h2';
+              if (p === '[role="tab"][aria-selected="true"]') return c._outerHtml.includes('role="tab"') && c._outerHtml.includes('aria-selected="true"');
+              if (p === '[role="tab"]') return c._outerHtml.includes('role="tab"');
+              if (p === '[data-risu-idx]') return c._outerHtml.includes('data-risu-idx=');
+              if (p === 'button.valuer') return c._tag === 'button' && c._className.includes('valuer');
+              if (p === '[contenteditable="true"]') return c._outerHtml.includes('contenteditable="true"');
+              return false;
+            });
+            if (match) hits.push(c);
+            walk(c);
+          }
+        };
+        walk(el);
+        return { async length() { return hits.length; }, async at(i) { return hits[i] || null; } };
+      },
+      async querySelector(sel) {
+        const res = await el.querySelectorAll(sel);
+        return (await res.length()) > 0 ? await res.at(0) : null;
+      },
+    };
+    for (const c of children) c._parent = el;
+    return el;
+  };
+
+  const editorNode = makeSafeEl(
+    'div',
+    '<div contenteditable="true"></div>',
+    () => liveDomText,
+    [],
+    '',
+    (v) => { liveDomText = v; },
+    () => { editorFocusCount++; }
+  );
+
+  const modPage = makeSafeEl('div', '<div class="module-page"></div>', '', [
+    makeSafeEl('h2', '<h2>모듈 수정</h2>', '모듈 수정'),
+    makeSafeEl('button', '<button role="tab" aria-selected="true">로어북</button>', '로어북'),
+    makeSafeEl('div', '<div data-risu-idx="0"></div>', '', [
+      makeSafeEl('button', '<button class="endflex valuer">ha0</button>', 'ha0', [], 'endflex valuer'),
+    ]),
+    makeSafeEl('div', '<div data-risu-idx="1"></div>', '', [
+      makeSafeEl('button', '<button class="endflex valuer">Global LoreBook Override</button>', 'Global LoreBook Override', [], 'endflex valuer'),
+      editorNode,
+    ]),
+  ]);
+
+  const rootDoc = {
+    async querySelector(sel) {
+      if (sel === 'title') return { async textContent() { return 'PocketRisu'; } };
+      if (sel === 'body') return { async appendChild() {} };
+      if (sel.includes(':focus')) return null;
+      return await modPage.querySelector(sel);
+    },
+    async querySelectorAll(sel) { return await modPage.querySelectorAll(sel); },
+    async createElement() {
+      return {
+        async setAttribute() {},
+        async setStyleAttribute() {},
+        async setTextContent() {},
+        async addEventListener() { return 'c1'; },
+        async removeEventListener() {},
+        async remove() {},
+      };
+    },
+    async addEventListener() { return 'l1'; },
+    async removeEventListener() {},
+  };
+
+  const mockRisuai = {
+    pluginStorage: { async getItem() { return null; }, async setItem() {} },
+    async getColorScheme() { return { scheme: { type: 'dark' } }; },
+    async registerButton(meta, cb) { registeredButtons.push({ meta, cb }); return { id: meta.id }; },
+    async registerSetting(_n, _cb, _i, _t, id) { return { id }; },
+    async unregisterUIPart() {},
+    async onUnload() {},
+    async showContainer() {},
+    async hideContainer() {},
+    async getCharacter() { return { name: '봇', desc: '', globalLore: [], customscript: [], triggerscript: [], chats: [{}] }; },
+    async getCurrentCharacterIndex() { return 0; },
+    async getCurrentChatIndex() { return 0; },
+    async getRootDocument() { return rootDoc; },
+    async getDatabase() { return JSON.parse(JSON.stringify(db)); },
+    async setDatabaseLite(patch) {
+      if (patch.modules) db.modules = JSON.parse(JSON.stringify(patch.modules));
+    },
+    async runLLMModel() {
+      return '수정안입니다.\n```risuhelper-proposal\n{"action":"patch_text","title":"로어북 수정","edits":[{"before":"Initial module lore line","after":"Updated module lore line"}]}\n```';
+    },
+  };
+
+  const sandbox = {
+    window: { risuai: mockRisuai, Risuai: mockRisuai },
+    risuai: mockRisuai,
+    Risuai: mockRisuai,
+    document: doc,
+    console,
+    setTimeout,
+    clearTimeout,
+    TextEncoder,
+    TextDecoder,
+    atob,
+    btoa,
+    URL,
+    Blob,
+    crypto,
+  };
+  sandbox.globalThis = sandbox;
+  vm.runInNewContext(code, sandbox, { filename: 'risuhelper.js' });
+  await new Promise(r => setTimeout(r, 40));
+  await registeredButtons[0].cb();
+  await new Promise(r => setTimeout(r, 30));
+
+  const findButtons = (label) => {
+    const out = [];
+    const walk = (n) => {
+      if (n.tagName === 'BUTTON' && n.textContent === label) out.push(n);
+      for (const c of n.children || []) walk(c);
+    };
+    walk(doc.body);
+    return out;
+  };
+
+  doc.querySelector('.rh-composer-input').value = '첫 줄 고쳐줘';
+  findButtons('전송')[0].click();
+  await new Promise(r => setTimeout(r, 40));
+
+  findButtons('적용')[0].click();
+  await new Promise(r => setTimeout(r, 40));
+
+  // DB updated immediately, tempModule safety notice rendered, and 1-click fill button available
+  assert.equal(db.modules[0].lorebook[1].content, patchedBody);
+  assert.equal(liveDomText, initialBody, 'default safe mode must not overwrite DOM until user clicks fill or opts in');
+  assert.match(doc.body.textContent, /하단 "모듈 수정" 버튼을 누르면/);
+  assert.match(doc.body.textContent, /현재 DB 원문 보기/);
+
+  const fillBtns = findButtons('📝 입력칸에 채우기');
+  assert.equal(fillBtns.length, 1, 'applied module card should offer 1-click DOM fill button');
+  assert.equal(findButtons('📝 DB 최신본을 입력칸에 채우기').length, 1, 'context bar should detect DB vs screen mismatch');
+
+  // Clicking 1-click fill updates live contenteditable DOM, focuses it, and shows Space+Backspace reminder
+  fillBtns[0].click();
+  await new Promise(r => setTimeout(r, 30));
+  assert.equal(liveDomText, patchedBody);
+  assert.equal(editorFocusCount, 1);
+  assert.match(doc.body.textContent, /스페이스→백스페이스/);
+  assert.equal(findButtons('📝 DB 최신본을 입력칸에 채우기').length, 0, 'mismatch banner clears once DOM is synced');
+});
+

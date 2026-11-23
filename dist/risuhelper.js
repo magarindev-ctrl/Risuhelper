@@ -1,21 +1,21 @@
 //@name risuhelper
 //@display-name RisuHelper
 //@api 3.0
-//@version 0.4.0
+//@version 0.4.1
 //@update-url https://raw.githubusercontent.com/magarindev-ctrl/Risuhelper/main/dist/risuhelper.js
 //@link https://github.com/magarindev-ctrl/Risuhelper RisuHelper GitHub
 
 /*
- * RisuHelper v0.4.0 — RisuAI Plugin API v3
+ * RisuHelper v0.4.1 — RisuAI Plugin API v3
  * License: GPL-3.0-only
  * https://github.com/magarindev-ctrl/Risuhelper
  */
 (() => {
   'use strict';
-  const __RISUHELPER_VERSION__ = "0.4.0";
+  const __RISUHELPER_VERSION__ = "0.4.1";
   const __modules = {
   "src/version.js"(__require, __exports) {
-const VERSION = '0.4.0';
+const VERSION = '0.4.1';
 const PLUGIN_NAME = 'risuhelper';
 const STORAGE_KEY = 'risuhelper_state_v1';
 const PRESET_STORAGE_KEY = 'risuhelper_preset_v1';
@@ -3540,6 +3540,13 @@ class FocusTracker {
     this.chipListenerIds = [];
   }
 
+  async syncModuleEditorDom(opts) {
+    if (!this.rootDoc) {
+      return { ok: false, reason: 'mainDom 권한이 없어 화면 입력칸에 접근할 수 없습니다.' };
+    }
+    return await syncModuleEditorDom(this.rootDoc, opts);
+  }
+
   async stop() {
     this.enabled = false;
     clearTimeout(this._longPressTimer);
@@ -3562,10 +3569,149 @@ class FocusTracker {
   }
 }
 
+const MODULE_EDIT_ONLY_HEADINGS = ['모듈 수정', 'edit module', '모듈 생성', 'create module'];
+
+/**
+ * Safely writes updated DB text into an open ModuleMenu `[contenteditable="true"]` editor
+ * (Lorebook content, Lua trigger code, or Regex OUT) and focuses it.
+ *
+ * Note: Plugin API v3 SafeElement does not expose `dispatchEvent()` or `<input>.value`,
+ * so Svelte's `bind:textContent` (`tempModule`) only syncs after the user triggers an `input`
+ * event (e.g. Space+Backspace) or re-opens the module without clicking the bottom save button.
+ */
+async function syncModuleEditorDom(rootDoc, { targetKind, fieldKey, loreIndex, regexIndex, text } = {}) {
+  if (!rootDoc || typeof rootDoc.querySelectorAll !== 'function') {
+    return { ok: false, reason: 'mainDom 권한이 없어 화면 입력칸에 접근할 수 없습니다.' };
+  }
+
+  const resolvedField = fieldKey || (
+    targetKind === 'module_lorebook' ? 'content' :
+    targetKind === 'module_lua' ? 'code' :
+    targetKind === 'module_regex' ? 'out' : null
+  );
+
+  const isSupported =
+    (targetKind === 'module_lorebook' && resolvedField === 'content') ||
+    (targetKind === 'module_lua' && resolvedField === 'code') ||
+    (targetKind === 'module_regex' && resolvedField === 'out');
+
+  if (!isSupported) {
+    return {
+      ok: false,
+      reason: '이 필드는 <input>/<textarea> 형식이라 Plugin v3 권한으로 직접 채울 수 없습니다. 하단 "모듈 수정" 버튼을 누르지 말고 다른 설정 탭을 다녀와 다시 열어 주세요.',
+    };
+  }
+
+  let editH2 = null;
+  try {
+    const allH2 = await rootDoc.querySelectorAll('h2');
+    const count = allH2 ? Math.min(await allH2.length(), 6) : 0;
+    for (let i = 0; i < count; i++) {
+      const node = await allH2.at(i);
+      const txt = node ? String((await node.textContent()) || '').trim() : '';
+      if (matchAny(txt, MODULE_EDIT_ONLY_HEADINGS)) {
+        editH2 = node;
+        break;
+      }
+    }
+  } catch {}
+
+  if (!editH2) {
+    return { ok: false, reason: '현재 화면에 모듈 수정 창이 열려 있지 않습니다.' };
+  }
+
+  const scopeRoot = await resolveModuleScopeRoot(editH2, rootDoc);
+  const activeTabs = await collectActiveTabs(scopeRoot);
+  const tab = detectModuleTabKind(activeTabs);
+
+  if (targetKind === 'module_lorebook' && tab && tab !== 'lorebook') {
+    return { ok: false, reason: '현재 모듈의 "로어북" 탭이 열려 있지 않습니다.' };
+  }
+  if (targetKind === 'module_regex' && tab && tab !== 'regex') {
+    return { ok: false, reason: '현재 모듈의 "정규식 스크립트" 탭이 열려 있지 않습니다.' };
+  }
+  if (targetKind === 'module_lua' && tab && tab !== 'trigger') {
+    return { ok: false, reason: '현재 모듈의 "트리거 스크립트" 탭이 열려 있지 않습니다.' };
+  }
+
+  let editorEl = null;
+
+  if (targetKind === 'module_lua') {
+    try {
+      editorEl = await scopeRoot.querySelector('[contenteditable="true"], [contenteditable=""]');
+    } catch {}
+  } else {
+    const wantIdx = targetKind === 'module_lorebook' ? loreIndex : regexIndex;
+    if (!Number.isInteger(wantIdx) || wantIdx < 0) {
+      return { ok: false, reason: '대상 항목 인덱스를 확인할 수 없습니다.' };
+    }
+    try {
+      const idxNodes = await scopeRoot.querySelectorAll('[data-risu-idx]');
+      const len = idxNodes ? Math.min(await idxNodes.length(), 60) : 0;
+      for (let i = 0; i < len && !editorEl; i++) {
+        const node = await idxNodes.at(i);
+        if (!node) continue;
+        const outer = await node.getOuterHTML();
+        const attrs = parseOpeningTagAttrs(outer);
+        const parsed = parseInt(attrs['data-risu-idx'], 10);
+        if (parsed !== wantIdx) continue;
+
+        if (typeof node.querySelectorAll === 'function') {
+          const candidates = await node.querySelectorAll('[contenteditable="true"], [contenteditable=""]');
+          const cLen = candidates ? Math.min(await candidates.length(), 8) : 0;
+          for (let j = 0; j < cLen; j++) {
+            const ce = await candidates.at(j);
+            if (!ce) continue;
+            // Verify the nearest ancestor with data-risu-idx is wantIdx (prevents folder writes hitting nested child editors)
+            let cur = ce;
+            let nearestIdx = null;
+            for (let hop = 0; hop < 6 && cur; hop++) {
+              const p = await cur.getParent();
+              if (!p) break;
+              const pAttrs = parseOpeningTagAttrs(await p.getOuterHTML());
+              if (pAttrs['data-risu-idx'] !== undefined) {
+                const pIdx = parseInt(pAttrs['data-risu-idx'], 10);
+                if (!Number.isNaN(pIdx)) nearestIdx = pIdx;
+                break;
+              }
+              cur = p;
+            }
+            if (nearestIdx === wantIdx) {
+              editorEl = ce;
+              break;
+            }
+          }
+        }
+      }
+    } catch {}
+  }
+
+  if (!editorEl || typeof editorEl.setTextContent !== 'function') {
+    return {
+      ok: false,
+      reason: '현재 화면에 펼쳐진 해당 본문 입력칸(contenteditable)을 찾지 못했습니다. 항목을 펼친 뒤 다시 시도하거나 다른 설정 탭을 다녀와 주세요.',
+    };
+  }
+
+  try {
+    await editorEl.setTextContent(String(text ?? ''));
+    if (typeof editorEl.focus === 'function') {
+      try { await editorEl.focus(); } catch {}
+    }
+    return {
+      ok: true,
+      message: '📝 화면 입력칸에 DB 최신본을 채우고 커서를 옮겼습니다! Svelte tempModule에도 동기화하려면 입력칸에서 스페이스→백스페이스를 1회 누르세요. (그냥 하단 "모듈 수정"을 누르면 이전 값으로 덮어써집니다)',
+    };
+  } catch (err) {
+    return { ok: false, reason: `화면 입력칸 채우기 실패: ${err?.message || err}` };
+  }
+}
+
   __exports.parseOpeningTagAttrs = parseOpeningTagAttrs;
   __exports.classifyDomSignals = classifyDomSignals;
   __exports.inspectFocusedElement = inspectFocusedElement;
   __exports.inspectVisibleScreen = inspectVisibleScreen;
+  __exports.syncModuleEditorDom = syncModuleEditorDom;
   __exports.normalizeChipPos = normalizeChipPos;
   __exports.MIN_DOCK_VIEWPORT_PX = MIN_DOCK_VIEWPORT_PX;
   __exports.FocusTracker = FocusTracker;
@@ -9607,7 +9753,7 @@ function buildListItem(doc, rawItemText) {
 const { VERSION, STORAGE_KEY, PRESET_STORAGE_KEY, CHAR_FIELD_META, MODULE_FIELD_META, CONFIG_FIELD_META, SCREEN_LABELS } = __require("src/version.js");
 const { STYLES } = __require("src/style.js");
 const { FocusTracker, normalizeChipPos, MIN_DOCK_VIEWPORT_PX } = __require("src/focus-detector.js");
-const { HostAdapter } = __require("src/host-adapter.js");
+const { HostAdapter, resolveModuleIndex } = __require("src/host-adapter.js");
 const { callRisuModel, parseAssistantReply, buildConversationMessages } = __require("src/llm.js");
 const { buildDiffPreview } = __require("src/text-edits.js");
 const { getQuickPromptsForContext } = __require("src/knowledge.js");
@@ -9621,6 +9767,7 @@ const DEFAULT_SETTINGS = {
   maxHistoryTurns: 12,
   showFloatingChip: true,
   showHostActionButton: false,
+  autoFillModuleEditor: false,
   floatingChipPos: null,
   dockMode: false,
   autoOpenDocked: false,
@@ -10239,12 +10386,105 @@ class RisuHelperApp {
     }
   }
 
+  _isModuleTarget(target, proposal = null) {
+    const kind = target?.targetKind || '';
+    if (kind.startsWith('module_')) return true;
+    if (proposal?.scope === 'module') return true;
+    return false;
+  }
+
+  _isModuleDomFillable(target) {
+    if (!target) return false;
+    if (target.targetKind === 'module_lorebook') {
+      return (target.fieldKey || 'content') === 'content' && Number.isInteger(target.loreIndex) && target.loreIndex >= 0;
+    }
+    if (target.targetKind === 'module_lua') {
+      return (target.fieldKey || 'code') === 'code';
+    }
+    if (target.targetKind === 'module_regex') {
+      return (target.fieldKey || 'out') === 'out' && Number.isInteger(target.regexIndex) && target.regexIndex >= 0;
+    }
+    return false;
+  }
+
+  _hasModuleDomMismatch() {
+    if (!this.tracker?.enabled || !this.activeSnapshot?.ok || this.activeSnapshot.moduleUncertain) return false;
+    const snapTarget = this.activeSnapshot.target;
+    if (!this._isModuleDomFillable(snapTarget)) return false;
+    if (!this.detectedContext || this.detectedContext.screen !== 'module') return false;
+    if (this.detectedContext.targetKind !== snapTarget.targetKind) return false;
+    if (snapTarget.targetKind === 'module_lorebook' && this.detectedContext.loreIndex !== snapTarget.loreIndex) return false;
+    if (snapTarget.targetKind === 'module_regex' && this.detectedContext.regexIndex !== snapTarget.regexIndex) return false;
+
+    const norm = (s) => String(s || '').replace(/\r\n/g, '\n').trim();
+    const livePreview = norm(this.detectedContext.liveTextPreview || this.detectedContext.moduleDomHints?.textPreview || '');
+    const dbContent = norm(this.activeSnapshot.content || '');
+    if (!livePreview && !dbContent) return false;
+    const dbPrefix = dbContent.slice(0, Math.min(dbContent.length, 600)).trim();
+    const livePrefix = livePreview.slice(0, Math.min(livePreview.length, 600)).trim();
+    if (!livePrefix) return false;
+    return !dbPrefix.startsWith(livePrefix) && !livePrefix.startsWith(dbPrefix);
+  }
+
+  async syncOpenModuleEditor(target, text, { moduleId = null } = {}) {
+    if (!this.tracker?.enabled) {
+      return { ok: false, reason: 'mainDom 권한이 없어 화면 입력칸에 채울 수 없습니다.' };
+    }
+    if (!this._isModuleDomFillable(target)) {
+      return {
+        ok: false,
+        reason: '이 필드는 <input>/<textarea> 형식이라 Plugin v3 권한으로 직접 채울 수 없습니다. 하단 "모듈 수정" 버튼을 누르지 말고 다른 설정 탭을 다녀와 다시 열어 주세요.',
+      };
+    }
+
+    // Prevent filling into a different module if the user manually picked another module
+    if (moduleId && this.detectedContext?.moduleDomHints) {
+      try {
+        const { modules, permissionDenied } = await this.adapter.readModules();
+        if (!permissionDenied && Array.isArray(modules) && modules.length > 0) {
+          const domMatch = resolveModuleIndex(modules, {
+            targetKind: this.detectedContext.targetKind,
+            fieldKey: this.detectedContext.fieldKey,
+            loreIndex: this.detectedContext.loreIndex,
+            regexIndex: this.detectedContext.regexIndex,
+            liveTextPreview: this.detectedContext.liveTextPreview,
+            moduleDomHints: this.detectedContext.moduleDomHints,
+          });
+          if (domMatch.matchedBy === 'dom_hints' && modules[domMatch.index]?.id && modules[domMatch.index].id !== moduleId) {
+            return {
+              ok: false,
+              reason: '현재 RisuAI 화면에 열려 있는 모듈과 수정한 모듈이 달라 입력칸 채우기를 중단했습니다.',
+            };
+          }
+        }
+      } catch {}
+    }
+
+    const res = await this.tracker.syncModuleEditorDom({
+      targetKind: target.targetKind,
+      fieldKey: target.fieldKey,
+      loreIndex: target.loreIndex,
+      regexIndex: target.regexIndex,
+      text: String(text ?? ''),
+    });
+
+    if (res.ok && this.detectedContext && this.detectedContext.screen === 'module') {
+      const nextPreview = String(text ?? '').slice(0, 600);
+      this.detectedContext.liveTextPreview = nextPreview;
+      if (this.detectedContext.moduleDomHints) {
+        this.detectedContext.moduleDomHints.textPreview = nextPreview;
+      }
+    }
+    return res;
+  }
+
   async applyProposalItem(item) {
     const pinnedTarget = item.pinnedTarget || item.preview?.target;
+    const hostBinding = item.hostBinding || item.preview?.hostBinding || null;
     try {
       const res = await this.adapter.applyProposal(item.proposal, pinnedTarget, {
         bindToCurrentChat: item.bindToCurrentChat,
-        hostBinding: item.hostBinding || item.preview?.hostBinding || null,
+        hostBinding,
         requireDestructiveConfirm: Boolean(item.preview?.requiresConfirm),
         destructiveConfirmed: Boolean(item.destructiveConfirmed),
       });
@@ -10252,7 +10492,32 @@ class RisuHelperApp {
       item.undoId = res.undoId;
       item.statusMessage = res.summary;
       await this.refreshContextSnapshot();
-      this.showToast(res.summary);
+
+      const isModuleEdit = this._isModuleTarget(pinnedTarget, item.proposal);
+      if (isModuleEdit) {
+        item.moduleDbSaved = true;
+        item.moduleDomSynced = false;
+        const savedText = item.preview?.after ?? this.activeSnapshot?.content ?? '';
+        const canFillDom = this.tracker?.enabled && this._isModuleDomFillable(pinnedTarget);
+        if (this.settings.autoFillModuleEditor && canFillDom) {
+          const syncRes = await this.syncOpenModuleEditor(pinnedTarget, savedText, {
+            moduleId: hostBinding?.moduleId || this.activeSnapshot?.hostBinding?.moduleId || null,
+          });
+          if (syncRes.ok) {
+            item.moduleDomSynced = true;
+            item.moduleSyncNotice = syncRes.message;
+            this.showToast('✅ DB 저장 + 입력칸 채우기 완료! tempModule 반영은 스페이스→백스페이스 1회 또는 창 닫기');
+          } else {
+            item.moduleSyncNotice = '⚠️ DB에 저장 완료! 열려 있는 "모듈 수정" 화면(tempModule)에는 이전 내용이 남아 있습니다. 하단 "모듈 수정" 버튼을 누르면 되돌아가니 누르지 말고 다른 설정 탭을 다녀와 다시 여세요.';
+            this.showToast(`${res.summary} — ⚠️ 하단 "모듈 수정" 버튼을 누르지 마세요!`);
+          }
+        } else {
+          item.moduleSyncNotice = '⚠️ DB에 저장 완료! 열려 있는 "모듈 수정" 화면(tempModule)에는 이전 내용이 남아 있습니다. 하단 "모듈 수정" 버튼을 누르면 이전 값으로 덮어써지니 누르지 말고 다른 설정 탭을 다녀와 다시 여세요.';
+          this.showToast(`${res.summary} — ⚠️ 하단 "모듈 수정" 버튼을 누르지 마세요!`);
+        }
+      } else {
+        this.showToast(res.summary);
+      }
     } catch (err) {
       item.statusMessage = `적용 실패: ${err.message}`;
       this.showToast(`적용 실패: ${err.message}`);
@@ -10268,6 +10533,24 @@ class RisuHelperApp {
       item.undoId = null;
       item.statusMessage = `되돌림 완료 (${res.label})`;
       await this.refreshContextSnapshot();
+
+      if (item.moduleDbSaved) {
+        item.moduleDbSaved = false;
+        item.moduleDomSynced = false;
+        const pinnedTarget = item.pinnedTarget || item.preview?.target;
+        const hostBinding = item.hostBinding || item.preview?.hostBinding || null;
+        if (this.settings.autoFillModuleEditor && this.tracker?.enabled && this._isModuleDomFillable(pinnedTarget)) {
+          const restoredText = item.preview?.before ?? this.activeSnapshot?.content ?? '';
+          const syncRes = await this.syncOpenModuleEditor(pinnedTarget, restoredText, {
+            moduleId: hostBinding?.moduleId || this.activeSnapshot?.hostBinding?.moduleId || null,
+          });
+          item.moduleSyncNotice = syncRes.ok
+            ? syncRes.message
+            : '⚠️ DB에서 되돌렸습니다. 열려 있는 "모듈 수정" 화면에 이전 내용이 남아 있으면 하단 "모듈 수정"을 누르지 말고 다른 설정 탭을 다녀오세요.';
+        } else {
+          item.moduleSyncNotice = '⚠️ DB에서 되돌렸습니다. 열려 있는 "모듈 수정" 화면에 이전 내용이 남아 있으면 하단 "모듈 수정"을 누르지 말고 다른 설정 탭을 다녀오세요.';
+        }
+      }
       this.showToast(`되돌렸습니다: ${res.label}`);
     } catch (err) {
       this.showToast(`되돌리기 실패: ${err.message}`);
@@ -10473,6 +10756,12 @@ class RisuHelperApp {
       );
     }
 
+    if (item.moduleSyncNotice) {
+      bodyChildren.push(
+        h(doc, 'div', { class: 'rh-banner' }, item.moduleSyncNotice)
+      );
+    }
+
     const leftControls = [];
     if (proposal.action === 'create_persona' || proposal.action === 'update_persona') {
       leftControls.push(
@@ -10520,6 +10809,30 @@ class RisuHelperApp {
         }, '자동 재요청')
       );
     } else if (item.applied) {
+      const syncTarget = item.pinnedTarget || preview.target;
+      if (item.moduleDbSaved && this.tracker?.enabled && this._isModuleDomFillable(syncTarget)) {
+        rightControls.push(
+          h(doc, 'button', {
+            class: 'rh-btn',
+            onclick: async () => {
+              const syncRes = await this.syncOpenModuleEditor(
+                syncTarget,
+                preview.after ?? this.activeSnapshot?.content ?? '',
+                { moduleId: item.hostBinding?.moduleId || preview.hostBinding?.moduleId || null }
+              );
+              if (syncRes.ok) {
+                item.moduleDomSynced = true;
+                item.moduleSyncNotice = syncRes.message;
+                this.showToast('📝 입력칸 채우기 완료! tempModule 반영은 스페이스→백스페이스 1회');
+              } else {
+                item.moduleSyncNotice = syncRes.reason;
+                this.showToast(syncRes.reason);
+              }
+              this.render();
+            },
+          }, item.moduleDomSynced ? '📝 다시 채우기' : '📝 입력칸에 채우기')
+        );
+      }
       rightControls.push(
         h(doc, 'button', {
           class: 'rh-btn danger',
@@ -10810,6 +11123,18 @@ class RisuHelperApp {
               },
             }),
             '채팅 화면 우측 상단 고정 ✨ 버튼도 표시 (RisuAI가 그리는 버튼 · 위치 이동 불가)'
+          ),
+          h(doc, 'label', {},
+            h(doc, 'input', {
+              type: 'checkbox',
+              checked: this.settings.autoFillModuleEditor,
+              onchange: async (e) => {
+                this.settings.autoFillModuleEditor = Boolean(e.target.checked);
+                await this.saveSettings();
+                this.render();
+              },
+            }),
+            '모듈 적용/되돌리기 시 열려 있는 본문 입력칸에 자동 채우기 (반영 후 스페이스→백스페이스 1회 필요)'
           )
         )
       ),
@@ -11036,14 +11361,37 @@ class RisuHelperApp {
         '열려 있는 모듈을 자동으로 확정하지 못했습니다. 아래 모듈 선택기에서 편집할 모듈을 직접 선택해 주세요. 선택 전에는 모듈 편집 제안을 적용할 수 없습니다.'));
     }
 
+    if (this._hasModuleDomMismatch()) {
+      contextBarChildren.push(
+        h(doc, 'div', { class: 'rh-banner', style: 'display:flex;flex-direction:column;gap:6px;' },
+          h(doc, 'div', {}, '⚠️ DB와 열려 있는 "모듈 수정" 화면(tempModule) 내용이 다릅니다. 하단 "모듈 수정" 버튼을 누르면 이전 값으로 덮어써지니 누르지 말고 다른 탭을 다녀오거나 아래 버튼으로 입력칸을 채워 주세요.'),
+          h(doc, 'div', { class: 'rh-row' },
+            h(doc, 'button', {
+              class: 'rh-btn',
+              onclick: async () => {
+                const syncRes = await this.syncOpenModuleEditor(
+                  this.activeSnapshot.target,
+                  this.activeSnapshot.content,
+                  { moduleId: this.activeSnapshot.hostBinding?.moduleId || null }
+                );
+                this.showToast(syncRes.ok ? syncRes.message : syncRes.reason);
+                this.render();
+              },
+            }, '📝 DB 최신본을 입력칸에 채우기')
+          )
+        )
+      );
+    }
+
     if (this.activeSnapshot && !this.activeSnapshot.ok) {
       contextBarChildren.push(h(doc, 'div', { class: 'rh-banner error' }, this.activeSnapshot.reason));
     } else if (this.activeSnapshot?.content) {
       const content = this.activeSnapshot.content;
       const lineCount = content.split('\n').length;
+      const previewHeading = this._isModuleTarget(this.activeSnapshot.target) ? '현재 DB 원문 보기' : '현재 원문 보기';
       contextBarChildren.push(
         h(doc, 'details', { class: 'rh-preview-details', 'data-rh-details-key': 'active-source-preview' },
-          h(doc, 'summary', {}, `현재 원문 보기 (${this.activeSnapshot.label} · ${content.length.toLocaleString()}자 / ${lineCount}줄)`),
+          h(doc, 'summary', {}, `${previewHeading} (${this.activeSnapshot.label} · ${content.length.toLocaleString()}자 / ${lineCount}줄)`),
           h(doc, 'pre', { class: 'rh-preview-pre' }, content.slice(0, 4000) + (content.length > 4000 ? '\n... (일부 생략)' : ''))
         )
       );

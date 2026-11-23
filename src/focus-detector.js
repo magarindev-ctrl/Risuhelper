@@ -2182,6 +2182,13 @@ class FocusTracker {
     this.chipListenerIds = [];
   }
 
+  async syncModuleEditorDom(opts) {
+    if (!this.rootDoc) {
+      return { ok: false, reason: 'mainDom 권한이 없어 화면 입력칸에 접근할 수 없습니다.' };
+    }
+    return await syncModuleEditorDom(this.rootDoc, opts);
+  }
+
   async stop() {
     this.enabled = false;
     clearTimeout(this._longPressTimer);
@@ -2204,11 +2211,150 @@ class FocusTracker {
   }
 }
 
+const MODULE_EDIT_ONLY_HEADINGS = ['모듈 수정', 'edit module', '모듈 생성', 'create module'];
+
+/**
+ * Safely writes updated DB text into an open ModuleMenu `[contenteditable="true"]` editor
+ * (Lorebook content, Lua trigger code, or Regex OUT) and focuses it.
+ *
+ * Note: Plugin API v3 SafeElement does not expose `dispatchEvent()` or `<input>.value`,
+ * so Svelte's `bind:textContent` (`tempModule`) only syncs after the user triggers an `input`
+ * event (e.g. Space+Backspace) or re-opens the module without clicking the bottom save button.
+ */
+async function syncModuleEditorDom(rootDoc, { targetKind, fieldKey, loreIndex, regexIndex, text } = {}) {
+  if (!rootDoc || typeof rootDoc.querySelectorAll !== 'function') {
+    return { ok: false, reason: 'mainDom 권한이 없어 화면 입력칸에 접근할 수 없습니다.' };
+  }
+
+  const resolvedField = fieldKey || (
+    targetKind === 'module_lorebook' ? 'content' :
+    targetKind === 'module_lua' ? 'code' :
+    targetKind === 'module_regex' ? 'out' : null
+  );
+
+  const isSupported =
+    (targetKind === 'module_lorebook' && resolvedField === 'content') ||
+    (targetKind === 'module_lua' && resolvedField === 'code') ||
+    (targetKind === 'module_regex' && resolvedField === 'out');
+
+  if (!isSupported) {
+    return {
+      ok: false,
+      reason: '이 필드는 <input>/<textarea> 형식이라 Plugin v3 권한으로 직접 채울 수 없습니다. 하단 "모듈 수정" 버튼을 누르지 말고 다른 설정 탭을 다녀와 다시 열어 주세요.',
+    };
+  }
+
+  let editH2 = null;
+  try {
+    const allH2 = await rootDoc.querySelectorAll('h2');
+    const count = allH2 ? Math.min(await allH2.length(), 6) : 0;
+    for (let i = 0; i < count; i++) {
+      const node = await allH2.at(i);
+      const txt = node ? String((await node.textContent()) || '').trim() : '';
+      if (matchAny(txt, MODULE_EDIT_ONLY_HEADINGS)) {
+        editH2 = node;
+        break;
+      }
+    }
+  } catch {}
+
+  if (!editH2) {
+    return { ok: false, reason: '현재 화면에 모듈 수정 창이 열려 있지 않습니다.' };
+  }
+
+  const scopeRoot = await resolveModuleScopeRoot(editH2, rootDoc);
+  const activeTabs = await collectActiveTabs(scopeRoot);
+  const tab = detectModuleTabKind(activeTabs);
+
+  if (targetKind === 'module_lorebook' && tab && tab !== 'lorebook') {
+    return { ok: false, reason: '현재 모듈의 "로어북" 탭이 열려 있지 않습니다.' };
+  }
+  if (targetKind === 'module_regex' && tab && tab !== 'regex') {
+    return { ok: false, reason: '현재 모듈의 "정규식 스크립트" 탭이 열려 있지 않습니다.' };
+  }
+  if (targetKind === 'module_lua' && tab && tab !== 'trigger') {
+    return { ok: false, reason: '현재 모듈의 "트리거 스크립트" 탭이 열려 있지 않습니다.' };
+  }
+
+  let editorEl = null;
+
+  if (targetKind === 'module_lua') {
+    try {
+      editorEl = await scopeRoot.querySelector('[contenteditable="true"], [contenteditable=""]');
+    } catch {}
+  } else {
+    const wantIdx = targetKind === 'module_lorebook' ? loreIndex : regexIndex;
+    if (!Number.isInteger(wantIdx) || wantIdx < 0) {
+      return { ok: false, reason: '대상 항목 인덱스를 확인할 수 없습니다.' };
+    }
+    try {
+      const idxNodes = await scopeRoot.querySelectorAll('[data-risu-idx]');
+      const len = idxNodes ? Math.min(await idxNodes.length(), 60) : 0;
+      for (let i = 0; i < len && !editorEl; i++) {
+        const node = await idxNodes.at(i);
+        if (!node) continue;
+        const outer = await node.getOuterHTML();
+        const attrs = parseOpeningTagAttrs(outer);
+        const parsed = parseInt(attrs['data-risu-idx'], 10);
+        if (parsed !== wantIdx) continue;
+
+        if (typeof node.querySelectorAll === 'function') {
+          const candidates = await node.querySelectorAll('[contenteditable="true"], [contenteditable=""]');
+          const cLen = candidates ? Math.min(await candidates.length(), 8) : 0;
+          for (let j = 0; j < cLen; j++) {
+            const ce = await candidates.at(j);
+            if (!ce) continue;
+            // Verify the nearest ancestor with data-risu-idx is wantIdx (prevents folder writes hitting nested child editors)
+            let cur = ce;
+            let nearestIdx = null;
+            for (let hop = 0; hop < 6 && cur; hop++) {
+              const p = await cur.getParent();
+              if (!p) break;
+              const pAttrs = parseOpeningTagAttrs(await p.getOuterHTML());
+              if (pAttrs['data-risu-idx'] !== undefined) {
+                const pIdx = parseInt(pAttrs['data-risu-idx'], 10);
+                if (!Number.isNaN(pIdx)) nearestIdx = pIdx;
+                break;
+              }
+              cur = p;
+            }
+            if (nearestIdx === wantIdx) {
+              editorEl = ce;
+              break;
+            }
+          }
+        }
+      }
+    } catch {}
+  }
+
+  if (!editorEl || typeof editorEl.setTextContent !== 'function') {
+    return {
+      ok: false,
+      reason: '현재 화면에 펼쳐진 해당 본문 입력칸(contenteditable)을 찾지 못했습니다. 항목을 펼친 뒤 다시 시도하거나 다른 설정 탭을 다녀와 주세요.',
+    };
+  }
+
+  try {
+    await editorEl.setTextContent(String(text ?? ''));
+    if (typeof editorEl.focus === 'function') {
+      try { await editorEl.focus(); } catch {}
+    }
+    return {
+      ok: true,
+      message: '📝 화면 입력칸에 DB 최신본을 채우고 커서를 옮겼습니다! Svelte tempModule에도 동기화하려면 입력칸에서 스페이스→백스페이스를 1회 누르세요. (그냥 하단 "모듈 수정"을 누르면 이전 값으로 덮어써집니다)',
+    };
+  } catch (err) {
+    return { ok: false, reason: `화면 입력칸 채우기 실패: ${err?.message || err}` };
+  }
+}
+
 export {
   parseOpeningTagAttrs,
   classifyDomSignals,
   inspectFocusedElement,
   inspectVisibleScreen,
+  syncModuleEditorDom,
   normalizeChipPos,
   MIN_DOCK_VIEWPORT_PX,
   FocusTracker,

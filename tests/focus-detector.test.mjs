@@ -1443,3 +1443,162 @@ test('classifyDomSignals reads the lorebook scope from the nearest active tab la
   const charTab = classifyDomSignals({ tag: 'textarea', loreIdx: 0, nearbyLabel: '프롬프트', loreTabLabel: '캐릭터' });
   assert.equal(charTab.targetKind, 'char_lorebook');
 });
+
+test('syncModuleEditorDom writes to the exact open contenteditable module entry, focuses it, blocks nested folder clobbering, and rejects non-contenteditable fields', async () => {
+  const { syncModuleEditorDom } = await import('../src/focus-detector.js');
+
+  function makeSyncNode({ tag, outerHtml = '', text = '', className = '', children = [] }) {
+    const resolvedOuter = outerHtml || `<${tag.toLowerCase()}${className ? ` class="${className}"` : ''}></${tag.toLowerCase()}>`;
+    const node = {
+      _tag: tag.toLowerCase(),
+      _outerHtml: resolvedOuter,
+      _className: className,
+      _text: text,
+      _focusedCalls: 0,
+      _parent: null,
+      _children: children,
+      async getOuterHTML() { return node._outerHtml; },
+      async nodeName() { return tag.toUpperCase(); },
+      async textContent() { return node._text; },
+      async innerText() { return node._text; },
+      async setTextContent(v) { node._text = String(v); },
+      async focus() { node._focusedCalls++; },
+      async getClassName() { return node._className; },
+      async getParent() { return node._parent; },
+      async querySelectorAll(sel) {
+        const parts = sel.split(',').map(s => s.trim()).filter(Boolean);
+        const out = [];
+        const walk = (cur) => {
+          for (const c of cur._children) {
+            const attrs = parseOpeningTagAttrs(c._outerHtml);
+            const hit = parts.some(p => {
+              if (p === 'h2') return c._tag === 'h2';
+              if (p === '[role="tab"]') return attrs.role === 'tab';
+              if (p === '[role="tab"][aria-selected="true"]') return attrs.role === 'tab' && attrs['aria-selected'] === 'true';
+              if (p === '[data-risu-idx]') return attrs['data-risu-idx'] !== undefined;
+              if (p === '[contenteditable="true"]') return attrs.contenteditable === 'true';
+              if (p === '[contenteditable=""]') return attrs.contenteditable === '';
+              return false;
+            });
+            if (hit) out.push(c);
+            walk(c);
+          }
+        };
+        walk(node);
+        return { async length() { return out.length; }, async at(i) { return out[i] || null; } };
+      },
+      async querySelector(sel) {
+        const list = await node.querySelectorAll(sel);
+        return (await list.length()) > 0 ? await list.at(0) : null;
+      },
+    };
+    for (const c of children) c._parent = node;
+    return node;
+  }
+
+  const childEditor = makeSyncNode({
+    tag: 'div',
+    outerHtml: '<div contenteditable="true"></div>',
+    text: 'old child lore',
+  });
+  const entry1Editor = makeSyncNode({
+    tag: 'div',
+    outerHtml: '<div contenteditable="true"></div>',
+    text: 'old entry 1 lore',
+  });
+  const tabBtn = makeSyncNode({
+    tag: 'button',
+    outerHtml: '<button role="tab" aria-selected="true">로어북</button>',
+    text: '로어북',
+  });
+
+  const rootDoc = makeSyncNode({
+    tag: 'html',
+    children: [
+      makeSyncNode({
+        tag: 'div',
+        children: [
+          makeSyncNode({ tag: 'h2', text: '모듈 수정' }),
+          tabBtn,
+          // Folder at idx=0 containing nested child at idx=2
+          makeSyncNode({
+            tag: 'div',
+            outerHtml: '<div data-risu-idx="0"></div>',
+            children: [
+              makeSyncNode({ tag: 'input', outerHtml: '<input type="text">' }),
+              makeSyncNode({
+                tag: 'div',
+                outerHtml: '<div data-risu-idx="2"></div>',
+                children: [
+                  makeSyncNode({ tag: 'div', children: [childEditor] }),
+                ],
+              }),
+            ],
+          }),
+          // Normal entry at idx=1
+          makeSyncNode({
+            tag: 'div',
+            outerHtml: '<div data-risu-idx="1"></div>',
+            children: [
+              makeSyncNode({ tag: 'div', children: [entry1Editor] }),
+            ],
+          }),
+        ],
+      }),
+    ],
+  });
+
+  // 1. Exact write to entry #1 updates textContent and focuses it
+  const okRes = await syncModuleEditorDom(rootDoc, {
+    targetKind: 'module_lorebook',
+    fieldKey: 'content',
+    loreIndex: 1,
+    text: 'new DB lore content',
+  });
+  assert.equal(okRes.ok, true);
+  assert.equal(entry1Editor._text, 'new DB lore content');
+  assert.equal(entry1Editor._focusedCalls, 1);
+  assert.equal(childEditor._text, 'old child lore');
+
+  // 2. Folder write for idx=0 must NOT clobber nested child idx=2's contenteditable editor
+  const folderGuard = await syncModuleEditorDom(rootDoc, {
+    targetKind: 'module_lorebook',
+    fieldKey: 'content',
+    loreIndex: 0,
+    text: 'should not hit child',
+  });
+  assert.equal(folderGuard.ok, false);
+  assert.equal(childEditor._text, 'old child lore');
+
+  // 3. Direct write to nested child idx=2 succeeds
+  const childRes = await syncModuleEditorDom(rootDoc, {
+    targetKind: 'module_lorebook',
+    fieldKey: 'content',
+    loreIndex: 2,
+    text: 'updated nested child lore',
+  });
+  assert.equal(childRes.ok, true);
+  assert.equal(childEditor._text, 'updated nested child lore');
+
+  // 4. Non-contenteditable field (key / comment / module_field) is rejected cleanly
+  const keyRes = await syncModuleEditorDom(rootDoc, {
+    targetKind: 'module_lorebook',
+    fieldKey: 'key',
+    loreIndex: 1,
+    text: 'abc',
+  });
+  assert.equal(keyRes.ok, false);
+  assert.match(keyRes.reason, /<input>\/<textarea>/);
+
+  // 5. Wrong active tab is rejected cleanly
+  tabBtn._text = '정규식 스크립트';
+  const wrongTabRes = await syncModuleEditorDom(rootDoc, {
+    targetKind: 'module_lorebook',
+    fieldKey: 'content',
+    loreIndex: 1,
+    text: 'wrong tab',
+  });
+  assert.equal(wrongTabRes.ok, false);
+  assert.match(wrongTabRes.reason, /로어북/);
+});
+
