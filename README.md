@@ -5,18 +5,19 @@ RisuAI 및 공개 포크(`PocketRisu`, `RisuBard`, `HaejeokRisuai`, `RisuNest`, 
 ## 핵심 특징
 
 - **화면 · 커서 자동 감지 (`mainDom` 우회 아키텍처)**
-  - Plugin v3 샌드박스(`SafeElement`)에서 허용되는 `pointerup`/`click`/`keyup` 이벤트와 `querySelector(':focus')`를 조합해 사용자가 마지막으로 커서를 둔 화면·필드·로어북 항목(`data-risu-idx`)을 자동 추적합니다.
+  - Plugin v3 샌드박스(`SafeElement`)에서 허용되는 `pointerup`/`click`/`keyup` 이벤트와 `querySelector(':focus')`·`getBoundingClientRect()`를 조합해 사용자가 마지막으로 커서를 둔 화면·필드·로어북/정규식 항목(`data-risu-idx`)을 정확하게 자동 추적합니다 (`PocketRisu` 2중 래퍼 `TextAreaInput` 및 bits-ui 환경 완전 대응).
+  - 화면의 플로팅 버튼(`⋮⋮ ✨ ...`)은 마우스·터치 드래그로 자유롭게 이동할 수 있으며, 600ms 길게 누르기 자리 순환 및 설정 내 6방향 원클릭 이동을 지원합니다.
   - `mainDom` 권한을 거부하더라도 상단 **수동 대상 선택기**로 모든 편집/질문 기능을 그대로 사용할 수 있습니다.
-- **웹 · 모바일 반응형 오버레이**
-  - PC에서는 우측 사이드 드로어(넓게 보기 토글 지원), 모바일에서는 하단 시트 + `visualViewport` 가상 키보드 대응 레이아웃으로 표시됩니다.
-  - RisuAI의 다크/라이트 테마를 자동으로 따릅니다.
+- **PC 오른쪽 상시 도킹(분할 화면 · 사용자 선택) & 웹 · 모바일 반응형 UI**
+  - PC(`960px` 이상)에서 **`📌 오른쪽 도킹`** 또는 설정 옵션을 켜면 RisuHelper가 화면 오른쪽에 고정되고 RisuAI 본체(`<main>`)가 왼쪽으로 자동 분할되어 **RisuAI 화면을 그대로 조작하면서 클릭하는 DOM 입력칸이 RisuHelper에 실시간 반영**됩니다. (시작 시 자동 도킹, 패널 폭 `360/420/500px`, 화면 자동 분할 on/off 선택 가능)
+  - 일반 모드에서는 PC 우측 사이드 드로어(넓게 보기 지원), 모바일에서는 하단 시트 + `visualViewport` 가상 키보드 대응 레이아웃으로 표시되며 RisuAI 다크/라이트 테마를 자동으로 따릅니다.
 - **대화 + 검토 후 적용 + 필드 단위 안전 되돌리기(Undo)**
   - 일반 대화나 사용법·설정 질문만 할 때는 데이터를 절대 수정하지 않습니다.
   - LLM이 제안한 변경사항은 `risuhelper-proposal` 스키마(표준 JSON 및 Lua/정규식/HTML용 이스케이프 불필요 원문 구분자 `<<<CODE>>>`·`<<<BEFORE>>>`/`<<<AFTER>>>`·`<<<IN>>>`/`<<<OUT>>>`·`<<<CONTENT>>>` 지원)로 검증한 뒤 **고정된 적용 대상 · 메타데이터 전/후 변경 목록 · 줄 단위 본문 Diff 카드**로 보여 줍니다.
   - 제안 생성 시점의 대상과 캐릭터/채팅 식별자를 카드에 고정해 커서 이동 후 적용해도 의도치 않은 필드가 덮어써지지 않으며, 허용 필드 화이트리스트·24,000자 초과 원문의 전체 덮어쓰기 차단·기존 V1/V2 트리거 삭제 확인 체크박스로 안전성을 보장합니다.
   - **되돌리기(Undo)**는 최신 상태를 다시 읽어 변경했던 필드/항목만 정밀 복원하므로 적용 이후 나눈 채팅 메시지나 새로 추가된 항목을 유실하지 않습니다.
 - **광범위한 편집 · 생성 지원**
-  - 캐릭터 설정: 설명(`desc`), 첫 메시지(`firstMessage`), 시스템 프롬프트, 글로벌 노트 덮어쓰기, 제작자 코멘트, 백그라운드 임베딩 등
+  - 캐릭터/채팅 설정: 이름(`name`), 설명(`desc`), 첫 메시지(`firstMessage`), **작가의 노트(`chat.note`)**, 시스템 프롬프트, 글로벌 노트 덮어쓰기, 제작자 코멘트, 백그라운드 임베딩, 캐릭터JS(`virtualscript`) 등
   - 로어북: 캐릭터 로어북(`globalLore`), 채팅 로컬 로어북(`localLore`), 모듈 로어북(`modules[].lorebook`) 생성·수정
   - 스크립트: 캐릭터/모듈 **Lua 트리거 스크립트(`triggerlua`)** 및 **정규식 스크립트(`customscript`)** 생성·부분편집·덮어쓰기
   - 페르소나: 새 페르소나 생성, 기존 페르소나 수정, **현재 채팅 바인딩(`bindedPersona`)** 1-클릭 옵션
@@ -24,7 +25,7 @@ RisuAI 및 공개 포크(`PocketRisu`, `RisuBard`, `HaejeokRisuai`, `RisuNest`, 
 - **프롬프트 프리셋 적용 / 직접 보내기 전환 (BotBuilder 호환)**
   - 상단 바에서 **직접 보내기 (`direct`) ↔ 프리셋 적용 (`preset`)** 모드를 1-클릭으로 전환할 수 있습니다.
   - `.risup` / `.risupreset` / `.json` / `.preset` 파일을 외부 의존성 없이 순수 WebCrypto·`DecompressionStream`·MessagePack·RPack으로 복호화해 가져옵니다(본체 프리셋은 변경하지 않음).
-  - 프리셋 **블록 활성/편집**, 프리셋+모듈 통합 **토글 설정**, 호스트 **설치 모듈 선택 연동**(로어북 포함/조건 완화/미지원 처리 제외), 그리고 실제 LLM에 전송되는 최종 메시지 배열을 미리 보는 **전송 미리보기**를 제공합니다.
+  - 프리셋 **블록 활성/편집**, 프리셋+모듈 통합 **토글 설정**(스크롤 위치 유지), 호스트 **설치 모듈 선택 연동**(로어북 포함/조건 완화/미지원 처리 제외), 그리고 실제 LLM에 전송되는 최종 메시지 배열을 미리 보는 **전송 미리보기**를 제공합니다.
 - **멀티 포크 호환**
   - `PocketRisu`의 미열람 채팅 `_placeholder` 보호(`getChatFromIndex` 선조회)
   - `RisuNest`의 `setDatabaseLite({ characters })` 동기 차단 회피(`setCharacter` / `setChatToIndex` / async `setDatabase` 사용)

@@ -1,21 +1,21 @@
 //@name risuhelper
 //@display-name RisuHelper
 //@api 3.0
-//@version 0.2.0
+//@version 0.3.0
 //@update-url https://raw.githubusercontent.com/magarindev-ctrl/Risuhelper/main/dist/risuhelper.js
 //@link https://github.com/magarindev-ctrl/Risuhelper RisuHelper GitHub
 
 /*
- * RisuHelper v0.2.0 — RisuAI Plugin API v3
+ * RisuHelper v0.3.0 — RisuAI Plugin API v3
  * License: GPL-3.0-only
  * https://github.com/magarindev-ctrl/Risuhelper
  */
 (() => {
   'use strict';
-  const __RISUHELPER_VERSION__ = "0.2.0";
+  const __RISUHELPER_VERSION__ = "0.3.0";
   const __modules = {
   "src/version.js"(__require, __exports) {
-    const VERSION = '0.2.0';
+    const VERSION = '0.3.0';
     const PLUGIN_NAME = 'risuhelper';
     const STORAGE_KEY = 'risuhelper_state_v1';
     const PRESET_STORAGE_KEY = 'risuhelper_preset_v1';

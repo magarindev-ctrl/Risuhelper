@@ -1,6 +1,6 @@
 {
   "name": "risuhelper",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "RisuAI Plugin API v3 context-aware assistant for editing descriptions, lorebooks, Lua triggers, regex scripts, personas, config, and prompt presets.",
   "type": "module",
   "license": "GPL-3.0-only",
