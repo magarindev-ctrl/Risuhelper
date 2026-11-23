@@ -603,5 +603,117 @@ test('dist/risuhelper.js supports opt-in PC right-side docking with live real-ti
   assert.equal(mainStyles.width, '');
 });
 
+test('dist/risuhelper.js renders LLM Markdown replies as rich editor cards with syntax highlighting and raw-view toggle', async () => {
+  const code = fs.readFileSync(BUNDLE_PATH, 'utf8');
+  const doc = createMockDocument();
+  const registeredButtons = [];
+  let lastCopied = '';
+  doc.defaultView = {
+    navigator: {
+      clipboard: {
+        async writeText(t) { lastCopied = t; },
+      },
+    },
+  };
+
+  const mockReply = [
+    '## 상태창 Lua 가이드',
+    '',
+    '**핵심 변수** `hp` 와 {{char}} 매크로를 함께 사용하세요.',
+    '',
+    '> [!TIP]',
+    '> `setChatVar` 호출 후에는 `reloadDisplay`를 확인하세요.',
+    '',
+    '```lua hp_sync.lua',
+    'function onOutput(id)',
+    '  setChatVar(id, "hp", "100")',
+    'end',
+    '```',
+  ].join('\n');
+
+  const mockRisuai = {
+    pluginStorage: { async getItem() { return null; }, async setItem() {} },
+    async getColorScheme() { return { scheme: { type: 'dark' } }; },
+    async registerButton(meta, cb) { registeredButtons.push({ meta, cb }); return { id: meta.id }; },
+    async registerSetting(_n, _cb, _i, _t, id) { return { id }; },
+    async unregisterUIPart() {},
+    async onUnload() {},
+    async showContainer() {},
+    async hideContainer() {},
+    async getCharacter() { return { name: '테스트봇', desc: '', globalLore: [], customscript: [], triggerscript: [], chats: [{}] }; },
+    async getCurrentCharacterIndex() { return 0; },
+    async getCurrentChatIndex() { return 0; },
+    async getRootDocument() { return null; },
+    async runLLMModel() { return mockReply; },
+  };
+
+  const sandbox = {
+    risuai: mockRisuai,
+    document: doc,
+    console,
+    setTimeout,
+    clearTimeout,
+    TextEncoder,
+    TextDecoder,
+    Uint8Array,
+    Int32Array,
+    DataView,
+    URL,
+    Blob,
+    atob,
+    crypto,
+    DecompressionStream,
+    structuredClone,
+  };
+  sandbox.globalThis = sandbox;
+  vm.runInNewContext(code, sandbox, { filename: 'dist/risuhelper.js' });
+  await new Promise(r => setTimeout(r, 30));
+
+  registeredButtons[0].cb();
+  await new Promise(r => setTimeout(r, 20));
+
+  const findAll = (pred) => {
+    const out = [];
+    const walk = (node) => {
+      if (pred(node)) out.push(node);
+      for (const c of node.children || []) walk(c);
+    };
+    walk(doc.body);
+    return out;
+  };
+
+  doc.querySelector('.rh-composer-input').value = 'Lua 예시 보여줘';
+  findAll(n => n.tagName === 'BUTTON' && n.textContent === '전송')[0].click();
+  await new Promise(r => setTimeout(r, 30));
+
+  // Verify rich Markdown nodes and editor-style code card rendered inside assistant bubble
+  assert.ok(doc.querySelector('.rh-md'), 'assistant bubble should contain .rh-md root');
+  assert.equal(doc.querySelector('.rh-md-h2').textContent, '상태창 Lua 가이드');
+  assert.equal(doc.querySelector('.rh-md-strong').textContent, '핵심 변수');
+  assert.equal(doc.querySelector('.rh-md-cbs').textContent, '{{char}}');
+  assert.ok(doc.querySelector('.callout-tip'), 'tip callout should render');
+  assert.equal(doc.querySelector('.rh-code-file').textContent, 'hp_sync.lua');
+  assert.equal(doc.querySelector('.rh-code-gutter').textContent, '1\n2\n3');
+  assert.ok(findAll(n => n.className === 'rh-tok-fn').some(n => n.textContent === 'setChatVar'));
+
+  // Code card copy button copies exact code text
+  doc.querySelector('.rh-code-copy').click();
+  await new Promise(r => setTimeout(r, 10));
+  assert.match(lastCopied, /^function onOutput\(id\)/);
+
+  // Clicking '원문 보기' switches bubble to raw monospace Markdown view and back on '서식 보기'
+  const rawBtn = findAll(n => n.tagName === 'BUTTON' && n.textContent === '원문 보기')[0];
+  assert.ok(rawBtn, 'assistant bar should have 원문 보기 toggle');
+  rawBtn.click();
+  await new Promise(r => setTimeout(r, 10));
+  assert.ok(doc.querySelector('.rh-raw-pre'), 'raw view should render .rh-raw-pre');
+  assert.equal(doc.querySelector('.rh-md'), null);
+
+  const fmtBtn = findAll(n => n.tagName === 'BUTTON' && n.textContent === '서식 보기')[0];
+  fmtBtn.click();
+  await new Promise(r => setTimeout(r, 10));
+  assert.ok(doc.querySelector('.rh-md'), 'switching back restores rich Markdown view');
+});
+
 
 

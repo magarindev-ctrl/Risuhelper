@@ -11,6 +11,9 @@ RisuAI 및 공개 포크(`PocketRisu`, `RisuBard`, `HaejeokRisuai`, `RisuNest`, 
 - **PC 오른쪽 상시 도킹(분할 화면 · 사용자 선택) & 웹 · 모바일 반응형 UI**
   - PC(`960px` 이상)에서 **`📌 오른쪽 도킹`** 또는 설정 옵션을 켜면 RisuHelper가 화면 오른쪽에 고정되고 RisuAI 본체(`<main>`)가 왼쪽으로 자동 분할되어 **RisuAI 화면을 그대로 조작하면서 클릭하는 DOM 입력칸이 RisuHelper에 실시간 반영**됩니다. (시작 시 자동 도킹, 패널 폭 `360/420/500px`, 화면 자동 분할 on/off 선택 가능)
   - 일반 모드에서는 PC 우측 사이드 드로어(넓게 보기 지원), 모바일에서는 하단 시트 + `visualViewport` 가상 키보드 대응 레이아웃으로 표시되며 RisuAI 다크/라이트 테마를 자동으로 따릅니다.
+- **에디터형 마크다운 대화창 & 구문 강조 코드 카드 (XSS 안전)**
+  - LLM 응답의 마크다운(제목 `H1`~`H6`, 굵게/기울임/취소선, 인라인 코드 배지, RisuAI `{{...}}` CBS 매크로 배지, 중첩 목록·체크리스트, 인용구 및 `[!NOTE]`/`[!TIP]`/`[!IMPORTANT]`/`[!WARNING]`/`[!CAUTION]` 콜아웃 박스, 정렬 지원 표, 안전한 `http(s)` 링크)을 `innerHTML` 없이 순수 DOM 노드로 렌더링합니다.
+  - 코드 블록은 언어 컬러 배지·파일명·줄 수·고정 줄 번호 거터·원클릭 복사 버튼이 포함된 에디터 카드로 표시되며, Lua(RisuAI API 포함)·JSON·JS/TS·HTML/Svelte·CSS·Regex·Diff·스트리밍 미완성 코드 블록의 구문 강조와 메시지별 **원문 보기 / 서식 보기** 전환을 지원합니다.
 - **대화 + 검토 후 적용 + 필드 단위 안전 되돌리기(Undo)**
   - 일반 대화나 사용법·설정 질문만 할 때는 데이터를 절대 수정하지 않습니다.
   - LLM이 제안한 변경사항은 `risuhelper-proposal` 스키마(표준 JSON 및 Lua/정규식/HTML용 이스케이프 불필요 원문 구분자 `<<<CODE>>>`·`<<<BEFORE>>>`/`<<<AFTER>>>`·`<<<IN>>>`/`<<<OUT>>>`·`<<<CONTENT>>>` 지원)로 검증한 뒤 **고정된 적용 대상 · 메타데이터 전/후 변경 목록 · 줄 단위 본문 Diff 카드**로 보여 줍니다.
@@ -69,6 +72,7 @@ src/
   focus-detector.js # mainDom 기반 커서·화면 감지(한/영 UI 지원) 및 플로팅 칩
   host-adapter.js   # 크로스-포크 읽기/쓰기/검증/Undo 계층
   llm.js            # runLLMModel 스트리밍/비스트리밍 리더 및 제안 블록 파서
+  markdown.js       # XSS 안전 마크다운 파서 및 구문 강조 코드 카드 렌더러
   rpack-map.js      # .risup RPack 룩업 테이블
   preset-format.js  # .risup / .risupreset / .json 무의존성 복호화·정규화
   preset-calc.js    # CBS 수식 RPN 계산기

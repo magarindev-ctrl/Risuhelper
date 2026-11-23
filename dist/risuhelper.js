@@ -1,21 +1,21 @@
 //@name risuhelper
 //@display-name RisuHelper
 //@api 3.0
-//@version 0.3.0
+//@version 0.3.1
 //@update-url https://raw.githubusercontent.com/magarindev-ctrl/Risuhelper/main/dist/risuhelper.js
 //@link https://github.com/magarindev-ctrl/Risuhelper RisuHelper GitHub
 
 /*
- * RisuHelper v0.3.0 — RisuAI Plugin API v3
+ * RisuHelper v0.3.1 — RisuAI Plugin API v3
  * License: GPL-3.0-only
  * https://github.com/magarindev-ctrl/Risuhelper
  */
 (() => {
   'use strict';
-  const __RISUHELPER_VERSION__ = "0.3.0";
+  const __RISUHELPER_VERSION__ = "0.3.1";
   const __modules = {
   "src/version.js"(__require, __exports) {
-    const VERSION = '0.3.0';
+    const VERSION = '0.3.1';
     const PLUGIN_NAME = 'risuhelper';
     const STORAGE_KEY = 'risuhelper_state_v1';
     const PRESET_STORAGE_KEY = 'risuhelper_preset_v1';
@@ -132,6 +132,19 @@
       --rh-diff-del-bg: rgba(239, 68, 68, 0.16);
       --rh-diff-del-text: #fca5a5;
       --rh-backdrop: rgba(8, 10, 14, 0.45);
+      --rh-strong: #ffffff;
+      --rh-code-inline-bg: rgba(92, 141, 255, 0.14);
+      --rh-code-inline-border: rgba(92, 141, 255, 0.30);
+      --rh-code-inline-text: #93c5fd;
+      --rh-cbs-bg: rgba(244, 114, 182, 0.14);
+      --rh-cbs-border: rgba(244, 114, 182, 0.32);
+      --rh-cbs-text: #f9a8d4;
+      --rh-syn-kw: #c084fc;
+      --rh-syn-str: #86efac;
+      --rh-syn-num: #fbbf24;
+      --rh-syn-cmt: #737e95;
+      --rh-syn-fn: #60a5fa;
+      --rh-syn-op: #f472b6;
       --rh-radius: 12px;
       --rh-font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans KR", sans-serif;
       --rh-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
@@ -159,6 +172,19 @@
       --rh-diff-del-bg: #fee2e2;
       --rh-diff-del-text: #991b1b;
       --rh-backdrop: rgba(15, 23, 42, 0.35);
+      --rh-strong: #0f172a;
+      --rh-code-inline-bg: rgba(37, 99, 235, 0.09);
+      --rh-code-inline-border: rgba(37, 99, 235, 0.24);
+      --rh-code-inline-text: #1d4ed8;
+      --rh-cbs-bg: rgba(190, 24, 93, 0.08);
+      --rh-cbs-border: rgba(190, 24, 93, 0.24);
+      --rh-cbs-text: #9d174d;
+      --rh-syn-kw: #7c3aed;
+      --rh-syn-str: #15803d;
+      --rh-syn-num: #b45309;
+      --rh-syn-cmt: #64748b;
+      --rh-syn-fn: #1d4ed8;
+      --rh-syn-op: #be185d;
     }
 
     * { box-sizing: border-box; }
@@ -581,10 +607,518 @@
     .rh-msg.assistant .rh-bubble {
       background: var(--rh-surface);
       border: 1px solid var(--rh-border);
+      border-radius: 12px;
       border-bottom-left-radius: 4px;
       width: 100%;
       max-width: 100%;
+      white-space: normal;
+      padding: 0;
+      line-height: 1.62;
+      overflow: hidden;
     }
+
+    .rh-msg-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 5px 11px;
+      background: var(--rh-bg);
+      border-bottom: 1px solid var(--rh-border);
+      font-size: 11px;
+      color: var(--rh-muted);
+    }
+
+    .rh-msg-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-weight: 700;
+      color: var(--rh-muted);
+    }
+
+    .rh-streaming-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--rh-accent);
+      animation: rh-pulse 1.1s ease-in-out infinite;
+    }
+
+    @keyframes rh-pulse {
+      0%, 100% { opacity: 0.35; transform: scale(0.85); }
+      50% { opacity: 1; transform: scale(1.1); }
+    }
+
+    .rh-msg-actions {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .rh-msg-act {
+      appearance: none;
+      border: 1px solid transparent;
+      background: transparent;
+      color: var(--rh-muted);
+      border-radius: 6px;
+      padding: 2px 7px;
+      font-size: 11px;
+      font-weight: 600;
+      font-family: var(--rh-font);
+      cursor: pointer;
+    }
+
+    .rh-msg-act:hover {
+      background: var(--rh-surface);
+      border-color: var(--rh-border);
+      color: var(--rh-text);
+    }
+
+    .rh-msg-act.active {
+      background: var(--rh-code-inline-bg);
+      border-color: var(--rh-code-inline-border);
+      color: var(--rh-code-inline-text);
+    }
+
+    .rh-msg-body {
+      padding: 11px 14px;
+    }
+
+    .rh-raw-pre {
+      margin: 0;
+      padding: 10px 12px;
+      background: var(--rh-bg);
+      border: 1px solid var(--rh-border);
+      border-radius: 8px;
+      font-family: var(--rh-mono);
+      font-size: 12px;
+      line-height: 1.55;
+      white-space: pre-wrap;
+      word-break: break-word;
+      color: var(--rh-text);
+    }
+
+    .rh-md {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .rh-md-p {
+      margin: 0;
+      color: var(--rh-text);
+    }
+
+    .rh-md-h1,
+    .rh-md-h2,
+    .rh-md-h3,
+    .rh-md-h4,
+    .rh-md-h5,
+    .rh-md-h6 {
+      margin: 6px 0 2px;
+      font-weight: 700;
+      line-height: 1.35;
+      color: var(--rh-strong);
+    }
+
+    .rh-md > .rh-md-h1:first-child,
+    .rh-md > .rh-md-h2:first-child,
+    .rh-md > .rh-md-h3:first-child,
+    .rh-md > .rh-md-h4:first-child,
+    .rh-md > .rh-md-h5:first-child,
+    .rh-md > .rh-md-h6:first-child {
+      margin-top: 0;
+    }
+
+    .rh-md-h1 {
+      font-size: 15.5px;
+      padding-bottom: 5px;
+      border-bottom: 1px solid var(--rh-border);
+    }
+
+    .rh-md-h2 {
+      font-size: 14.5px;
+      padding-bottom: 4px;
+      border-bottom: 1px solid var(--rh-border);
+      color: var(--rh-accent);
+    }
+
+    .rh-md-h3 {
+      font-size: 13.5px;
+      color: var(--rh-strong);
+    }
+
+    .rh-md-h4,
+    .rh-md-h5,
+    .rh-md-h6 {
+      font-size: 12.5px;
+      color: var(--rh-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.02em;
+    }
+
+    .rh-md-strong {
+      font-weight: 700;
+      color: var(--rh-strong);
+    }
+
+    .rh-md-em {
+      font-style: italic;
+      color: var(--rh-text);
+    }
+
+    .rh-md-del {
+      text-decoration: line-through;
+      color: var(--rh-muted);
+    }
+
+    .rh-md-code {
+      display: inline;
+      padding: 1px 5px;
+      margin: 0 1px;
+      border-radius: 5px;
+      background: var(--rh-code-inline-bg);
+      border: 1px solid var(--rh-code-inline-border);
+      color: var(--rh-code-inline-text);
+      font-family: var(--rh-mono);
+      font-size: 12px;
+      word-break: break-word;
+    }
+
+    .rh-md-cbs {
+      display: inline;
+      padding: 1px 5px;
+      margin: 0 1px;
+      border-radius: 5px;
+      background: var(--rh-cbs-bg);
+      border: 1px solid var(--rh-cbs-border);
+      color: var(--rh-cbs-text);
+      font-family: var(--rh-mono);
+      font-size: 11.5px;
+      font-weight: 600;
+    }
+
+    .rh-md-link {
+      color: var(--rh-accent);
+      text-decoration: underline;
+      text-underline-offset: 2px;
+    }
+
+    .rh-md-link:hover {
+      color: var(--rh-accent-hover);
+    }
+
+    .rh-md-hr {
+      border: none;
+      border-top: 1px solid var(--rh-border);
+      margin: 4px 0;
+    }
+
+    .rh-md-list {
+      margin: 0;
+      padding-left: 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .rh-md-list.nested {
+      margin-top: 4px;
+    }
+
+    .rh-md-li {
+      line-height: 1.55;
+    }
+
+    .rh-md-li::marker {
+      color: var(--rh-accent);
+      font-weight: 600;
+    }
+
+    .rh-md-li.task {
+      list-style: none;
+      margin-left: -18px;
+      display: flex;
+      align-items: flex-start;
+      gap: 7px;
+    }
+
+    .rh-md-check {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 15px;
+      height: 15px;
+      margin-top: 3px;
+      border-radius: 4px;
+      border: 1px solid var(--rh-border);
+      background: var(--rh-bg);
+      font-size: 10px;
+      font-weight: 700;
+      flex-shrink: 0;
+    }
+
+    .rh-md-check.done {
+      border-color: var(--rh-ok);
+      background: rgba(52, 211, 153, 0.16);
+      color: var(--rh-ok);
+    }
+
+    .rh-md-li.task.done .rh-md-task-text {
+      color: var(--rh-muted);
+    }
+
+    .rh-md-quote {
+      margin: 0;
+      padding: 7px 11px;
+      border-left: 3px solid var(--rh-accent);
+      background: var(--rh-bg);
+      border-radius: 0 8px 8px 0;
+      color: var(--rh-muted);
+    }
+
+    .rh-md-callout {
+      padding: 8px 11px;
+      border-radius: 8px;
+      border: 1px solid var(--rh-border);
+      border-left-width: 3px;
+      background: var(--rh-bg);
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .rh-md-callout-title {
+      font-size: 11.5px;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+    }
+
+    .rh-md-callout.callout-note {
+      border-left-color: var(--rh-accent);
+    }
+    .rh-md-callout.callout-note .rh-md-callout-title {
+      color: var(--rh-accent);
+    }
+
+    .rh-md-callout.callout-tip {
+      border-left-color: var(--rh-ok);
+    }
+    .rh-md-callout.callout-tip .rh-md-callout-title {
+      color: var(--rh-ok);
+    }
+
+    .rh-md-callout.callout-important {
+      border-left-color: var(--rh-syn-kw);
+    }
+    .rh-md-callout.callout-important .rh-md-callout-title {
+      color: var(--rh-syn-kw);
+    }
+
+    .rh-md-callout.callout-warning {
+      border-left-color: var(--rh-warn-border);
+      background: var(--rh-warn-bg);
+    }
+    .rh-md-callout.callout-warning .rh-md-callout-title {
+      color: var(--rh-warn-text);
+    }
+
+    .rh-md-callout.callout-caution {
+      border-left-color: var(--rh-err-border);
+      background: var(--rh-err-bg);
+    }
+    .rh-md-callout.callout-caution .rh-md-callout-title {
+      color: var(--rh-err-text);
+    }
+
+    .rh-md-table-wrap {
+      width: 100%;
+      overflow-x: auto;
+      border: 1px solid var(--rh-border);
+      border-radius: 8px;
+      background: var(--rh-bg);
+    }
+
+    .rh-md-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+    }
+
+    .rh-md-table th,
+    .rh-md-table td {
+      padding: 6px 9px;
+      border-bottom: 1px solid var(--rh-border);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    .rh-md-table thead th {
+      background: var(--rh-surface-2);
+      color: var(--rh-strong);
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .rh-md-table tbody tr:last-child td {
+      border-bottom: none;
+    }
+
+    .rh-md-table tbody tr:nth-child(even) {
+      background: rgba(128, 128, 128, 0.05);
+    }
+
+    .rh-code-card {
+      border: 1px solid var(--rh-border);
+      border-radius: 10px;
+      background: var(--rh-bg);
+      overflow: hidden;
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+    }
+
+    .rh-code-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 5px 10px;
+      background: var(--rh-surface-2);
+      border-bottom: 1px solid var(--rh-border);
+    }
+
+    .rh-code-meta {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+      overflow: hidden;
+    }
+
+    .rh-code-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--rh-muted);
+      flex-shrink: 0;
+    }
+
+    .rh-code-dot.lang-lua { background: var(--rh-syn-fn); }
+    .rh-code-dot.lang-json,
+    .rh-code-dot.lang-js,
+    .rh-code-dot.lang-ts { background: var(--rh-syn-num); }
+    .rh-code-dot.lang-html,
+    .rh-code-dot.lang-css { background: var(--rh-syn-op); }
+    .rh-code-dot.lang-regex,
+    .rh-code-dot.lang-proposal { background: var(--rh-syn-kw); }
+    .rh-code-dot.lang-diff { background: var(--rh-syn-str); }
+
+    .rh-code-lang {
+      font-family: var(--rh-mono);
+      font-size: 10.5px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      color: var(--rh-muted);
+      flex-shrink: 0;
+    }
+
+    .rh-code-lang.lang-lua { color: var(--rh-syn-fn); }
+    .rh-code-lang.lang-json,
+    .rh-code-lang.lang-js,
+    .rh-code-lang.lang-ts { color: var(--rh-syn-num); }
+    .rh-code-lang.lang-html,
+    .rh-code-lang.lang-css { color: var(--rh-syn-op); }
+    .rh-code-lang.lang-regex,
+    .rh-code-lang.lang-proposal { color: var(--rh-syn-kw); }
+    .rh-code-lang.lang-diff { color: var(--rh-syn-str); }
+
+    .rh-code-file {
+      font-family: var(--rh-mono);
+      font-size: 11px;
+      color: var(--rh-text);
+      opacity: 0.85;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .rh-code-lines {
+      font-size: 10.5px;
+      color: var(--rh-muted);
+      opacity: 0.78;
+      flex-shrink: 0;
+    }
+
+    .rh-code-copy {
+      border: 1px solid var(--rh-border);
+      background: var(--rh-surface);
+      color: var(--rh-text);
+      border-radius: 6px;
+      padding: 2px 8px;
+      font-size: 11px;
+      font-weight: 600;
+      font-family: var(--rh-font);
+      cursor: pointer;
+      flex-shrink: 0;
+    }
+
+    .rh-code-copy:hover {
+      border-color: var(--rh-accent);
+      color: var(--rh-accent);
+    }
+
+    .rh-code-grid {
+      display: flex;
+      align-items: stretch;
+      overflow-x: auto;
+      position: relative;
+    }
+
+    .rh-code-single {
+      overflow-x: auto;
+    }
+
+    .rh-code-gutter {
+      position: sticky;
+      left: 0;
+      flex-shrink: 0;
+      padding: 9px 8px 9px 10px;
+      border-right: 1px solid var(--rh-border);
+      background: var(--rh-bg);
+      color: var(--rh-muted);
+      font-family: var(--rh-mono);
+      font-size: 11.5px;
+      line-height: 1.55;
+      text-align: right;
+      white-space: pre;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+
+    .rh-code-pre {
+      margin: 0;
+      padding: 9px 11px;
+      flex: 1;
+      min-width: 0;
+      font-family: var(--rh-mono);
+      font-size: 11.8px;
+      line-height: 1.55;
+      white-space: pre;
+      color: var(--rh-text);
+    }
+
+    .rh-code-content {
+      font-family: inherit;
+    }
+
+    .rh-tok-kw { color: var(--rh-syn-kw); font-weight: 600; }
+    .rh-tok-str { color: var(--rh-syn-str); }
+    .rh-tok-num { color: var(--rh-syn-num); }
+    .rh-tok-cmt { color: var(--rh-syn-cmt); font-style: italic; }
+    .rh-tok-fn { color: var(--rh-syn-fn); }
+    .rh-tok-op { color: var(--rh-syn-op); font-weight: 600; }
+    .rh-tok-add { color: var(--rh-diff-add-text); background: var(--rh-diff-add-bg); border-radius: 3px; padding: 0 3px; }
+    .rh-tok-del { color: var(--rh-diff-del-text); background: var(--rh-diff-del-bg); border-radius: 3px; padding: 0 3px; }
 
     .rh-code-block {
       margin: 6px 0;
@@ -7180,6 +7714,695 @@
       __exports.renderPresetPanel = renderPresetPanel;
 
   },
+  "src/markdown.js"(__require, __exports) {
+    // Zero-dependency, XSS-safe (pure DOM nodes, no innerHTML) Markdown & code editor renderer
+    // tailored for RisuHelper's assistant chat bubbles (Dark/Light themes, Lua/JSON/HTML/CSS/Regex/CBS).
+
+    const CALLOUT_META = {
+      NOTE: { cls: 'note', label: 'ℹ️ 참고' },
+      TIP: { cls: 'tip', label: '💡 팁' },
+      IMPORTANT: { cls: 'important', label: '📌 중요' },
+      WARNING: { cls: 'warning', label: '⚠️ 주의' },
+      CAUTION: { cls: 'caution', label: '🚨 경고' },
+    };
+
+    const LUA_KEYWORDS = new Set([
+      'and', 'break', 'do', 'else', 'elseif', 'end', 'false', 'for', 'function',
+      'goto', 'if', 'in', 'local', 'nil', 'not', 'or', 'repeat', 'return',
+      'then', 'true', 'until', 'while',
+    ]);
+
+    const LUA_RISU_APIS = new Set([
+      'onStart', 'onInput', 'onOutput', 'onButtonClick', 'listenEdit',
+      'getChatVar', 'setChatVar', 'getGlobalVar', 'getChat', 'setChat',
+      'getChatRole', 'setChatRole', 'getChatLength', 'getFullChat', 'setFullChat',
+      'addChat', 'insertChat', 'removeChat', 'cutChat', 'getCharacterLastMessage',
+      'getUserLastMessage', 'getName', 'setName', 'getDescription', 'setDescription',
+      'getCharacterFirstMessage', 'setCharacterFirstMessage', 'getPersonaName',
+      'getPersonaDescription', 'getAuthorsNote', 'getBackgroundEmbedding',
+      'setBackgroundEmbedding', 'getLoreBooks', 'upsertLocalLoreBook', 'loadLoreBooks',
+      'LLM', 'axLLM', 'simpleLLM', 'cbs', 'getTokens', 'sleep', 'reloadDisplay',
+      'reloadChat', 'stopChat', 'log', 'alertNormal', 'alertError', 'alertInput',
+      'alertSelect', 'alertConfirm', 'pairs', 'ipairs', 'tonumber', 'tostring',
+      'string', 'table', 'math', 'json',
+    ]);
+
+    const JS_KEYWORDS = new Set([
+      'async', 'await', 'break', 'case', 'catch', 'class', 'const', 'continue',
+      'default', 'delete', 'do', 'else', 'export', 'extends', 'false', 'finally',
+      'for', 'from', 'function', 'if', 'import', 'in', 'instanceof', 'let', 'new',
+      'null', 'of', 'return', 'static', 'super', 'switch', 'this', 'throw', 'true',
+      'try', 'typeof', 'undefined', 'var', 'void', 'while', 'yield',
+    ]);
+
+    function el(doc, tag, className, text) {
+      const node = doc.createElement(tag);
+      if (className) node.className = className;
+      if (text !== undefined && text !== null) {
+        node.appendChild(doc.createTextNode(String(text)));
+      }
+      return node;
+    }
+
+    function normalizeLang(raw) {
+      const l = String(raw || '').trim().toLowerCase();
+      if (!l) return '';
+      if (l === 'javascript' || l === 'mjs' || l === 'cjs') return 'js';
+      if (l === 'typescript' || l === 'mts') return 'ts';
+      if (l === 'regexp' || l === 're') return 'regex';
+      if (l === 'htm' || l === 'xml' || l === 'svg') return 'html';
+      if (l === 'markdown') return 'md';
+      if (l === 'risuhelper-proposal' || l === 'risu-helper-proposal') return 'proposal';
+      return l;
+    }
+
+    function isSafeHttpUrl(raw) {
+      const str = String(raw || '').trim();
+      if (!/^https?:\/\//i.test(str)) return false;
+      try {
+        const parsed = new URL(str);
+        return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+      } catch {
+        return false;
+      }
+    }
+
+    /**
+     * Lightweight single-pass syntax tokenizer returning `{ type, text }` tokens.
+     * Types map to `.rh-tok-<type>` CSS classes (kw, str, num, cmt, fn, op, add, del, plain).
+     */
+    function tokenizeCode(code, lang) {
+      const src = String(code ?? '');
+      const norm = normalizeLang(lang);
+      if (!src) return [];
+
+      // Diff blocks: line-based coloring (keep newline separate so spans never break gutter line-height)
+      if (norm === 'diff') {
+        const tokens = [];
+        const lines = src.split('\n');
+        for (let i = 0; i < lines.length; i++) {
+          const line = lines[i];
+          let type = 'plain';
+          if (line.startsWith('@@')) type = 'kw';
+          else if (line.startsWith('+++') || line.startsWith('---')) type = 'cmt';
+          else if (line.startsWith('+')) type = 'add';
+          else if (line.startsWith('-')) type = 'del';
+          if (line) tokens.push({ type, text: line });
+          if (i < lines.length - 1) tokens.push({ type: 'plain', text: '\n' });
+        }
+        return tokens;
+      }
+
+      // Regex blocks
+      if (norm === 'regex') {
+        return scanRegexTokens(src, [
+          [/^\\(?:[dDwWsSbBnrt0\\/.+*?^$()[\]{}|]|u[0-9a-fA-F]{4}|x[0-9a-fA-F]{2})/, 'op'],
+          [/^\[(?:\\.|[^\]\\])*\]/, 'str'],
+          [/^\{\d+(?:,\d*)?\}|^[+*?]/, 'num'],
+          [/^[()|]/, 'kw'],
+          [/^[\^$]/, 'fn'],
+        ]);
+      }
+
+      // HTML / XML / Svelte
+      if (norm === 'html' || norm === 'svelte') {
+        return scanRegexTokens(src, [
+          [/^<!--[\s\S]*?-->/, 'cmt'],
+          [/^\{\{[\s\S]*?\}\}/, 'op'],
+          [/^<\/?[a-zA-Z][a-zA-Z0-9:-]*/, 'fn'],
+          [/^\/?>/, 'fn'],
+          [/^"(?:\\.|[^"\\])*"|^'(?:\\.|[^'\\])*'/, 'str'],
+          [/^[a-zA-Z_:@-][a-zA-Z0-9_.:@-]*(?==)/, 'kw'],
+        ]);
+      }
+
+      // CSS
+      if (norm === 'css') {
+        return scanRegexTokens(src, [
+          [/^\/\*[\s\S]*?\*\//, 'cmt'],
+          [/^"(?:\\.|[^"\\])*"|^'(?:\\.|[^'\\])*'/, 'str'],
+          [/^@[a-zA-Z-]+/, 'kw'],
+          [/^#[0-9a-fA-F]{3,8}\b/, 'op'],
+          [/^[a-zA-Z-]+(?=\s*:)/, 'fn'],
+          [/^-?\d+(?:\.\d+)?(?:px|rem|em|vh|vw|dvh|%|ms|s|deg)?\b/, 'num'],
+        ]);
+      }
+
+      // Lua
+      if (norm === 'lua') {
+        return scanRegexTokens(src, [
+          [/^--\[\[[\s\S]*?(?:\]\]|$)/, 'cmt'],
+          [/^--[^\n]*/, 'cmt'],
+          [/^\[\[[\s\S]*?(?:\]\]|$)/, 'str'],
+          [/^"(?:\\.|[^"\\])*"|^'(?:\\.|[^'\\])*'/, 'str'],
+          [/^\{\{[\s\S]*?\}\}/, 'op'],
+          [/^0x[0-9a-fA-F]+|^\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/, 'num'],
+          [/^[a-zA-Z_][a-zA-Z0-9_]*/, (m) => {
+            if (LUA_KEYWORDS.has(m)) return 'kw';
+            if (LUA_RISU_APIS.has(m)) return 'fn';
+            return 'plain';
+          }],
+        ]);
+      }
+
+      // JSON / Streaming RisuHelper proposal block
+      if (norm === 'json' || norm === 'proposal') {
+        return scanRegexTokens(src, [
+          [/^<<<[A-Z_]+>>>/, 'op'],
+          [/^"(?:\\.|[^"\\])*"(?=\s*:)/, 'fn'],
+          [/^"(?:\\.|[^"\\])*"/, 'str'],
+          [/^-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\b/, 'num'],
+          [/^\b(?:true|false|null)\b/, 'kw'],
+        ]);
+      }
+
+      // JavaScript / TypeScript
+      if (norm === 'js' || norm === 'ts') {
+        return scanRegexTokens(src, [
+          [/^\/\*[\s\S]*?(?:\*\/|$)/, 'cmt'],
+          [/^\/\/[^\n]*/, 'cmt'],
+          [/^`(?:\\.|[^`\\])*`|^"(?:\\.|[^"\\])*"|^'(?:\\.|[^'\\])*'/, 'str'],
+          [/^0x[0-9a-fA-F]+|^\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\b/, 'num'],
+          [/^[a-zA-Z_$][a-zA-Z0-9_$]*/, (m) => (JS_KEYWORDS.has(m) ? 'kw' : 'plain')],
+        ]);
+      }
+
+      // CBS / Lorebook / Generic text: highlight RisuAI CBS {{...}} macros & @@decorators
+      return scanRegexTokens(src, [
+        [/^\{\{[\s\S]*?\}\}/, 'op'],
+        [/^@@[a-zA-Z0-9_]+/, 'kw'],
+        [/^"(?:\\.|[^"\\])*"/, 'str'],
+      ]);
+    }
+
+    function scanRegexTokens(src, rules) {
+      const tokens = [];
+      let pos = 0;
+      let plainBuf = '';
+
+      const flushPlain = () => {
+        if (plainBuf) {
+          tokens.push({ type: 'plain', text: plainBuf });
+          plainBuf = '';
+        }
+      };
+
+      while (pos < src.length) {
+        const rest = src.slice(pos);
+        let matched = false;
+        for (const [re, kind] of rules) {
+          const m = rest.match(re);
+          if (m && m[0].length > 0) {
+            const text = m[0];
+            const type = typeof kind === 'function' ? kind(text) : kind;
+            if (type === 'plain') {
+              plainBuf += text;
+            } else {
+              flushPlain();
+              tokens.push({ type, text });
+            }
+            pos += text.length;
+            matched = true;
+            break;
+          }
+        }
+        if (!matched) {
+          plainBuf += src[pos];
+          pos++;
+        }
+      }
+      flushPlain();
+      return tokens;
+    }
+
+    function renderCodeCard(doc, code, lang, { onCopy, meta } = {}) {
+      const norm = normalizeLang(lang);
+      const displayLang = norm === 'proposal' ? 'PROPOSAL' : (norm || 'text').toUpperCase();
+      const card = el(doc, 'div', 'rh-code-card');
+      const lines = String(code ?? '').split('\n');
+      const showGutter = lines.length >= 2;
+
+      const head = el(doc, 'div', 'rh-code-head');
+      const metaWrap = el(doc, 'div', 'rh-code-meta');
+      metaWrap.appendChild(el(doc, 'span', `rh-code-dot${norm ? ` lang-${norm}` : ''}`));
+      metaWrap.appendChild(el(doc, 'span', `rh-code-lang${norm ? ` lang-${norm}` : ''}`, displayLang));
+      if (meta) {
+        metaWrap.appendChild(el(doc, 'span', 'rh-code-file', meta));
+      }
+      if (showGutter) {
+        metaWrap.appendChild(el(doc, 'span', 'rh-code-lines', `${lines.length}줄`));
+      }
+      head.appendChild(metaWrap);
+
+      if (typeof onCopy === 'function') {
+        const copyBtn = el(doc, 'button', 'rh-code-copy', '복사');
+        copyBtn.setAttribute('type', 'button');
+        copyBtn.addEventListener('click', (e) => {
+          if (e?.stopPropagation) e.stopPropagation();
+          onCopy(code);
+        });
+        head.appendChild(copyBtn);
+      }
+      card.appendChild(head);
+
+      const body = el(doc, 'div', showGutter ? 'rh-code-grid' : 'rh-code-single');
+      if (showGutter) {
+        const gutter = el(doc, 'div', 'rh-code-gutter');
+        gutter.setAttribute('aria-hidden', 'true');
+        gutter.appendChild(doc.createTextNode(lines.map((_, i) => String(i + 1)).join('\n')));
+        body.appendChild(gutter);
+      }
+
+      const pre = el(doc, 'pre', 'rh-code-pre');
+      const codeEl = el(doc, 'code', 'rh-code-content');
+      const tokens = tokenizeCode(code, norm);
+      for (const tok of tokens) {
+        if (tok.type === 'plain') {
+          codeEl.appendChild(doc.createTextNode(tok.text));
+        } else {
+          codeEl.appendChild(el(doc, 'span', `rh-tok-${tok.type}`, tok.text));
+        }
+      }
+      pre.appendChild(codeEl);
+      body.appendChild(pre);
+      card.appendChild(body);
+      return card;
+    }
+
+    /**
+     * Parses and appends safe inline Markdown nodes (inline code, links, bold/italic/strike, CBS macros).
+     */
+    function renderInlineMarkdown(doc, parent, text) {
+      const str = String(text ?? '');
+      let pos = 0;
+      let buf = '';
+
+      const flush = () => {
+        if (buf) {
+          parent.appendChild(doc.createTextNode(buf));
+          buf = '';
+        }
+      };
+
+      while (pos < str.length) {
+        const rest = str.slice(pos);
+
+        // 1. Escaped markdown punctuation (\*, \`, \[, etc.)
+        if (rest[0] === '\\' && rest.length >= 2 && /[\\`*_{}[\]()#+\-.!~|>]/.test(rest[1])) {
+          buf += rest[1];
+          pos += 2;
+          continue;
+        }
+
+        // 2. Inline code (`code` or ``code``)
+        if (rest[0] === '`') {
+          const tickMatch = rest.match(/^(`+)/);
+          const ticks = tickMatch[1];
+          const closeIdx = rest.indexOf(ticks, ticks.length);
+          if (closeIdx !== -1) {
+            flush();
+            const inner = rest.slice(ticks.length, closeIdx).trim();
+            parent.appendChild(el(doc, 'code', 'rh-md-code', inner));
+            pos += closeIdx + ticks.length;
+            continue;
+          }
+        }
+
+        // 3. Safe HTTP/HTTPS link: [label](url)
+        if (rest[0] === '[') {
+          const linkMatch = rest.match(/^\[([^\]]+)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/);
+          if (linkMatch) {
+            flush();
+            const label = linkMatch[1];
+            const href = linkMatch[2];
+            if (isSafeHttpUrl(href)) {
+              const a = el(doc, 'a', 'rh-md-link');
+              a.setAttribute('href', href);
+              a.setAttribute('target', '_blank');
+              a.setAttribute('rel', 'noopener noreferrer');
+              renderInlineMarkdown(doc, a, label);
+              parent.appendChild(a);
+            } else {
+              renderInlineMarkdown(doc, parent, label);
+            }
+            pos += linkMatch[0].length;
+            continue;
+          }
+        }
+
+        // 4. RisuAI CBS macro in prose: {{...}}
+        if (rest.startsWith('{{')) {
+          const cbsMatch = rest.match(/^\{\{([^{}\n]{1,120})\}\}/);
+          if (cbsMatch) {
+            flush();
+            parent.appendChild(el(doc, 'span', 'rh-md-cbs', cbsMatch[0]));
+            pos += cbsMatch[0].length;
+            continue;
+          }
+        }
+
+        // 5. Bold + Italic (***text***)
+        if (rest.startsWith('***')) {
+          const m = rest.match(/^\*\*\*([^*\n](?:[\s\S]*?[^*\n])?)\*\*\*/);
+          if (m) {
+            flush();
+            const strong = el(doc, 'strong', 'rh-md-strong');
+            const em = el(doc, 'em', 'rh-md-em');
+            renderInlineMarkdown(doc, em, m[1]);
+            strong.appendChild(em);
+            parent.appendChild(strong);
+            pos += m[0].length;
+            continue;
+          }
+        }
+
+        // 6. Bold (**text** or __text__)
+        if (rest.startsWith('**') || (rest.startsWith('__') && (pos === 0 || !/[a-zA-Z0-9_]/.test(str[pos - 1])))) {
+          const marker = rest.slice(0, 2);
+          const re = marker === '**'
+            ? /^\*\*([^*\n](?:[\s\S]*?[^*\n])?)\*\*/
+            : /^__([^_\n](?:[\s\S]*?[^_\n])?)__(?![a-zA-Z0-9_])/;
+          const m = rest.match(re);
+          if (m) {
+            flush();
+            const strong = el(doc, 'strong', 'rh-md-strong');
+            renderInlineMarkdown(doc, strong, m[1]);
+            parent.appendChild(strong);
+            pos += m[0].length;
+            continue;
+          }
+        }
+
+        // 7. Strikethrough (~~text~~)
+        if (rest.startsWith('~~')) {
+          const m = rest.match(/^~~([^~\n](?:[\s\S]*?[^~\n])?)~~/);
+          if (m) {
+            flush();
+            const del = el(doc, 'del', 'rh-md-del');
+            renderInlineMarkdown(doc, del, m[1]);
+            parent.appendChild(del);
+            pos += m[0].length;
+            continue;
+          }
+        }
+
+        // 8. Italic (*text* or word-bounded _text_)
+        if (rest[0] === '*' && rest[1] !== '*' && rest[1] !== ' ') {
+          const m = rest.match(/^\*([^*\n](?:[^*\n]*?[^*\n\s])?)\*/);
+          if (m) {
+            flush();
+            const em = el(doc, 'em', 'rh-md-em');
+            renderInlineMarkdown(doc, em, m[1]);
+            parent.appendChild(em);
+            pos += m[0].length;
+            continue;
+          }
+        }
+        if (rest[0] === '_' && rest[1] !== '_' && rest[1] !== ' ' && (pos === 0 || !/[a-zA-Z0-9_]/.test(str[pos - 1]))) {
+          const m = rest.match(/^_([^_\n](?:[^_\n]*?[^_\n\s])?)_(?![a-zA-Z0-9_])/);
+          if (m) {
+            flush();
+            const em = el(doc, 'em', 'rh-md-em');
+            renderInlineMarkdown(doc, em, m[1]);
+            parent.appendChild(em);
+            pos += m[0].length;
+            continue;
+          }
+        }
+
+        buf += str[pos];
+        pos++;
+      }
+      flush();
+    }
+
+    function splitTableRow(line) {
+      let trimmed = String(line || '').trim();
+      if (trimmed.startsWith('|')) trimmed = trimmed.slice(1);
+      if (trimmed.endsWith('|') && !trimmed.endsWith('\\|')) trimmed = trimmed.slice(0, -1);
+      const cells = [];
+      let cur = '';
+      for (let i = 0; i < trimmed.length; i++) {
+        if (trimmed[i] === '\\' && trimmed[i + 1] === '|') {
+          cur += '|';
+          i++;
+        } else if (trimmed[i] === '|') {
+          cells.push(cur.trim());
+          cur = '';
+        } else {
+          cur += trimmed[i];
+        }
+      }
+      cells.push(cur.trim());
+      return cells;
+    }
+
+    function isTableSeparatorLine(line) {
+      if (!line || !line.includes('-')) return false;
+      const trimmed = line.trim();
+      if (!trimmed.includes('|')) return false;
+      const cells = splitTableRow(trimmed);
+      return cells.length >= 1 && cells.every(c => /^:?-{2,}:?$/.test(c));
+    }
+
+    function parseTableAlignments(sepLine) {
+      return splitTableRow(sepLine).map(c => {
+        const left = c.startsWith(':');
+        const right = c.endsWith(':');
+        if (left && right) return 'center';
+        if (right) return 'right';
+        return 'left';
+      });
+    }
+
+    function matchFenceOpen(line) {
+      const m = String(line || '').match(/^[ \t]*(`{3,}|~{3,})([^\n]*)$/);
+      if (!m) return null;
+      const fenceChar = m[1][0];
+      const info = m[2].trim();
+      // CommonMark: backtick fence info strings cannot contain backticks (prevents inline ```code``` false match)
+      if (fenceChar === '`' && info.includes('`')) return null;
+      const parts = info ? info.split(/\s+/) : [];
+      const rawLang = parts[0] || '';
+      const langParts = rawLang.split(':');
+      const lang = /^[a-zA-Z0-9_+-]+$/.test(langParts[0]) ? langParts[0] : '';
+      const colonMeta = langParts.length > 1 ? langParts.slice(1).join(':') : '';
+      const restMeta = parts.slice(1).join(' ');
+      const meta = [colonMeta, restMeta].filter(Boolean).join(' ').replace(/^title=["']?([^"']+)["']?$/i, '$1');
+      return { fenceChar, fenceLen: m[1].length, lang, meta };
+    }
+
+    function isBlockBoundary(lines, i) {
+      const line = lines[i];
+      if (!line || !line.trim()) return true;
+      if (matchFenceOpen(line)) return true;
+      if (/^[ \t]*#{1,6}\s+/.test(line)) return true;
+      if (/^[ \t]*([-*_])(?:\s*\1){2,}[ \t]*$/.test(line)) return true;
+      if (/^[ \t]*>\s?/.test(line)) return true;
+      if (/^[ \t]*(?:[-*+]|\d+\.)\s+/.test(line)) return true;
+      if (line.includes('|') && i + 1 < lines.length && isTableSeparatorLine(lines[i + 1])) return true;
+      return false;
+    }
+
+    /**
+     * Renders full block + inline Markdown safely into `container` using DOM nodes only.
+     */
+    function renderMarkdown(doc, container, rawText, options = {}) {
+      const normalized = String(rawText ?? '').replace(/\r\n/g, '\n').trim();
+      if (!normalized) return;
+
+      const root = el(doc, 'div', 'rh-md');
+      const lines = normalized.split('\n');
+      let i = 0;
+
+      while (i < lines.length) {
+        const line = lines[i];
+
+        // Blank line
+        if (!line.trim()) {
+          i++;
+          continue;
+        }
+
+        // 1. Fenced code block (``` or ~~~, handles unclosed streaming blocks gracefully)
+        const fenceOpen = matchFenceOpen(line);
+        if (fenceOpen) {
+          const { fenceChar, fenceLen, lang, meta } = fenceOpen;
+          const closeRe = new RegExp(`^[ \\t]*${fenceChar}{${fenceLen},}[ \\t]*$`);
+          const codeLines = [];
+          i++;
+          while (i < lines.length && !closeRe.test(lines[i])) {
+            codeLines.push(lines[i]);
+            i++;
+          }
+          if (i < lines.length && closeRe.test(lines[i])) i++;
+          root.appendChild(renderCodeCard(doc, codeLines.join('\n'), lang, { ...options, meta }));
+          continue;
+        }
+
+        // 2. Headings (# to ######, preserves trailing # like "C#" unless preceded by whitespace)
+        const heading = line.match(/^[ \t]*(#{1,6})\s+(.+?)(?:[ \t]+#+[ \t]*)?$/);
+        if (heading) {
+          const level = heading[1].length;
+          const hEl = el(doc, `h${level}`, `rh-md-h${level}`);
+          renderInlineMarkdown(doc, hEl, heading[2].trim());
+          root.appendChild(hEl);
+          i++;
+          continue;
+        }
+
+        // 3. Horizontal rule
+        if (/^[ \t]*([-*_])(?:\s*\1){2,}[ \t]*$/.test(line)) {
+          root.appendChild(el(doc, 'hr', 'rh-md-hr'));
+          i++;
+          continue;
+        }
+
+        // 4. Blockquote / GitHub Callout (> [!NOTE], > [!TIP], > [!WARNING], etc.)
+        if (/^[ \t]*>\s?/.test(line)) {
+          const quoteLines = [];
+          while (i < lines.length && /^[ \t]*>\s?/.test(lines[i])) {
+            quoteLines.push(lines[i].replace(/^[ \t]*>\s?/, ''));
+            i++;
+          }
+          const calloutMatch = quoteLines[0]?.trim().match(/^\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]$/i);
+          if (calloutMatch) {
+            const meta = CALLOUT_META[calloutMatch[1].toUpperCase()] || CALLOUT_META.NOTE;
+            const box = el(doc, 'div', `rh-md-callout callout-${meta.cls}`);
+            box.appendChild(el(doc, 'div', 'rh-md-callout-title', meta.label));
+            const bodyText = quoteLines.slice(1).join('\n').trim();
+            if (bodyText) renderMarkdown(doc, box, bodyText, options);
+            root.appendChild(box);
+          } else {
+            const bq = el(doc, 'blockquote', 'rh-md-quote');
+            renderMarkdown(doc, bq, quoteLines.join('\n'), options);
+            root.appendChild(bq);
+          }
+          continue;
+        }
+
+        // 5. Markdown Table
+        if (line.includes('|') && i + 1 < lines.length && isTableSeparatorLine(lines[i + 1])) {
+          const headers = splitTableRow(line);
+          const aligns = parseTableAlignments(lines[i + 1]);
+          i += 2;
+          const rows = [];
+          while (i < lines.length && lines[i].trim() && lines[i].includes('|')) {
+            rows.push(splitTableRow(lines[i]));
+            i++;
+          }
+          const wrap = el(doc, 'div', 'rh-md-table-wrap');
+          const table = el(doc, 'table', 'rh-md-table');
+          const thead = el(doc, 'thead');
+          const headTr = el(doc, 'tr');
+          headers.forEach((cell, idx) => {
+            const th = el(doc, 'th');
+            if (aligns[idx] && aligns[idx] !== 'left') th.setAttribute('style', `text-align:${aligns[idx]};`);
+            renderInlineMarkdown(doc, th, cell);
+            headTr.appendChild(th);
+          });
+          thead.appendChild(headTr);
+          table.appendChild(thead);
+
+          if (rows.length > 0) {
+            const tbody = el(doc, 'tbody');
+            for (const r of rows) {
+              const tr = el(doc, 'tr');
+              for (let c = 0; c < headers.length; c++) {
+                const td = el(doc, 'td');
+                if (aligns[c] && aligns[c] !== 'left') td.setAttribute('style', `text-align:${aligns[c]};`);
+                renderInlineMarkdown(doc, td, r[c] ?? '');
+                tr.appendChild(td);
+              }
+              tbody.appendChild(tr);
+            }
+            table.appendChild(tbody);
+          }
+          wrap.appendChild(table);
+          root.appendChild(wrap);
+          continue;
+        }
+
+        // 6. Ordered or Unordered Lists (with optional task checkboxes & simple 1-level nesting)
+        const listMatch = line.match(/^([ \t]*)(?:([-*+])|(\d+)\.)\s+(.*)$/);
+        if (listMatch) {
+          const baseIndent = listMatch[1].length;
+          const isOrdered = Boolean(listMatch[3]);
+          const listEl = el(doc, isOrdered ? 'ol' : 'ul', `rh-md-list${isOrdered ? ' ordered' : ''}`);
+          let lastLi = null;
+
+          while (i < lines.length) {
+            const m = lines[i].match(/^([ \t]*)(?:([-*+])|(\d+)\.)\s+(.*)$/);
+            if (!m) break;
+            const indent = m[1].length;
+            const itemOrdered = Boolean(m[3]);
+            const itemText = m[4];
+
+            // If sibling switches list type at the same base indent, close current list
+            if (indent <= baseIndent && itemOrdered !== isOrdered) break;
+
+            if (indent > baseIndent && lastLi) {
+              let subList = lastLi._rhSubList;
+              if (!subList) {
+                subList = el(doc, itemOrdered ? 'ol' : 'ul', `rh-md-list nested${itemOrdered ? ' ordered' : ''}`);
+                lastLi.appendChild(subList);
+                lastLi._rhSubList = subList;
+              }
+              subList.appendChild(buildListItem(doc, itemText));
+            } else {
+              const li = buildListItem(doc, itemText);
+              listEl.appendChild(li);
+              lastLi = li;
+            }
+            i++;
+          }
+          root.appendChild(listEl);
+          continue;
+        }
+
+        // 7. Paragraph (groups consecutive prose lines until next block boundary)
+        const paraLines = [];
+        while (i < lines.length && !isBlockBoundary(lines, i)) {
+          paraLines.push(lines[i]);
+          i++;
+        }
+        if (paraLines.length > 0) {
+          const p = el(doc, 'p', 'rh-md-p');
+          paraLines.forEach((pLine, idx) => {
+            if (idx > 0) p.appendChild(doc.createElement('br'));
+            renderInlineMarkdown(doc, p, pLine);
+          });
+          root.appendChild(p);
+        } else {
+          // Safety advance to guarantee termination
+          i++;
+        }
+      }
+
+      container.appendChild(root);
+    }
+
+    function buildListItem(doc, rawItemText) {
+      const li = el(doc, 'li', 'rh-md-li');
+      const taskMatch = rawItemText.match(/^\[([ xX])\]\s+(.*)$/);
+      if (taskMatch) {
+        const done = taskMatch[1].toLowerCase() === 'x';
+        li.className = `rh-md-li task${done ? ' done' : ''}`;
+        li.appendChild(el(doc, 'span', `rh-md-check${done ? ' done' : ''}`, done ? '✓' : ''));
+        const span = el(doc, 'span', 'rh-md-task-text');
+        renderInlineMarkdown(doc, span, taskMatch[2]);
+        li.appendChild(span);
+      } else {
+        renderInlineMarkdown(doc, li, rawItemText);
+      }
+      return li;
+    }
+
+      __exports.tokenizeCode = tokenizeCode;
+      __exports.renderInlineMarkdown = renderInlineMarkdown;
+      __exports.renderMarkdown = renderMarkdown;
+
+  },
   "src/ui.js"(__require, __exports) {
     const { VERSION, STORAGE_KEY, PRESET_STORAGE_KEY, CHAR_FIELD_META, SCREEN_LABELS } = __require("src/version.js");
     const { STYLES } = __require("src/style.js");
@@ -7190,6 +8413,7 @@
     const { getQuickPromptsForContext } = __require("src/knowledge.js");
     const { newPresetState, validatePresetState, assembleRisuHelperMessages } = __require("src/preset-engine.js");
     const { renderPresetPanel } = __require("src/preset-ui.js");
+    const { renderMarkdown } = __require("src/markdown.js");
 
     const DEFAULT_SETTINGS = {
       modelMode: 'model',
@@ -7238,22 +8462,6 @@
         }
       }
       return el;
-    }
-
-    /**
-     * Safely renders assistant markdown prose (headings, code blocks, inline text) using DOM nodes only.
-     */
-    function renderSafeProse(doc, container, text) {
-      const parts = String(text || '').split(/(```[\s\S]*?```)/g);
-      for (const part of parts) {
-        if (!part) continue;
-        if (part.startsWith('```') && part.endsWith('```')) {
-          const inner = part.slice(3, -3).replace(/^[a-zA-Z0-9_-]*\n/, '');
-          container.appendChild(h(doc, 'pre', { class: 'rh-code-block' }, inner));
-        } else {
-          container.appendChild(h(doc, 'div', {}, part.trim()));
-        }
-      }
     }
 
     class RisuHelperApp {
@@ -7706,13 +8914,30 @@
         this.render();
         this.scrollChatToBottom();
 
+        let lastChunkRenderAt = 0;
+        let chunkRenderTimer = null;
+        const flushChunkRender = () => {
+          chunkRenderTimer = null;
+          lastChunkRenderAt = Date.now();
+          this.render();
+          this.scrollChatToBottom();
+        };
+
         const job = {
           cancelled: false,
           onChunk: (partial) => {
             assistantMsg.content = partial;
             assistantMsg.rawText = partial;
-            this.render();
-            this.scrollChatToBottom();
+            const elapsed = Date.now() - lastChunkRenderAt;
+            if (elapsed >= 45) {
+              if (chunkRenderTimer) {
+                clearTimeout(chunkRenderTimer);
+                chunkRenderTimer = null;
+              }
+              flushChunkRender();
+            } else if (!chunkRenderTimer) {
+              chunkRenderTimer = setTimeout(flushChunkRender, 45 - elapsed);
+            }
           },
         };
         this.currentJob = job;
@@ -7759,6 +8984,7 @@
           assistantMsg.content = '';
           assistantMsg.error = err.message || String(err);
         } finally {
+          if (chunkRenderTimer) clearTimeout(chunkRenderTimer);
           this.busy = false;
           this.currentJob = null;
           this.render();
@@ -8473,11 +9699,39 @@
               msgWrap.appendChild(h(doc, 'div', { class: 'rh-bubble' }, msg.content));
             } else {
               const bubble = h(doc, 'div', { class: 'rh-bubble' });
+              const barLeft = msg.streaming
+                ? h(doc, 'span', { class: 'rh-msg-badge' }, h(doc, 'span', { class: 'rh-streaming-dot' }), '응답 생성 중...')
+                : h(doc, 'span', { class: 'rh-msg-badge' }, msg.error ? '오류' : (msg.rawView ? 'RisuHelper · 원문' : 'RisuHelper'));
+              const barActions = (!msg.error && !msg.streaming && msg.content)
+                ? h(doc, 'div', { class: 'rh-msg-actions' },
+                    h(doc, 'button', {
+                      class: `rh-msg-act${msg.rawView ? ' active' : ''}`,
+                      type: 'button',
+                      onclick: () => {
+                        msg.rawView = !msg.rawView;
+                        this.render();
+                      },
+                    }, msg.rawView ? '서식 보기' : '원문 보기'),
+                    h(doc, 'button', {
+                      class: 'rh-msg-act',
+                      type: 'button',
+                      onclick: () => this.copyText(msg.content),
+                    }, '복사')
+                  )
+                : null;
+              bubble.appendChild(h(doc, 'div', { class: 'rh-msg-bar' }, barLeft, barActions));
+
+              const body = h(doc, 'div', { class: 'rh-msg-body' });
               if (msg.error) {
-                bubble.appendChild(h(doc, 'div', { class: 'rh-banner error' }, `오류: ${msg.error}`));
+                body.appendChild(h(doc, 'div', { class: 'rh-banner error' }, `오류: ${msg.error}`));
+              } else if (msg.rawView) {
+                body.appendChild(h(doc, 'pre', { class: 'rh-raw-pre' }, msg.content));
               } else {
-                renderSafeProse(doc, bubble, msg.content);
+                renderMarkdown(doc, body, msg.content, {
+                  onCopy: (codeText) => this.copyText(codeText),
+                });
               }
+              bubble.appendChild(body);
               msgWrap.appendChild(bubble);
 
               for (const err of msg.parseErrors || []) {

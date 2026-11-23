@@ -7,6 +7,7 @@ import { buildDiffPreview } from './text-edits.js';
 import { getQuickPromptsForContext } from './knowledge.js';
 import { newPresetState, validatePresetState, assembleRisuHelperMessages } from './preset-engine.js';
 import { renderPresetPanel } from './preset-ui.js';
+import { renderMarkdown } from './markdown.js';
 
 const DEFAULT_SETTINGS = {
   modelMode: 'model',
@@ -55,22 +56,6 @@ function h(doc, tag, props = {}, ...children) {
     }
   }
   return el;
-}
-
-/**
- * Safely renders assistant markdown prose (headings, code blocks, inline text) using DOM nodes only.
- */
-function renderSafeProse(doc, container, text) {
-  const parts = String(text || '').split(/(```[\s\S]*?```)/g);
-  for (const part of parts) {
-    if (!part) continue;
-    if (part.startsWith('```') && part.endsWith('```')) {
-      const inner = part.slice(3, -3).replace(/^[a-zA-Z0-9_-]*\n/, '');
-      container.appendChild(h(doc, 'pre', { class: 'rh-code-block' }, inner));
-    } else {
-      container.appendChild(h(doc, 'div', {}, part.trim()));
-    }
-  }
 }
 
 class RisuHelperApp {
@@ -523,13 +508,30 @@ class RisuHelperApp {
     this.render();
     this.scrollChatToBottom();
 
+    let lastChunkRenderAt = 0;
+    let chunkRenderTimer = null;
+    const flushChunkRender = () => {
+      chunkRenderTimer = null;
+      lastChunkRenderAt = Date.now();
+      this.render();
+      this.scrollChatToBottom();
+    };
+
     const job = {
       cancelled: false,
       onChunk: (partial) => {
         assistantMsg.content = partial;
         assistantMsg.rawText = partial;
-        this.render();
-        this.scrollChatToBottom();
+        const elapsed = Date.now() - lastChunkRenderAt;
+        if (elapsed >= 45) {
+          if (chunkRenderTimer) {
+            clearTimeout(chunkRenderTimer);
+            chunkRenderTimer = null;
+          }
+          flushChunkRender();
+        } else if (!chunkRenderTimer) {
+          chunkRenderTimer = setTimeout(flushChunkRender, 45 - elapsed);
+        }
       },
     };
     this.currentJob = job;
@@ -576,6 +578,7 @@ class RisuHelperApp {
       assistantMsg.content = '';
       assistantMsg.error = err.message || String(err);
     } finally {
+      if (chunkRenderTimer) clearTimeout(chunkRenderTimer);
       this.busy = false;
       this.currentJob = null;
       this.render();
@@ -1290,11 +1293,39 @@ class RisuHelperApp {
           msgWrap.appendChild(h(doc, 'div', { class: 'rh-bubble' }, msg.content));
         } else {
           const bubble = h(doc, 'div', { class: 'rh-bubble' });
+          const barLeft = msg.streaming
+            ? h(doc, 'span', { class: 'rh-msg-badge' }, h(doc, 'span', { class: 'rh-streaming-dot' }), '응답 생성 중...')
+            : h(doc, 'span', { class: 'rh-msg-badge' }, msg.error ? '오류' : (msg.rawView ? 'RisuHelper · 원문' : 'RisuHelper'));
+          const barActions = (!msg.error && !msg.streaming && msg.content)
+            ? h(doc, 'div', { class: 'rh-msg-actions' },
+                h(doc, 'button', {
+                  class: `rh-msg-act${msg.rawView ? ' active' : ''}`,
+                  type: 'button',
+                  onclick: () => {
+                    msg.rawView = !msg.rawView;
+                    this.render();
+                  },
+                }, msg.rawView ? '서식 보기' : '원문 보기'),
+                h(doc, 'button', {
+                  class: 'rh-msg-act',
+                  type: 'button',
+                  onclick: () => this.copyText(msg.content),
+                }, '복사')
+              )
+            : null;
+          bubble.appendChild(h(doc, 'div', { class: 'rh-msg-bar' }, barLeft, barActions));
+
+          const body = h(doc, 'div', { class: 'rh-msg-body' });
           if (msg.error) {
-            bubble.appendChild(h(doc, 'div', { class: 'rh-banner error' }, `오류: ${msg.error}`));
+            body.appendChild(h(doc, 'div', { class: 'rh-banner error' }, `오류: ${msg.error}`));
+          } else if (msg.rawView) {
+            body.appendChild(h(doc, 'pre', { class: 'rh-raw-pre' }, msg.content));
           } else {
-            renderSafeProse(doc, bubble, msg.content);
+            renderMarkdown(doc, body, msg.content, {
+              onCopy: (codeText) => this.copyText(codeText),
+            });
           }
+          bubble.appendChild(body);
           msgWrap.appendChild(bubble);
 
           for (const err of msg.parseErrors || []) {
