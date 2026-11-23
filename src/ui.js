@@ -8,6 +8,7 @@ import { getQuickPromptsForContext } from './knowledge.js';
 import { newPresetState, validatePresetState, assembleRisuHelperMessages } from './preset-engine.js';
 import { renderPresetPanel } from './preset-ui.js';
 import { renderMarkdown } from './markdown.js';
+import { planGreetingContext, wantsGreetingText } from './greetings.js';
 
 const DEFAULT_SETTINGS = {
   modelMode: 'model',
@@ -50,6 +51,8 @@ const ACTION_LABELS = {
   create_persona: '새 페르소나 생성',
   update_persona: '페르소나 수정',
   update_config: '설정 변경',
+  update_greeting: '첫 메시지 수정',
+  create_greeting: '추가 첫 메시지 생성',
 };
 
 function h(doc, tag, props = {}, ...children) {
@@ -579,17 +582,28 @@ class RisuHelperApp {
     }, 2800);
   }
 
-  async gatherExtraContext(ctx) {
+  async gatherExtraContext(ctx, userInput = '') {
     const extra = {};
-    if (this.settings.includeCharSummary || this.settings.includeLoreSummary) {
+    // First messages: full text when the request is likely about them (chat screen, greeting
+    // target, or the wording), otherwise short previews as part of the character summary.
+    const wantGreetingText = wantsGreetingText(ctx, userInput);
+    if (this.settings.includeCharSummary || this.settings.includeLoreSummary || wantGreetingText) {
       try {
         const { char } = await this.adapter.readActiveCharacter();
         if (char) {
+          if (wantGreetingText || this.settings.includeCharSummary) {
+            let chat = null;
+            try {
+              chat = (await this.adapter.readActiveChat()).chat;
+            } catch {}
+            const plan = planGreetingContext(char, chat, { includeFullText: wantGreetingText });
+            extra.greetings = { activeIndex: plan.activeIndex, greetings: plan.greetings };
+            extra.greetingsShownFull = plan.shownFull;
+          }
           if (this.settings.includeCharSummary) {
             extra.charSummary = {
               name: char.name || '',
               descPreview: String(char.desc || '').slice(0, 500),
-              firstMessagePreview: String(char.firstMessage || '').slice(0, 300),
               globalLoreCount: char.globalLore?.length ?? 0,
               regexCount: char.customscript?.length ?? 0,
               hasLua: char.triggerscript?.[0]?.effect?.[0]?.type === 'triggerlua',
@@ -654,7 +668,7 @@ class RisuHelperApp {
   }
 
   async assembleRequestPayload(ctx, historyMessages, userInput) {
-    const extraContext = await this.gatherExtraContext(ctx);
+    const extraContext = await this.gatherExtraContext(ctx, userInput);
     const directMessages = buildConversationMessages({
       context: ctx,
       snapshot: this.activeSnapshot,
@@ -682,7 +696,7 @@ class RisuHelperApp {
       } catch {}
     }
 
-    return assembleRisuHelperMessages({
+    const assembled = assembleRisuHelperMessages({
       presetState: this.presetState,
       directMessages,
       activeChar,
@@ -691,6 +705,8 @@ class RisuHelperApp {
       history: historyMessages,
       maxHistoryTurns: this.settings.maxHistoryTurns,
     });
+    assembled.greetingsShownFull = extraContext.greetingsShownFull || [];
+    return assembled;
   }
 
   async refreshPresetPreview() {
@@ -780,6 +796,8 @@ class RisuHelperApp {
 
       // Dry-run each proposal and pin the target + host binding at generation time
       const pinnedCtx = JSON.parse(JSON.stringify(ctx));
+      // Which first messages the model saw in full for this request (guards whole-text overwrites).
+      pinnedCtx.greetingsShownFull = assembled.greetingsShownFull || [];
       assistantMsg.proposals = [];
       for (const prop of parsed.proposals) {
         const preview = await this.adapter.previewProposal(prop, pinnedCtx);
@@ -1377,17 +1395,21 @@ class RisuHelperApp {
     }
 
     if (ctx.targetKind === 'char_alt_greeting' && Array.isArray(this.activeSnapshot.altGreetingsSummary) && this.activeSnapshot.altGreetingsSummary.length > 0) {
-      const selectedIdx = ctx.greetingIndex ?? this.activeSnapshot.target?.greetingIndex ?? 0;
+      // Nothing is selected until the user picks an item: a missing index must not look like #1.
+      const snapIdx = this.activeSnapshot.target?.greetingIndex;
+      const selectedIdx = Number.isInteger(ctx.greetingIndex) ? ctx.greetingIndex : (Number.isInteger(snapIdx) ? snapIdx : null);
       return h(doc, 'select', {
         class: 'rh-select',
         onchange: async (e) => {
           const base = this.manualTarget || { ...ctx };
-          base.greetingIndex = Number(e.target.value);
+          base.greetingIndex = e.target.value === '' ? null : Number(e.target.value);
           this.manualTarget = base;
           await this.refreshContextSnapshot();
           this.render();
         },
       },
+        h(doc, 'option', { value: '', selected: selectedIdx === null },
+          '고칠 항목 선택 (새로 만들려면 선택하지 말고 "새로 만들어줘"라고 요청)'),
         ...this.activeSnapshot.altGreetingsSummary.map(item =>
           h(doc, 'option', {
             value: String(item.index),

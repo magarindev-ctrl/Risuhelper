@@ -268,3 +268,40 @@ test('findUnknownProposalKeys lists properties outside an action schema and acce
   ];
   for (const p of documented) assert.deepEqual(findUnknownProposalKeys(p), [], p.action);
 });
+
+test('greeting actions are part of the protocol: validated, parsed from raw sections, and described to the model', async () => {
+  const { findUnknownProposalKeys } = await import('../src/llm.js');
+  assert.equal(validateProposal({ action: 'update_greeting', greetingIndex: -1, content: 'x' }), null);
+  assert.equal(validateProposal({ action: 'update_greeting', greetingIndex: 0, edits: [{ before: 'a', after: 'b' }] }), null);
+  assert.ok(validateProposal({ action: 'update_greeting', content: 'x' }), 'greetingIndex is required');
+  assert.ok(validateProposal({ action: 'update_greeting', greetingIndex: -2, content: 'x' }));
+  assert.ok(validateProposal({ action: 'update_greeting', greetingIndex: 0 }), 'needs edits or content');
+  assert.equal(validateProposal({ action: 'create_greeting', content: '새 인사' }), null);
+  assert.ok(validateProposal({ action: 'create_greeting', content: '' }));
+  assert.deepEqual(findUnknownProposalKeys({ action: 'update_greeting', title: 't', greetingIndex: -1, content: 'x' }), []);
+  assert.deepEqual(findUnknownProposalKeys({ action: 'create_greeting', title: 't', content: 'x', mood: 'happy' }), ['mood']);
+
+  const parsed = parseAssistantReply([
+    '첫 메시지를 고칩니다.',
+    '```risuhelper-proposal',
+    '{"action":"update_greeting","title":"첫 메시지 수정","greetingIndex":-1}',
+    '<<<CONTENT>>>',
+    '"따옴표"가 있는 새 첫 메시지',
+    '<<<END>>>',
+    '```',
+  ].join('\n'));
+  assert.equal(parsed.errors.length, 0);
+  assert.equal(parsed.proposals[0].content, '"따옴표"가 있는 새 첫 메시지');
+
+  const msgs = buildConversationMessages({
+    context: { screen: 'chat', targetKind: 'general' },
+    snapshot: { label: '채팅 입력 화면', content: '', target: { targetKind: 'general' } },
+    extraContext: { greetings: { activeIndex: -1, greetings: [{ index: -1, active: true, length: 21, text: 'FULL-FIRST-MESSAGE-TEXT', truncated: false }] } },
+    history: [],
+    userInput: '첫 메시지 고쳐줘',
+  });
+  const sys = msgs[0].content;
+  assert.ok(sys.includes('FULL-FIRST-MESSAGE-TEXT'));
+  assert.ok(sys.includes('update_greeting'));
+  assert.ok(sys.includes('create_greeting'));
+});

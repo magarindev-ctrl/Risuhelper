@@ -1308,17 +1308,19 @@ class HostAdapter {
       const { char, charIndex } = await this.readActiveCharacter();
       if (!char) return { ok: false, reason: '선택된 캐릭터가 없습니다.', content: '' };
       const list = Array.isArray(char.alternateGreetings) ? char.alternateGreetings : [];
+      // No guessing: without a valid index nothing is selected. Falling back to the first
+      // greeting would turn "write a new one" into overwriting an existing greeting.
       const idx =
         Number.isInteger(t.greetingIndex) && t.greetingIndex >= 0 && t.greetingIndex < list.length
           ? t.greetingIndex
-          : (list.length > 0 ? 0 : null);
+          : null;
       return {
         ok: true,
         target: { ...t, fieldKey: 'alternateGreetings', greetingIndex: idx },
         hostBinding: { charIndex, greetingIndex: idx, ...getCharIdentity(char) },
         label: idx !== null
           ? `캐릭터 · 추가 첫 메시지 #${idx + 1} (${char.name || '무제'})`
-          : `캐릭터 · 추가 첫 메시지 (없음 · ${char.name || '무제'})`,
+          : `캐릭터 · 추가 첫 메시지 (항목 미선택 · 현재 ${list.length}개 · ${char.name || '무제'})`,
         content: idx !== null ? String(list[idx] ?? '') : '',
         greetingCount: list.length,
         altGreetingsSummary: list.slice(0, 40).map((g, i) => ({
@@ -2008,6 +2010,14 @@ class HostAdapter {
       }
     }
 
+    if (proposal.action === 'update_greeting' && proposal.greetingIndex !== -1) {
+      const { char } = await this.readActiveCharacter();
+      const list = Array.isArray(char?.alternateGreetings) ? char.alternateGreetings : [];
+      if (!Number.isInteger(proposal.greetingIndex) || proposal.greetingIndex < 0 || proposal.greetingIndex >= list.length) {
+        return `수정할 추가 첫 메시지 #${Number(proposal.greetingIndex) + 1}을(를) 찾을 수 없습니다. (현재 ${list.length}개) 새로 만들려면 create_greeting을 사용해 주세요.`;
+      }
+    }
+
     if (proposal.action === 'upsert_regex' && proposal.regexIndex !== undefined && proposal.regexIndex !== null) {
       const scope = proposal.scope || (target?.targetKind === 'module_regex' ? 'module' : 'character');
       let list = [];
@@ -2099,7 +2109,7 @@ class HostAdapter {
       if (kind === 'char_alt_greeting' && !Number.isInteger(snap.target?.greetingIndex)) {
         return {
           ok: false,
-          error: '수정할 추가 첫 메시지 항목이 없습니다. RisuAI 캐릭터 고급 설정에서 추가 첫 메시지를 하나 이상 만든 뒤 시도해 주세요.',
+          error: '수정할 추가 첫 메시지 항목이 선택되지 않았습니다. 상단에서 고칠 항목을 고르거나, 새 항목을 만들려면 "추가 첫 메시지를 새로 만들어줘"라고 요청해 주세요(create_greeting).',
           label: snap.label,
           target: snap.target,
         };
@@ -2422,6 +2432,47 @@ class HostAdapter {
       };
     }
 
+    if (proposal.action === 'update_greeting') {
+      const gTarget = this._greetingTarget(proposal);
+      const snap = await this.readTargetSnapshot(gTarget);
+      if (!snap.ok) return { ok: false, error: snap.reason };
+      const before = String(snap.content ?? '');
+      const guardError = this._greetingOverwriteError(proposal, target, before);
+      if (guardError) return { ok: false, error: guardError, before, label: snap.label };
+      try {
+        const after = Array.isArray(proposal.edits) && proposal.edits.length > 0
+          ? applyTextEdits(before, proposal.edits, snap.label)
+          : String(proposal.content ?? '');
+        return {
+          ok: true,
+          before,
+          after,
+          label: snap.label,
+          target: { ...snap.target, greetingsShownFull: target.greetingsShownFull },
+          hostBinding: snap.hostBinding,
+          warning: proposal.greetingIndex === -1
+            ? '기본 첫 메시지는 이 캐릭터의 모든 채팅에 공통으로 적용됩니다.'
+            : null,
+        };
+      } catch (err) {
+        return { ok: false, error: err.message, before, label: snap.label };
+      }
+    }
+
+    if (proposal.action === 'create_greeting') {
+      const { char, charIndex } = await this.readActiveCharacter();
+      if (!char) return { ok: false, error: '선택된 캐릭터가 없습니다.' };
+      const count = Array.isArray(char.alternateGreetings) ? char.alternateGreetings.length : 0;
+      return {
+        ok: true,
+        before: '',
+        after: String(proposal.content ?? ''),
+        label: `캐릭터 · 추가 첫 메시지 #${count + 1} (새로 추가 · ${char.name || '무제'})`,
+        target: { targetKind: 'char_alt_greeting', fieldKey: 'alternateGreetings' },
+        hostBinding: { charIndex, ...getCharIdentity(char) },
+      };
+    }
+
     if (proposal.action === 'update_config') {
       const cfg = await this.readAllowedConfig();
       if (!cfg) return { ok: false, error: DB_PERMISSION_ERROR };
@@ -2477,6 +2528,10 @@ class HostAdapter {
         return await this._applyUpdatePersona(proposal, target, options);
       case 'update_config':
         return await this._applyUpdateConfig(proposal);
+      case 'update_greeting':
+        return await this._applyUpdateGreeting(proposal, target, options);
+      case 'create_greeting':
+        return await this._applyCreateGreeting(proposal, target, options);
       default:
         throw new Error(`지원하지 않는 작업 종류입니다: ${proposal.action}`);
     }
@@ -2652,6 +2707,57 @@ class HostAdapter {
     }
 
     throw new Error(`현재 대상(${kind || '없음'})에는 직접 텍스트 적용을 지원하지 않습니다. 상단에서 대상을 선택해 주세요.`);
+  }
+
+  /** Where a greeting lives: index -1 is the default first message, n >= 0 an alternate greeting. */
+  _greetingTarget(proposal) {
+    return proposal.greetingIndex === -1
+      ? { targetKind: 'char_field', fieldKey: 'firstMessage' }
+      : { targetKind: 'char_alt_greeting', fieldKey: 'alternateGreetings', greetingIndex: proposal.greetingIndex };
+  }
+
+  /**
+   * A whole-text replacement is only safe when the model was shown the whole greeting.
+   * `target.greetingsShownFull` lists the greeting indices that were sent in full for this
+   * request (src/greetings.js); partial edits are exact-match and therefore always safe.
+   */
+  _greetingOverwriteError(proposal, target, before) {
+    const isOverwrite = !(Array.isArray(proposal.edits) && proposal.edits.length > 0);
+    if (!isOverwrite || before.length === 0) return null;
+    const shown = Array.isArray(target?.greetingsShownFull) ? target.greetingsShownFull : [];
+    if (!shown.includes(proposal.greetingIndex)) {
+      return '이 첫 메시지는 전문이 모델에 전달되지 않은 상태(앞부분 미리보기만 전달)라, 뒷부분 유실을 막기 위해 전체 덮어쓰기를 차단했습니다. ' +
+        '보이는 구간의 부분 편집(edits)을 쓰거나, 상단 대상을 해당 첫 메시지로 고른 뒤 다시 요청해 주세요.';
+    }
+    return this._checkTruncationGuard(before, '첫 메시지 전체 덮어쓰기');
+  }
+
+  async _applyUpdateGreeting(proposal, target, options = {}) {
+    const gTarget = this._greetingTarget(proposal);
+    const snap = await this.readTargetSnapshot(gTarget);
+    if (!snap.ok) throw new Error(snap.reason);
+    const guardError = this._greetingOverwriteError(proposal, target, String(snap.content ?? ''));
+    if (guardError) throw new Error(guardError);
+    const hasEdits = Array.isArray(proposal.edits) && proposal.edits.length > 0;
+    return await this._applyTextTarget(
+      hasEdits ? { action: 'patch_text', edits: proposal.edits } : { action: 'replace_text', content: proposal.content },
+      gTarget,
+      options
+    );
+  }
+
+  async _applyCreateGreeting(proposal, target, options = {}) {
+    const opened = await this._openScope('character', proposal, target, options);
+    if (!Array.isArray(opened.root.alternateGreetings)) opened.root.alternateGreetings = [];
+    opened.root.alternateGreetings.push(String(proposal.content ?? ''));
+    const number = opened.root.alternateGreetings.length;
+    const undoId = await opened.commit(`추가 첫 메시지 #${number} 생성`);
+    return {
+      ok: true,
+      undoId,
+      greetingIndex: number - 1,
+      summary: `추가 첫 메시지 #${number}을(를) 새로 만들었습니다. 채팅 화면의 첫 메시지 좌우 화살표로 전환할 수 있습니다.`,
+    };
   }
 
   /**

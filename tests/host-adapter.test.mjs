@@ -1375,3 +1375,98 @@ test('partial failure while undoing a group still notifies onUndoChange for reco
   assert.equal(adapter.undoStack.length, 1, 'only the un-reverted char record remains');
   assert.ok(undoEvents > beforeEvents, 'onUndoChange must fire in finally so storage stays in sync');
 });
+
+// --- First message / alternate greetings without selecting them as the target ---
+
+function createGreetingHost() {
+  const host = createMockHost();
+  host.state.character.firstMessage = '안녕, 여행자. 오늘은 별이 밝아.';
+  host.state.character.alternateGreetings = ['ALT ONE 원문', 'ALT TWO 원문'];
+  return host;
+}
+const CHAT_SCREEN = { screen: 'chat', targetKind: 'general', fieldKey: null, greetingsShownFull: [-1, 0, 1] };
+
+test('update_greeting edits the default first message from the chat screen and can be undone', async () => {
+  const { state, adapter } = createGreetingHost();
+  const proposal = { action: 'update_greeting', greetingIndex: -1, content: '새 첫 메시지' };
+  const preview = await adapter.previewProposal(proposal, CHAT_SCREEN);
+  assert.equal(preview.ok, true, preview.error);
+  assert.equal(preview.before, '안녕, 여행자. 오늘은 별이 밝아.');
+  assert.equal(preview.after, '새 첫 메시지');
+  const res = await adapter.applyProposal(proposal, preview.target, { hostBinding: preview.hostBinding });
+  assert.equal(state.character.firstMessage, '새 첫 메시지');
+  assert.deepEqual(state.character.alternateGreetings, ['ALT ONE 원문', 'ALT TWO 원문']);
+  await adapter.undo(res.undoId);
+  assert.equal(state.character.firstMessage, '안녕, 여행자. 오늘은 별이 밝아.');
+});
+
+test('update_greeting patches one alternate greeting by index and leaves the others alone', async () => {
+  const { state, adapter } = createGreetingHost();
+  const proposal = { action: 'update_greeting', greetingIndex: 1, edits: [{ before: 'TWO', after: '둘' }] };
+  const preview = await adapter.previewProposal(proposal, CHAT_SCREEN);
+  assert.equal(preview.ok, true, preview.error);
+  await adapter.applyProposal(proposal, preview.target, { hostBinding: preview.hostBinding });
+  assert.deepEqual(state.character.alternateGreetings, ['ALT ONE 원문', 'ALT 둘 원문']);
+  assert.equal(state.character.firstMessage, '안녕, 여행자. 오늘은 별이 밝아.');
+});
+
+test('a full overwrite of a greeting the model only saw a preview of is blocked, a partial edit is not', async () => {
+  const { state, adapter } = createGreetingHost();
+  state.character.firstMessage = 'HEAD ' + 'x'.repeat(2000) + ' TAIL_MUST_SURVIVE';
+  const onlyPreviewShown = { ...CHAT_SCREEN, greetingsShownFull: [0, 1] };
+
+  const overwrite = await adapter.previewProposal({ action: 'update_greeting', greetingIndex: -1, content: 'short' }, onlyPreviewShown);
+  assert.equal(overwrite.ok, false);
+  assert.match(overwrite.error, /전문/);
+  await assert.rejects(
+    () => adapter.applyProposal({ action: 'update_greeting', greetingIndex: -1, content: 'short' }, onlyPreviewShown, {}),
+    /전문/
+  );
+  assert.ok(state.character.firstMessage.endsWith('TAIL_MUST_SURVIVE'));
+
+  const patch = { action: 'update_greeting', greetingIndex: -1, edits: [{ before: 'HEAD', after: 'HELLO' }] };
+  const patchPreview = await adapter.previewProposal(patch, onlyPreviewShown);
+  assert.equal(patchPreview.ok, true, patchPreview.error);
+  await adapter.applyProposal(patch, patchPreview.target, { hostBinding: patchPreview.hostBinding });
+  assert.ok(state.character.firstMessage.startsWith('HELLO'));
+  assert.ok(state.character.firstMessage.endsWith('TAIL_MUST_SURVIVE'));
+});
+
+test('create_greeting appends a new alternate greeting without touching existing ones, also when there were none', async () => {
+  for (const existing of [['ALT ONE 원문', 'ALT TWO 원문'], []]) {
+    const { state, adapter } = createGreetingHost();
+    state.character.alternateGreetings = [...existing];
+    const proposal = { action: 'create_greeting', content: '완전히 새로운 인사' };
+    const preview = await adapter.previewProposal(proposal, CHAT_SCREEN);
+    assert.equal(preview.ok, true, preview.error);
+    const res = await adapter.applyProposal(proposal, preview.target, { hostBinding: preview.hostBinding });
+    assert.deepEqual(state.character.alternateGreetings, [...existing, '완전히 새로운 인사']);
+    await adapter.undo(res.undoId);
+    assert.deepEqual(state.character.alternateGreetings, existing);
+  }
+});
+
+test('update_greeting naming a greeting that does not exist is rejected', async () => {
+  const { state, adapter } = createGreetingHost();
+  const proposal = { action: 'update_greeting', greetingIndex: 5, content: 'ghost' };
+  const preview = await adapter.previewProposal(proposal, CHAT_SCREEN);
+  assert.equal(preview.ok, false);
+  assert.match(preview.error, /#6/);
+  await assert.rejects(() => adapter.applyProposal(proposal, CHAT_SCREEN, {}), /#6/);
+  assert.deepEqual(state.character.alternateGreetings, ['ALT ONE 원문', 'ALT TWO 원문']);
+});
+
+test('the alternate-greeting target without a chosen item never falls back to overwriting greeting #1', async () => {
+  const { state, adapter } = createGreetingHost();
+  const target = { targetKind: 'char_alt_greeting', fieldKey: 'alternateGreetings' };
+  const proposal = { action: 'replace_text', content: 'BRAND NEW GREETING' };
+
+  const preview = await adapter.previewProposal(proposal, target);
+  assert.equal(preview.ok, false);
+  await assert.rejects(() => adapter.applyProposal(proposal, target, {}));
+  assert.deepEqual(state.character.alternateGreetings, ['ALT ONE 원문', 'ALT TWO 원문']);
+
+  const outOfRange = await adapter.previewProposal(proposal, { ...target, greetingIndex: 9 });
+  assert.equal(outOfRange.ok, false);
+  assert.deepEqual(state.character.alternateGreetings, ['ALT ONE 원문', 'ALT TWO 원문']);
+});

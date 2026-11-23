@@ -170,3 +170,44 @@ test('Apply All excludes unconfirmed destructive Lua proposals until confirmed',
   // Only 1 non-destructive proposal is ready -> '모두 적용' must not include the unconfirmed Lua card
   assert.equal(ui.buttons(/^모두 적용/).length, 0);
 });
+
+test('from the chat screen the model gets the whole first message and its greeting proposals apply directly', async () => {
+  const state = { character: freshCharacter() };
+  state.character.firstMessage = '첫 문장. ' + '가'.repeat(900) + ' 끝-표식';
+  state.character.alternateGreetings = ['기존 추가 인사'];
+  const seenSystemPrompts = [];
+  const replies = [
+    '고칩니다.\n' + proposalBlock({ action: 'update_greeting', title: '첫 메시지 수정', greetingIndex: -1, edits: [{ before: '끝-표식', after: '끝!' }] }),
+    '추가합니다.\n' + proposalBlock({ action: 'create_greeting', title: '새 추가 첫 메시지', content: '새로 만든 인사' }),
+  ];
+  const ui = await bootBundle({
+    state,
+    runLLMModel: async ({ messages }) => { seenSystemPrompts.push(messages[0].content); return replies.shift(); },
+  });
+
+  await ui.send('첫 메시지 끝부분 고쳐줘');
+  assert.ok(seenSystemPrompts[0].includes('끝-표식'), 'the full first message must reach the model on the chat screen');
+  await ui.click('적용');
+  assert.ok(state.character.firstMessage.endsWith('끝!'));
+
+  await ui.send('추가 첫 메시지 하나 새로 만들어줘');
+  await ui.click('적용');
+  assert.deepEqual(state.character.alternateGreetings, ['기존 추가 인사', '새로 만든 인사']);
+});
+
+test('choosing the alternate-greeting target selects no item until the user picks one', async () => {
+  const state = { character: freshCharacter() };
+  state.character.alternateGreetings = ['기존 1번', '기존 2번'];
+  const reply = '새로 씁니다.\n' + proposalBlock({ action: 'replace_text', title: '새 추가 첫 메시지', content: '덮어쓰면 안 되는 내용' });
+  const ui = await bootBundle({ state, runLLMModel: async () => reply });
+  await ui.selectTarget('char_alt_greeting:');
+
+  const itemPicker = ui.findAll(n => n.tagName === 'SELECT').find(sel => sel.children.some(o => /추가 첫 메시지 #1/.test(o.textContent)));
+  assert.ok(itemPicker, 'the greeting item picker must be shown');
+  const selected = itemPicker.children.find(o => o.selected);
+  assert.ok(selected && !/#1/.test(selected.textContent), 'greeting #1 must not appear pre-selected');
+
+  await ui.send('추가 첫 메시지를 새로 만들어줘');
+  assert.equal(ui.buttons('적용').length, 0, 'an overwrite without a chosen item must not be applicable');
+  assert.deepEqual(state.character.alternateGreetings, ['기존 1번', '기존 2번']);
+});

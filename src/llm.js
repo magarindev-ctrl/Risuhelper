@@ -132,6 +132,8 @@ const VALID_ACTIONS = new Set([
   'create_persona',
   'update_persona',
   'update_config',
+  'update_greeting',
+  'create_greeting',
 ]);
 
 /**
@@ -342,6 +344,8 @@ const PROPOSAL_KEYS_BY_ACTION = {
   create_persona: ['name', 'note', 'personaPrompt', 'content', 'icon', 'largePortrait', 'bindToCurrentChat'],
   update_persona: ['personaIndex', 'name', 'note', 'personaPrompt', 'largePortrait', 'edits', 'fieldKey', 'fieldEdits', 'bindToCurrentChat'],
   update_config: ['changes'],
+  update_greeting: ['greetingIndex', 'edits', 'content'],
+  create_greeting: ['content'],
 };
 
 function findUnknownProposalKeys(item) {
@@ -457,6 +461,26 @@ function validateProposal(item) {
     const err = validateFieldKeyForKind('persona', item.fieldKey);
     if (err) return err;
   }
+  if (item.action === 'update_greeting') {
+    if (!Number.isInteger(item.greetingIndex) || item.greetingIndex < -1) {
+      return 'update_greeting에는 greetingIndex가 필요합니다. (-1 = 기본 첫 메시지, 0 이상 = 추가 첫 메시지 번호)';
+    }
+    const hasEdits = Array.isArray(item.edits) && item.edits.length > 0;
+    if (hasEdits) {
+      for (const e of item.edits) {
+        if (!e || typeof e.before !== 'string' || !e.before || typeof e.after !== 'string') {
+          return 'edits 항목은 비어 있지 않은 문자열 before와 문자열 after가 필요합니다.';
+        }
+      }
+    } else if (typeof item.content !== 'string') {
+      return 'update_greeting에는 edits 배열 또는 content 문자열이 필요합니다.';
+    }
+  }
+  if (item.action === 'create_greeting') {
+    if (typeof item.content !== 'string' || !item.content.trim()) {
+      return 'create_greeting에는 비어 있지 않은 content 문자열이 필요합니다.';
+    }
+  }
   if (item.action === 'update_config') {
     if (!item.changes || typeof item.changes !== 'object' || Array.isArray(item.changes)) {
       return 'update_config에는 changes 객체가 필요합니다.';
@@ -485,6 +509,13 @@ function buildConversationMessages({ context, snapshot, extraContext, history, u
   const extraBlocks = [];
   if (extraContext?.charSummary) {
     extraBlocks.push(`[현재 캐릭터 요약]\n${JSON.stringify(extraContext.charSummary, null, 2)}`);
+  }
+  if (extraContext?.greetings?.greetings?.length) {
+    extraBlocks.push(
+      '[첫 메시지 목록] index -1 = 기본 첫 메시지(firstMessage), 0 이상 = 추가 첫 메시지(alternateGreetings) 번호. ' +
+      'active = 현재 채팅이 쓰는 것. truncated: true 인 항목은 앞부분만 보이는 상태이므로 content 전체 교체를 제안하지 말고 보이는 구간의 edits만 제안하세요.\n' +
+      JSON.stringify(extraContext.greetings.greetings, null, 2)
+    );
   }
   if (extraContext?.foldersSummary?.length) {
     extraBlocks.push(`[캐릭터 로어북 폴더 목록]\n${JSON.stringify(extraContext.foldersSummary, null, 2)}`);
@@ -516,7 +547,7 @@ function buildConversationMessages({ context, snapshot, extraContext, history, u
     : '';
 
   const screenNote = context?.screen === 'chat'
-    ? '\n- 안내: 사용자는 현재 채팅 화면(대화 입력창)에 있습니다. 특정 편집 필드를 열지 않았더라도 아래 [현재 캐릭터 요약]/[로어북 목록 요약] 등을 바탕으로 질문에 답하거나, 새 로어북·페르소나·정규식·Lua 생성 및 설정 변경을 바로 제안할 수 있습니다.'
+    ? '\n- 안내: 사용자는 현재 채팅 화면(대화 입력창)에 있습니다. 특정 편집 필드를 열지 않았더라도 아래 [현재 캐릭터 요약]/[첫 메시지 목록]/[로어북 목록 요약] 등을 바탕으로 질문에 답하거나, 첫 메시지 수정·추가(update_greeting / create_greeting), 새 로어북·페르소나·정규식·Lua 생성 및 설정 변경을 바로 제안할 수 있습니다.'
     : '';
 
   const systemPrompt = `당신은 RisuAI(및 PocketRisu, RisuBard, 해적리스, RisuNest 등 포크) 안에 내장된 소통형 어시스턴트 "RisuHelper"입니다.
@@ -547,6 +578,7 @@ ${extraBlocks.join('\n\n')}
 3. 기존 긴 원문의 일부만 바꿀 때는 반드시 \`patch_text\`를 사용하고, \`before\`에는 위 [현재 대상의 실제 원문]에서 **공백과 줄바꿈까지 정확히 일치하는 고유 구간**을 복사하세요.
 4. 주의: \`patch_text\`/\`replace_text\`에서 \`target\`을 임의로 바꿔 다른 필드를 지정하지 마세요.
 5. 로어북 폴더를 새로 만들어 로어북을 옮기거나 기존 폴더에 여러 로어북을 담을 때는 절대 \`update_lorebook\`을 여러 개로 쪼개거나 \`\\uf000folder:...\` 키를 임의로 지어내지 말고, 반드시 **단일 \`organize_lorebook\` 블록 하나**로 제안하세요.
+6. 첫 메시지(기본·추가)를 고치거나 새로 추가할 때는 현재 대상이 무엇이든 \`update_greeting\` / \`create_greeting\`을 사용하세요. "추가 첫 메시지를 새로 만들어 달라"는 요청에 기존 항목을 \`replace_text\`로 덮어쓰지 마세요.
 
 지원 action 스키마 (표준 JSON):
 - 부분 편집: {"action":"patch_text","title":"설명","edits":[{"before":"원문 구간","after":"수정 구간"}]}
@@ -559,6 +591,8 @@ ${extraBlocks.join('\n\n')}
 - 새 페르소나 생성: {"action":"create_persona","title":"설명","name":"이름","note":"메모","personaPrompt":"설명","bindToCurrentChat":true}
 - 기존 페르소나 수정: {"action":"update_persona","title":"설명","personaIndex":0,"name":"이름","note":"메모","personaPrompt":"설명","bindToCurrentChat":false}
 - 허용 설정 변경: {"action":"update_config","title":"설명","changes":{"temperature":80,"maxResponse":2000}}
+- 첫 메시지 수정: {"action":"update_greeting","title":"설명","greetingIndex":-1,"edits":[{"before":"...","after":"..."}]} (greetingIndex -1 = 기본 첫 메시지, 0 이상 = 추가 첫 메시지 번호. 전체 교체는 edits 대신 "content":"새 전체 텍스트")
+- 추가 첫 메시지 새로 만들기: {"action":"create_greeting","title":"설명","content":"새 추가 첫 메시지 전체 텍스트"} (기존 항목은 바뀌지 않고 맨 뒤에 추가됨)
 
 [권장: 긴 코드·Lua·정규식·HTML용 원문 구분자 형식 (JSON 이스케이프 불필요)]
 따옴표·백슬래시·줄바꿈이 많은 Lua/정규식/HTML/긴 본문은 JSON 헤더 아래에 구분자 섹션을 쓰면 이스케이프 오류를 피할 수 있습니다:

@@ -1,21 +1,21 @@
 //@name risuhelper
 //@display-name RisuHelper
 //@api 3.0
-//@version 0.4.3
+//@version 0.4.4
 //@update-url https://raw.githubusercontent.com/magarindev-ctrl/Risuhelper/main/dist/risuhelper.js
 //@link https://github.com/magarindev-ctrl/Risuhelper RisuHelper GitHub
 
 /*
- * RisuHelper v0.4.3 — RisuAI Plugin API v3
+ * RisuHelper v0.4.4 — RisuAI Plugin API v3
  * License: GPL-3.0-only
  * https://github.com/magarindev-ctrl/Risuhelper
  */
 (() => {
   'use strict';
-  const __RISUHELPER_VERSION__ = "0.4.3";
+  const __RISUHELPER_VERSION__ = "0.4.4";
   const __modules = {
   "src/version.js"(__require, __exports) {
-const VERSION = '0.4.3';
+const VERSION = '0.4.4';
 const PLUGIN_NAME = 'risuhelper';
 const STORAGE_KEY = 'risuhelper_state_v1';
 const PRESET_STORAGE_KEY = 'risuhelper_preset_v1';
@@ -5606,17 +5606,19 @@ class HostAdapter {
       const { char, charIndex } = await this.readActiveCharacter();
       if (!char) return { ok: false, reason: '선택된 캐릭터가 없습니다.', content: '' };
       const list = Array.isArray(char.alternateGreetings) ? char.alternateGreetings : [];
+      // No guessing: without a valid index nothing is selected. Falling back to the first
+      // greeting would turn "write a new one" into overwriting an existing greeting.
       const idx =
         Number.isInteger(t.greetingIndex) && t.greetingIndex >= 0 && t.greetingIndex < list.length
           ? t.greetingIndex
-          : (list.length > 0 ? 0 : null);
+          : null;
       return {
         ok: true,
         target: { ...t, fieldKey: 'alternateGreetings', greetingIndex: idx },
         hostBinding: { charIndex, greetingIndex: idx, ...getCharIdentity(char) },
         label: idx !== null
           ? `캐릭터 · 추가 첫 메시지 #${idx + 1} (${char.name || '무제'})`
-          : `캐릭터 · 추가 첫 메시지 (없음 · ${char.name || '무제'})`,
+          : `캐릭터 · 추가 첫 메시지 (항목 미선택 · 현재 ${list.length}개 · ${char.name || '무제'})`,
         content: idx !== null ? String(list[idx] ?? '') : '',
         greetingCount: list.length,
         altGreetingsSummary: list.slice(0, 40).map((g, i) => ({
@@ -6306,6 +6308,14 @@ class HostAdapter {
       }
     }
 
+    if (proposal.action === 'update_greeting' && proposal.greetingIndex !== -1) {
+      const { char } = await this.readActiveCharacter();
+      const list = Array.isArray(char?.alternateGreetings) ? char.alternateGreetings : [];
+      if (!Number.isInteger(proposal.greetingIndex) || proposal.greetingIndex < 0 || proposal.greetingIndex >= list.length) {
+        return `수정할 추가 첫 메시지 #${Number(proposal.greetingIndex) + 1}을(를) 찾을 수 없습니다. (현재 ${list.length}개) 새로 만들려면 create_greeting을 사용해 주세요.`;
+      }
+    }
+
     if (proposal.action === 'upsert_regex' && proposal.regexIndex !== undefined && proposal.regexIndex !== null) {
       const scope = proposal.scope || (target?.targetKind === 'module_regex' ? 'module' : 'character');
       let list = [];
@@ -6397,7 +6407,7 @@ class HostAdapter {
       if (kind === 'char_alt_greeting' && !Number.isInteger(snap.target?.greetingIndex)) {
         return {
           ok: false,
-          error: '수정할 추가 첫 메시지 항목이 없습니다. RisuAI 캐릭터 고급 설정에서 추가 첫 메시지를 하나 이상 만든 뒤 시도해 주세요.',
+          error: '수정할 추가 첫 메시지 항목이 선택되지 않았습니다. 상단에서 고칠 항목을 고르거나, 새 항목을 만들려면 "추가 첫 메시지를 새로 만들어줘"라고 요청해 주세요(create_greeting).',
           label: snap.label,
           target: snap.target,
         };
@@ -6720,6 +6730,47 @@ class HostAdapter {
       };
     }
 
+    if (proposal.action === 'update_greeting') {
+      const gTarget = this._greetingTarget(proposal);
+      const snap = await this.readTargetSnapshot(gTarget);
+      if (!snap.ok) return { ok: false, error: snap.reason };
+      const before = String(snap.content ?? '');
+      const guardError = this._greetingOverwriteError(proposal, target, before);
+      if (guardError) return { ok: false, error: guardError, before, label: snap.label };
+      try {
+        const after = Array.isArray(proposal.edits) && proposal.edits.length > 0
+          ? applyTextEdits(before, proposal.edits, snap.label)
+          : String(proposal.content ?? '');
+        return {
+          ok: true,
+          before,
+          after,
+          label: snap.label,
+          target: { ...snap.target, greetingsShownFull: target.greetingsShownFull },
+          hostBinding: snap.hostBinding,
+          warning: proposal.greetingIndex === -1
+            ? '기본 첫 메시지는 이 캐릭터의 모든 채팅에 공통으로 적용됩니다.'
+            : null,
+        };
+      } catch (err) {
+        return { ok: false, error: err.message, before, label: snap.label };
+      }
+    }
+
+    if (proposal.action === 'create_greeting') {
+      const { char, charIndex } = await this.readActiveCharacter();
+      if (!char) return { ok: false, error: '선택된 캐릭터가 없습니다.' };
+      const count = Array.isArray(char.alternateGreetings) ? char.alternateGreetings.length : 0;
+      return {
+        ok: true,
+        before: '',
+        after: String(proposal.content ?? ''),
+        label: `캐릭터 · 추가 첫 메시지 #${count + 1} (새로 추가 · ${char.name || '무제'})`,
+        target: { targetKind: 'char_alt_greeting', fieldKey: 'alternateGreetings' },
+        hostBinding: { charIndex, ...getCharIdentity(char) },
+      };
+    }
+
     if (proposal.action === 'update_config') {
       const cfg = await this.readAllowedConfig();
       if (!cfg) return { ok: false, error: DB_PERMISSION_ERROR };
@@ -6775,6 +6826,10 @@ class HostAdapter {
         return await this._applyUpdatePersona(proposal, target, options);
       case 'update_config':
         return await this._applyUpdateConfig(proposal);
+      case 'update_greeting':
+        return await this._applyUpdateGreeting(proposal, target, options);
+      case 'create_greeting':
+        return await this._applyCreateGreeting(proposal, target, options);
       default:
         throw new Error(`지원하지 않는 작업 종류입니다: ${proposal.action}`);
     }
@@ -6950,6 +7005,57 @@ class HostAdapter {
     }
 
     throw new Error(`현재 대상(${kind || '없음'})에는 직접 텍스트 적용을 지원하지 않습니다. 상단에서 대상을 선택해 주세요.`);
+  }
+
+  /** Where a greeting lives: index -1 is the default first message, n >= 0 an alternate greeting. */
+  _greetingTarget(proposal) {
+    return proposal.greetingIndex === -1
+      ? { targetKind: 'char_field', fieldKey: 'firstMessage' }
+      : { targetKind: 'char_alt_greeting', fieldKey: 'alternateGreetings', greetingIndex: proposal.greetingIndex };
+  }
+
+  /**
+   * A whole-text replacement is only safe when the model was shown the whole greeting.
+   * `target.greetingsShownFull` lists the greeting indices that were sent in full for this
+   * request (src/greetings.js); partial edits are exact-match and therefore always safe.
+   */
+  _greetingOverwriteError(proposal, target, before) {
+    const isOverwrite = !(Array.isArray(proposal.edits) && proposal.edits.length > 0);
+    if (!isOverwrite || before.length === 0) return null;
+    const shown = Array.isArray(target?.greetingsShownFull) ? target.greetingsShownFull : [];
+    if (!shown.includes(proposal.greetingIndex)) {
+      return '이 첫 메시지는 전문이 모델에 전달되지 않은 상태(앞부분 미리보기만 전달)라, 뒷부분 유실을 막기 위해 전체 덮어쓰기를 차단했습니다. ' +
+        '보이는 구간의 부분 편집(edits)을 쓰거나, 상단 대상을 해당 첫 메시지로 고른 뒤 다시 요청해 주세요.';
+    }
+    return this._checkTruncationGuard(before, '첫 메시지 전체 덮어쓰기');
+  }
+
+  async _applyUpdateGreeting(proposal, target, options = {}) {
+    const gTarget = this._greetingTarget(proposal);
+    const snap = await this.readTargetSnapshot(gTarget);
+    if (!snap.ok) throw new Error(snap.reason);
+    const guardError = this._greetingOverwriteError(proposal, target, String(snap.content ?? ''));
+    if (guardError) throw new Error(guardError);
+    const hasEdits = Array.isArray(proposal.edits) && proposal.edits.length > 0;
+    return await this._applyTextTarget(
+      hasEdits ? { action: 'patch_text', edits: proposal.edits } : { action: 'replace_text', content: proposal.content },
+      gTarget,
+      options
+    );
+  }
+
+  async _applyCreateGreeting(proposal, target, options = {}) {
+    const opened = await this._openScope('character', proposal, target, options);
+    if (!Array.isArray(opened.root.alternateGreetings)) opened.root.alternateGreetings = [];
+    opened.root.alternateGreetings.push(String(proposal.content ?? ''));
+    const number = opened.root.alternateGreetings.length;
+    const undoId = await opened.commit(`추가 첫 메시지 #${number} 생성`);
+    return {
+      ok: true,
+      undoId,
+      greetingIndex: number - 1,
+      summary: `추가 첫 메시지 #${number}을(를) 새로 만들었습니다. 채팅 화면의 첫 메시지 좌우 화살표로 전환할 수 있습니다.`,
+    };
   }
 
   /**
@@ -7644,6 +7750,8 @@ const VALID_ACTIONS = new Set([
   'create_persona',
   'update_persona',
   'update_config',
+  'update_greeting',
+  'create_greeting',
 ]);
 
 /**
@@ -7854,6 +7962,8 @@ const PROPOSAL_KEYS_BY_ACTION = {
   create_persona: ['name', 'note', 'personaPrompt', 'content', 'icon', 'largePortrait', 'bindToCurrentChat'],
   update_persona: ['personaIndex', 'name', 'note', 'personaPrompt', 'largePortrait', 'edits', 'fieldKey', 'fieldEdits', 'bindToCurrentChat'],
   update_config: ['changes'],
+  update_greeting: ['greetingIndex', 'edits', 'content'],
+  create_greeting: ['content'],
 };
 
 function findUnknownProposalKeys(item) {
@@ -7969,6 +8079,26 @@ function validateProposal(item) {
     const err = validateFieldKeyForKind('persona', item.fieldKey);
     if (err) return err;
   }
+  if (item.action === 'update_greeting') {
+    if (!Number.isInteger(item.greetingIndex) || item.greetingIndex < -1) {
+      return 'update_greeting에는 greetingIndex가 필요합니다. (-1 = 기본 첫 메시지, 0 이상 = 추가 첫 메시지 번호)';
+    }
+    const hasEdits = Array.isArray(item.edits) && item.edits.length > 0;
+    if (hasEdits) {
+      for (const e of item.edits) {
+        if (!e || typeof e.before !== 'string' || !e.before || typeof e.after !== 'string') {
+          return 'edits 항목은 비어 있지 않은 문자열 before와 문자열 after가 필요합니다.';
+        }
+      }
+    } else if (typeof item.content !== 'string') {
+      return 'update_greeting에는 edits 배열 또는 content 문자열이 필요합니다.';
+    }
+  }
+  if (item.action === 'create_greeting') {
+    if (typeof item.content !== 'string' || !item.content.trim()) {
+      return 'create_greeting에는 비어 있지 않은 content 문자열이 필요합니다.';
+    }
+  }
   if (item.action === 'update_config') {
     if (!item.changes || typeof item.changes !== 'object' || Array.isArray(item.changes)) {
       return 'update_config에는 changes 객체가 필요합니다.';
@@ -7997,6 +8127,13 @@ function buildConversationMessages({ context, snapshot, extraContext, history, u
   const extraBlocks = [];
   if (extraContext?.charSummary) {
     extraBlocks.push(`[현재 캐릭터 요약]\n${JSON.stringify(extraContext.charSummary, null, 2)}`);
+  }
+  if (extraContext?.greetings?.greetings?.length) {
+    extraBlocks.push(
+      '[첫 메시지 목록] index -1 = 기본 첫 메시지(firstMessage), 0 이상 = 추가 첫 메시지(alternateGreetings) 번호. ' +
+      'active = 현재 채팅이 쓰는 것. truncated: true 인 항목은 앞부분만 보이는 상태이므로 content 전체 교체를 제안하지 말고 보이는 구간의 edits만 제안하세요.\n' +
+      JSON.stringify(extraContext.greetings.greetings, null, 2)
+    );
   }
   if (extraContext?.foldersSummary?.length) {
     extraBlocks.push(`[캐릭터 로어북 폴더 목록]\n${JSON.stringify(extraContext.foldersSummary, null, 2)}`);
@@ -8028,7 +8165,7 @@ function buildConversationMessages({ context, snapshot, extraContext, history, u
     : '';
 
   const screenNote = context?.screen === 'chat'
-    ? '\n- 안내: 사용자는 현재 채팅 화면(대화 입력창)에 있습니다. 특정 편집 필드를 열지 않았더라도 아래 [현재 캐릭터 요약]/[로어북 목록 요약] 등을 바탕으로 질문에 답하거나, 새 로어북·페르소나·정규식·Lua 생성 및 설정 변경을 바로 제안할 수 있습니다.'
+    ? '\n- 안내: 사용자는 현재 채팅 화면(대화 입력창)에 있습니다. 특정 편집 필드를 열지 않았더라도 아래 [현재 캐릭터 요약]/[첫 메시지 목록]/[로어북 목록 요약] 등을 바탕으로 질문에 답하거나, 첫 메시지 수정·추가(update_greeting / create_greeting), 새 로어북·페르소나·정규식·Lua 생성 및 설정 변경을 바로 제안할 수 있습니다.'
     : '';
 
   const systemPrompt = `당신은 RisuAI(및 PocketRisu, RisuBard, 해적리스, RisuNest 등 포크) 안에 내장된 소통형 어시스턴트 "RisuHelper"입니다.
@@ -8059,6 +8196,7 @@ ${extraBlocks.join('\n\n')}
 3. 기존 긴 원문의 일부만 바꿀 때는 반드시 \`patch_text\`를 사용하고, \`before\`에는 위 [현재 대상의 실제 원문]에서 **공백과 줄바꿈까지 정확히 일치하는 고유 구간**을 복사하세요.
 4. 주의: \`patch_text\`/\`replace_text\`에서 \`target\`을 임의로 바꿔 다른 필드를 지정하지 마세요.
 5. 로어북 폴더를 새로 만들어 로어북을 옮기거나 기존 폴더에 여러 로어북을 담을 때는 절대 \`update_lorebook\`을 여러 개로 쪼개거나 \`\\uf000folder:...\` 키를 임의로 지어내지 말고, 반드시 **단일 \`organize_lorebook\` 블록 하나**로 제안하세요.
+6. 첫 메시지(기본·추가)를 고치거나 새로 추가할 때는 현재 대상이 무엇이든 \`update_greeting\` / \`create_greeting\`을 사용하세요. "추가 첫 메시지를 새로 만들어 달라"는 요청에 기존 항목을 \`replace_text\`로 덮어쓰지 마세요.
 
 지원 action 스키마 (표준 JSON):
 - 부분 편집: {"action":"patch_text","title":"설명","edits":[{"before":"원문 구간","after":"수정 구간"}]}
@@ -8071,6 +8209,8 @@ ${extraBlocks.join('\n\n')}
 - 새 페르소나 생성: {"action":"create_persona","title":"설명","name":"이름","note":"메모","personaPrompt":"설명","bindToCurrentChat":true}
 - 기존 페르소나 수정: {"action":"update_persona","title":"설명","personaIndex":0,"name":"이름","note":"메모","personaPrompt":"설명","bindToCurrentChat":false}
 - 허용 설정 변경: {"action":"update_config","title":"설명","changes":{"temperature":80,"maxResponse":2000}}
+- 첫 메시지 수정: {"action":"update_greeting","title":"설명","greetingIndex":-1,"edits":[{"before":"...","after":"..."}]} (greetingIndex -1 = 기본 첫 메시지, 0 이상 = 추가 첫 메시지 번호. 전체 교체는 edits 대신 "content":"새 전체 텍스트")
+- 추가 첫 메시지 새로 만들기: {"action":"create_greeting","title":"설명","content":"새 추가 첫 메시지 전체 텍스트"} (기존 항목은 바뀌지 않고 맨 뒤에 추가됨)
 
 [권장: 긴 코드·Lua·정규식·HTML용 원문 구분자 형식 (JSON 이스케이프 불필요)]
 따옴표·백슬래시·줄바꿈이 많은 Lua/정규식/HTML/긴 본문은 JSON 헤더 아래에 구분자 섹션을 쓰면 이스케이프 오류를 피할 수 있습니다:
@@ -10802,6 +10942,82 @@ function buildListItem(doc, rawItemText) {
   __exports.renderMarkdown = renderMarkdown;
 
   },
+  "src/greetings.js"(__require, __exports) {
+// First message context for the model.
+//
+// A character has one default first message (`firstMessage`, index -1 — the same convention as
+// RisuAI's `chat.fmIndex`) and any number of alternate greetings (`alternateGreetings[n]`).
+// The plan below decides how much of each is sent to the model, and records which ones were
+// sent in full: a greeting the model only saw a preview of must not be overwritten wholesale.
+
+const GREETING_PREVIEW_CHARS = 300;
+const GREETING_CONTEXT_BUDGET = 16000;
+const MAX_LISTED_ALT_GREETINGS = 30;
+
+/**
+ * @returns {{
+ *   activeIndex: number,
+ *   greetings: Array<{ index: number, active: boolean, length: number, text: string, truncated: boolean }>,
+ *   shownFull: number[],
+ * }}
+ */
+function planGreetingContext(char, chat, { includeFullText = false, budget = GREETING_CONTEXT_BUDGET } = {}) {
+  const alternates = Array.isArray(char?.alternateGreetings) ? char.alternateGreetings.slice(0, MAX_LISTED_ALT_GREETINGS) : [];
+  const fmIndex = Number.isInteger(chat?.fmIndex) ? chat.fmIndex : -1;
+  const activeIndex = fmIndex >= 0 && alternates[fmIndex] !== undefined ? fmIndex : -1;
+
+  const entries = [
+    { index: -1, full: String(char?.firstMessage ?? '') },
+    ...alternates.map((text, i) => ({ index: i, full: String(text ?? '') })),
+  ];
+
+  // The greeting the current chat uses gets the budget first, then the rest in order.
+  const order = [...entries].sort((a, b) => (b.index === activeIndex) - (a.index === activeIndex));
+  const showFull = new Set();
+  let remaining = Math.max(0, Number(budget) || 0);
+  for (const entry of order) {
+    if (entry.full.length <= GREETING_PREVIEW_CHARS) {
+      showFull.add(entry.index);
+    } else if (includeFullText && entry.full.length <= remaining) {
+      showFull.add(entry.index);
+      remaining -= entry.full.length;
+    }
+  }
+
+  const greetings = entries.map(entry => {
+    const isFull = showFull.has(entry.index);
+    return {
+      index: entry.index,
+      active: entry.index === activeIndex,
+      length: entry.full.length,
+      text: isFull ? entry.full : entry.full.slice(0, GREETING_PREVIEW_CHARS),
+      truncated: !isFull,
+    };
+  });
+
+  return { activeIndex, greetings, shownFull: greetings.filter(g => !g.truncated).map(g => g.index) };
+}
+
+const GREETING_REQUEST_RE = /첫\s*(메시지|메세지|인사|대사)|인사말|퍼스트\s*메시지|first\s*message|greeting/i;
+
+/**
+ * Whether full greeting text is worth its prompt cost for this request: on the chat screen
+ * (no field is open, so the greeting is the likeliest subject), when a greeting is the current
+ * target, or when the request itself talks about first messages.
+ */
+function wantsGreetingText(context, userInput) {
+  if (context?.screen === 'chat' || context?.targetKind === 'general') return true;
+  if (context?.targetKind === 'char_alt_greeting') return true;
+  if (context?.targetKind === 'char_field' && context?.fieldKey === 'firstMessage') return true;
+  return GREETING_REQUEST_RE.test(String(userInput ?? ''));
+}
+
+  __exports.planGreetingContext = planGreetingContext;
+  __exports.wantsGreetingText = wantsGreetingText;
+  __exports.GREETING_PREVIEW_CHARS = GREETING_PREVIEW_CHARS;
+  __exports.GREETING_CONTEXT_BUDGET = GREETING_CONTEXT_BUDGET;
+
+  },
   "src/ui.js"(__require, __exports) {
 const { VERSION, STORAGE_KEY, PRESET_STORAGE_KEY, UNDO_STORAGE_KEY, DEFAULT_MAX_CONTENT_CHARS, MAX_CONTENT_CHAR_OPTIONS, CHAR_FIELD_META, MODULE_FIELD_META, CONFIG_FIELD_META, SCREEN_LABELS } = __require("src/version.js");
 const { STYLES } = __require("src/style.js");
@@ -10813,6 +11029,7 @@ const { getQuickPromptsForContext } = __require("src/knowledge.js");
 const { newPresetState, validatePresetState, assembleRisuHelperMessages } = __require("src/preset-engine.js");
 const { renderPresetPanel } = __require("src/preset-ui.js");
 const { renderMarkdown } = __require("src/markdown.js");
+const { planGreetingContext, wantsGreetingText } = __require("src/greetings.js");
 
 const DEFAULT_SETTINGS = {
   modelMode: 'model',
@@ -10855,6 +11072,8 @@ const ACTION_LABELS = {
   create_persona: '새 페르소나 생성',
   update_persona: '페르소나 수정',
   update_config: '설정 변경',
+  update_greeting: '첫 메시지 수정',
+  create_greeting: '추가 첫 메시지 생성',
 };
 
 function h(doc, tag, props = {}, ...children) {
@@ -11384,17 +11603,28 @@ class RisuHelperApp {
     }, 2800);
   }
 
-  async gatherExtraContext(ctx) {
+  async gatherExtraContext(ctx, userInput = '') {
     const extra = {};
-    if (this.settings.includeCharSummary || this.settings.includeLoreSummary) {
+    // First messages: full text when the request is likely about them (chat screen, greeting
+    // target, or the wording), otherwise short previews as part of the character summary.
+    const wantGreetingText = wantsGreetingText(ctx, userInput);
+    if (this.settings.includeCharSummary || this.settings.includeLoreSummary || wantGreetingText) {
       try {
         const { char } = await this.adapter.readActiveCharacter();
         if (char) {
+          if (wantGreetingText || this.settings.includeCharSummary) {
+            let chat = null;
+            try {
+              chat = (await this.adapter.readActiveChat()).chat;
+            } catch {}
+            const plan = planGreetingContext(char, chat, { includeFullText: wantGreetingText });
+            extra.greetings = { activeIndex: plan.activeIndex, greetings: plan.greetings };
+            extra.greetingsShownFull = plan.shownFull;
+          }
           if (this.settings.includeCharSummary) {
             extra.charSummary = {
               name: char.name || '',
               descPreview: String(char.desc || '').slice(0, 500),
-              firstMessagePreview: String(char.firstMessage || '').slice(0, 300),
               globalLoreCount: char.globalLore?.length ?? 0,
               regexCount: char.customscript?.length ?? 0,
               hasLua: char.triggerscript?.[0]?.effect?.[0]?.type === 'triggerlua',
@@ -11459,7 +11689,7 @@ class RisuHelperApp {
   }
 
   async assembleRequestPayload(ctx, historyMessages, userInput) {
-    const extraContext = await this.gatherExtraContext(ctx);
+    const extraContext = await this.gatherExtraContext(ctx, userInput);
     const directMessages = buildConversationMessages({
       context: ctx,
       snapshot: this.activeSnapshot,
@@ -11487,7 +11717,7 @@ class RisuHelperApp {
       } catch {}
     }
 
-    return assembleRisuHelperMessages({
+    const assembled = assembleRisuHelperMessages({
       presetState: this.presetState,
       directMessages,
       activeChar,
@@ -11496,6 +11726,8 @@ class RisuHelperApp {
       history: historyMessages,
       maxHistoryTurns: this.settings.maxHistoryTurns,
     });
+    assembled.greetingsShownFull = extraContext.greetingsShownFull || [];
+    return assembled;
   }
 
   async refreshPresetPreview() {
@@ -11585,6 +11817,8 @@ class RisuHelperApp {
 
       // Dry-run each proposal and pin the target + host binding at generation time
       const pinnedCtx = JSON.parse(JSON.stringify(ctx));
+      // Which first messages the model saw in full for this request (guards whole-text overwrites).
+      pinnedCtx.greetingsShownFull = assembled.greetingsShownFull || [];
       assistantMsg.proposals = [];
       for (const prop of parsed.proposals) {
         const preview = await this.adapter.previewProposal(prop, pinnedCtx);
@@ -12182,17 +12416,21 @@ class RisuHelperApp {
     }
 
     if (ctx.targetKind === 'char_alt_greeting' && Array.isArray(this.activeSnapshot.altGreetingsSummary) && this.activeSnapshot.altGreetingsSummary.length > 0) {
-      const selectedIdx = ctx.greetingIndex ?? this.activeSnapshot.target?.greetingIndex ?? 0;
+      // Nothing is selected until the user picks an item: a missing index must not look like #1.
+      const snapIdx = this.activeSnapshot.target?.greetingIndex;
+      const selectedIdx = Number.isInteger(ctx.greetingIndex) ? ctx.greetingIndex : (Number.isInteger(snapIdx) ? snapIdx : null);
       return h(doc, 'select', {
         class: 'rh-select',
         onchange: async (e) => {
           const base = this.manualTarget || { ...ctx };
-          base.greetingIndex = Number(e.target.value);
+          base.greetingIndex = e.target.value === '' ? null : Number(e.target.value);
           this.manualTarget = base;
           await this.refreshContextSnapshot();
           this.render();
         },
       },
+        h(doc, 'option', { value: '', selected: selectedIdx === null },
+          '고칠 항목 선택 (새로 만들려면 선택하지 말고 "새로 만들어줘"라고 요청)'),
         ...this.activeSnapshot.altGreetingsSummary.map(item =>
           h(doc, 'option', {
             value: String(item.index),
