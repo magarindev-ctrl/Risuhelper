@@ -1602,3 +1602,23 @@ test('syncModuleEditorDom writes to the exact open contenteditable module entry,
   assert.match(wrongTabRes.reason, /로어북/);
 });
 
+
+test('with diagnostics on, detection reports the signals it used and the errors it swallowed', async () => {
+  const { listFixtures, loadFixture, buildFixtureDocument } = await import('./helpers/fixture-dom.mjs');
+  const file = listFixtures().find(f => f.includes('upstream-ko-char-basic'));
+  const fixture = loadFixture(file);
+  const descCase = fixture.cases.find(c => c.expect.fieldKey === 'desc');
+
+  const plain = await inspectFocusedElement(buildFixtureDocument(fixture, descCase.path));
+  assert.equal(plain.diagnostics, undefined, 'diagnostics must be opt-in');
+
+  const rootDoc = buildFixtureDocument(fixture, descCase.path);
+  const focused = await rootDoc.querySelector(':focus');
+  focused.getBoundingClientRect = async () => { throw new Error('rect unavailable in this host'); };
+  const traced = await inspectFocusedElement(rootDoc, { diagnostics: true });
+
+  assert.equal(traced.fieldKey, 'desc');
+  assert.equal(traced.diagnostics.signals.nearbyLabel, '설명');
+  assert.ok(Array.isArray(traced.diagnostics.signals.headings));
+  assert.ok(traced.diagnostics.errors.some(e => /rect unavailable/.test(e.message)), 'swallowed errors must be recorded');
+});

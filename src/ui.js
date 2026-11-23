@@ -1,8 +1,8 @@
-import { VERSION, STORAGE_KEY, PRESET_STORAGE_KEY, CHAR_FIELD_META, MODULE_FIELD_META, CONFIG_FIELD_META, SCREEN_LABELS } from './version.js';
+import { VERSION, STORAGE_KEY, PRESET_STORAGE_KEY, UNDO_STORAGE_KEY, DEFAULT_MAX_CONTENT_CHARS, MAX_CONTENT_CHAR_OPTIONS, CHAR_FIELD_META, MODULE_FIELD_META, CONFIG_FIELD_META, SCREEN_LABELS } from './version.js';
 import { STYLES } from './style.js';
 import { FocusTracker, normalizeChipPos, MIN_DOCK_VIEWPORT_PX } from './focus-detector.js';
 import { HostAdapter, resolveModuleIndex, summarizeLoreList } from './host-adapter.js';
-import { callRisuModel, parseAssistantReply, buildConversationMessages } from './llm.js';
+import { callRisuModel, parseAssistantReply, buildConversationMessages, findUnknownProposalKeys } from './llm.js';
 import { buildDiffPreview } from './text-edits.js';
 import { getQuickPromptsForContext } from './knowledge.js';
 import { newPresetState, validatePresetState, assembleRisuHelperMessages } from './preset-engine.js';
@@ -13,8 +13,10 @@ const DEFAULT_SETTINGS = {
   modelMode: 'model',
   timeoutSeconds: 120,
   maxHistoryTurns: 12,
+  maxContentChars: DEFAULT_MAX_CONTENT_CHARS,
   showFloatingChip: true,
   showHostActionButton: false,
+  showDetectDiagnostics: false,
   autoFillModuleEditor: false,
   floatingChipPos: null,
   dockMode: false,
@@ -152,7 +154,15 @@ class RisuHelperApp {
 
   async init() {
     await this.loadSettings();
+    this.applyContentLimit();
     await this.loadPresetState();
+    await this.loadUndoState();
+    this.adapter.onUndoChange = (info) => {
+      this.scheduleSaveUndoState();
+      if (info?.evicted?.length) {
+        this.showToast(`되돌리기 기록이 가득 차 가장 오래된 ${info.evicted.length}건을 정리했습니다. (정리된 변경은 더 이상 되돌릴 수 없습니다)`);
+      }
+    };
     this.mountBaseStyles();
     this.syncHostTheme();
     this.bindVisualViewport();
@@ -179,6 +189,7 @@ class RisuHelperApp {
 
     // Start cursor focus tracker asynchronously (gracefully continues in manual mode if mainDom is declined)
     this.tracker.showFloatingChip = this.settings.showFloatingChip;
+    this.tracker.diagnostics = Boolean(this.settings.showDetectDiagnostics);
     this.tracker.chipPos = normalizeChipPos(this.settings.floatingChipPos);
     const trackerStarted = await this.tracker.start().catch(() => false);
     await this.syncHostActionButton();
@@ -272,6 +283,104 @@ class RisuHelperApp {
     try {
       await this.api.pluginStorage.setItem(STORAGE_KEY, JSON.stringify(this.settings));
     } catch {}
+  }
+
+  /** Sends the configured "original text length" limit to the adapter (overwrite guard). */
+  applyContentLimit() {
+    const n = Number(this.settings.maxContentChars);
+    this.settings.maxContentChars = MAX_CONTENT_CHAR_OPTIONS.includes(n) ? n : DEFAULT_MAX_CONTENT_CHARS;
+    this.adapter.maxContentChars = this.settings.maxContentChars;
+  }
+
+  // Undo history is kept in pluginStorage so it survives a reload of the page or the plugin.
+  async loadUndoState() {
+    if (!this.api.pluginStorage?.getItem) return;
+    try {
+      const raw = await this.api.pluginStorage.getItem(UNDO_STORAGE_KEY);
+      if (raw) this.adapter.importUndoState(typeof raw === 'string' ? JSON.parse(raw) : raw);
+    } catch {}
+  }
+
+  scheduleSaveUndoState() {
+    if (!this.api.pluginStorage?.setItem) return;
+    clearTimeout(this._undoSaveTimer);
+    this._undoSaveTimer = setTimeout(async () => {
+      try {
+        await this.api.pluginStorage.setItem(UNDO_STORAGE_KEY, JSON.stringify(this.adapter.exportUndoState()));
+      } catch {}
+    }, 120);
+  }
+
+  /** Clears "applied" on cards whose undo record no longer exists (undone globally or evicted). */
+  syncAppliedCards() {
+    const liveIds = new Set(this.adapter.undoStack.map(r => r.id));
+    for (const msg of this.messages) {
+      for (const item of msg.proposals || []) {
+        if (item.applied && item.undoId && !liveIds.has(item.undoId)) {
+          item.applied = false;
+          item.undoId = null;
+          item.statusMessage = '되돌림 완료';
+        }
+      }
+      if (msg.groupId && !this.adapter.undoStack.some(r => r.groupId === msg.groupId)) {
+        msg.groupId = null;
+      }
+    }
+  }
+
+  describeUndoResult(res) {
+    const skipped = res.conflicts?.length || 0;
+    return skipped > 0
+      ? `되돌림: ${res.label} — 단, 이후 직접 수정된 ${skipped}곳은 덮어쓰지 않고 그대로 두었습니다.`
+      : `되돌림: ${res.label}`;
+  }
+
+  applicableProposals(msg) {
+    return (msg.proposals || []).filter(item => item.preview?.ok && !item.applied);
+  }
+
+  /** Applies every applicable proposal of one reply as a single undo unit. */
+  async applyAllProposals(msg) {
+    const attempted = new Set();
+    const { groupId } = await this.adapter.runGroup(`묶음 적용`, async () => {
+      for (let guard = 0; guard < 200; guard++) {
+        const next = this.applicableProposals(msg).find(item => !attempted.has(item));
+        if (!next) break;
+        attempted.add(next);
+        await this.applyProposalItem(next);
+      }
+    });
+    const appliedCount = [...attempted].filter(item => item.applied).length;
+    msg.groupId = appliedCount > 0 ? groupId : null;
+    this.showToast(`${appliedCount}건을 한 번에 적용했습니다. "묶음 되돌리기" 한 번으로 모두 되돌릴 수 있습니다.`);
+    this.render();
+  }
+
+  async undoProposalGroup(msg) {
+    if (!msg.groupId) return;
+    try {
+      const res = await this.adapter.undoGroup(msg.groupId);
+      this.syncAppliedCards();
+      await this.refreshContextSnapshot();
+      this.showToast(this.describeUndoResult(res));
+    } catch (err) {
+      this.syncAppliedCards();
+      this.showToast(`되돌리기 실패: ${err.message}`);
+    }
+    this.render();
+  }
+
+  /** Re-renders only the streaming reply's body; the composer and pickers stay as they are. */
+  updateStreamingBody(msg) {
+    const slot = this._streamingBody;
+    if (!slot || slot.msg !== msg || !slot.el) return false;
+    try {
+      slot.el.textContent = '';
+      renderMarkdown(this.doc, slot.el, msg.content, { onCopy: (codeText) => this.copyText(codeText) });
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   async loadPresetState() {
@@ -505,6 +614,7 @@ class RisuHelperApp {
       history: historyMessages,
       userInput,
       maxHistoryTurns: this.settings.maxHistoryTurns,
+      maxContentChars: this.settings.maxContentChars,
     });
 
     let activeChar = null;
@@ -577,7 +687,7 @@ class RisuHelperApp {
     const flushChunkRender = () => {
       chunkRenderTimer = null;
       lastChunkRenderAt = Date.now();
-      this.render();
+      if (!this.updateStreamingBody(assistantMsg)) this.render();
       this.scrollChatToBottom();
     };
 
@@ -635,6 +745,7 @@ class RisuHelperApp {
           bindToCurrentChat: Boolean(prop.bindToCurrentChat),
           destructiveConfirmed: false,
           statusMessage: '',
+          unknownKeys: findUnknownProposalKeys(prop),
         });
       }
     } catch (err) {
@@ -839,8 +950,9 @@ class RisuHelperApp {
           item.moduleSyncNotice = '⚠️ DB에서 되돌렸습니다. 열려 있는 "모듈 수정" 화면에 이전 내용이 남아 있으면 하단 "모듈 수정"을 누르지 말고 다른 설정 탭을 다녀오세요.';
         }
       }
-      this.showToast(`되돌렸습니다: ${res.label}`);
+      this.showToast(this.describeUndoResult(res));
     } catch (err) {
+      this.syncAppliedCards();
       this.showToast(`되돌리기 실패: ${err.message}`);
     }
     this.render();
@@ -986,6 +1098,12 @@ class RisuHelperApp {
     if (preview.label) {
       bodyChildren.push(
         h(doc, 'div', { style: 'font-size:11.5px;color:var(--rh-muted);' }, `적용 대상(고정): ${preview.label}`)
+      );
+    }
+    if (item.unknownKeys?.length) {
+      bodyChildren.push(
+        h(doc, 'div', { class: 'rh-banner' },
+          `지원하지 않는 속성이 제안에 들어 있어 무시됩니다: ${item.unknownKeys.join(', ')}. 이 속성이 꼭 필요한 변경이라면 결과가 요청과 다를 수 있습니다.`)
       );
     }
 
@@ -1337,6 +1455,24 @@ class RisuHelperApp {
               await this.saveSettings();
             },
           })
+        ),
+        h(doc, 'div', { class: 'rh-field' },
+          h(doc, 'span', {}, '모델에 보내는 원문 길이 (초과분은 잘리고 전체 덮어쓰기가 막힘)'),
+          h(doc, 'select', {
+            class: 'rh-select',
+            onchange: async (e) => {
+              this.settings.maxContentChars = Number(e.target.value);
+              this.applyContentLimit();
+              await this.saveSettings();
+              await this.refreshContextSnapshot();
+              this.render();
+            },
+          },
+            ...MAX_CONTENT_CHAR_OPTIONS.map(n =>
+              h(doc, 'option', { value: String(n), selected: this.settings.maxContentChars === n },
+                `${n.toLocaleString()}자${n === DEFAULT_MAX_CONTENT_CHARS ? ' (기본)' : n === MAX_CONTENT_CHAR_OPTIONS[0] ? ' (컨텍스트가 작은 모델용)' : ''}`)
+            )
+          )
         )
       ),
       h(doc, 'div', { class: 'rh-field' },
@@ -1426,6 +1562,20 @@ class RisuHelperApp {
           h(doc, 'label', {},
             h(doc, 'input', {
               type: 'checkbox',
+              checked: this.settings.showDetectDiagnostics,
+              onchange: async (e) => {
+                this.settings.showDetectDiagnostics = Boolean(e.target.checked);
+                this.tracker.diagnostics = this.settings.showDetectDiagnostics;
+                await this.saveSettings();
+                if (this.tracker.enabled) await this.tracker.scanNow({ allowScreenFallback: true });
+                this.render();
+              },
+            }),
+            '감지 근거 표시 (대상이 잘못 잡힐 때 원인 확인용)'
+          ),
+          h(doc, 'label', {},
+            h(doc, 'input', {
+              type: 'checkbox',
               checked: this.settings.autoFillModuleEditor,
               onchange: async (e) => {
                 this.settings.autoFillModuleEditor = Boolean(e.target.checked);
@@ -1469,6 +1619,7 @@ class RisuHelperApp {
 
   render() {
     const doc = this.doc;
+    this._streamingBody = null;
     const prevInput = doc.querySelector('.rh-composer-input')?.value ?? '';
     const prevPresetScroll = doc.querySelector('.rh-preset-body')?.scrollTop ?? null;
     const prevChatScroll = doc.querySelector('.rh-chat')?.scrollTop ?? null;
@@ -1547,18 +1698,22 @@ class RisuHelperApp {
             this.render();
           },
         }, this.settings.wideMode ? '좁게' : '넓게'),
-        this.adapter.undoStack.length > 0 && h(doc, 'button', {
+        this.adapter.undoUnitCount() > 0 && h(doc, 'button', {
           class: 'rh-btn',
+          title: `다음에 되돌릴 변경: ${this.adapter.peekUndoLabel()}`,
           onclick: async () => {
             try {
               const res = await this.adapter.undo();
+              this.syncAppliedCards();
               await this.refreshContextSnapshot();
-              this.showToast(`되돌림: ${res.label}`);
+              this.showToast(this.describeUndoResult(res));
             } catch (err) {
+              this.syncAppliedCards();
               this.showToast(err.message);
             }
+            this.render();
           },
-        }, `되돌리기 (${this.adapter.undoStack.length})`)
+        }, `되돌리기 (${this.adapter.undoUnitCount()})`)
       )
     );
 
@@ -1655,6 +1810,24 @@ class RisuHelperApp {
       }
     }
 
+    if (this.settings.showDetectDiagnostics && ctx.diagnostics) {
+      const sig = ctx.diagnostics.signals || {};
+      const lines = [
+        `판정: ${ctx.targetKind}${ctx.fieldKey ? ` / ${ctx.fieldKey}` : ''} (화면: ${ctx.screen})`,
+        `옆 라벨: "${sig.nearbyLabel || ''}"  placeholder: "${sig.placeholder || ''}"  태그: ${sig.tag || ''}${sig.inputType ? `[${sig.inputType}]` : ''}`,
+        `제목: ${(sig.headings || []).join(' | ') || '(없음)'}`,
+        `활성 탭: ${(sig.activeTabs || []).join(' | ') || '(없음)'}  로어북 탭: "${sig.loreTabLabel || ''}"`,
+        `항목 번호: ${sig.loreIdx ?? '(없음)'}  설정 ID: ${sig.settingId || '(없음)'}`,
+        ...(ctx.diagnostics.errors || []).map(e => `무시된 오류: ${e.message}${e.at ? ` (${e.at})` : ''}`),
+      ];
+      contextBarChildren.push(
+        h(doc, 'details', { class: 'rh-preview-details' },
+          h(doc, 'summary', {}, `🔎 감지 근거 보기${ctx.diagnostics.errors?.length ? ` · 무시된 오류 ${ctx.diagnostics.errors.length}건` : ''}`),
+          h(doc, 'pre', { class: 'rh-preview-pre' }, lines.join('\n'))
+        )
+      );
+    }
+
     if (this.activeSnapshot?.ok && this.activeSnapshot.moduleUncertain) {
       contextBarChildren.push(h(doc, 'div', { class: 'rh-banner error' },
         '열려 있는 모듈을 자동으로 확정하지 못했습니다. 아래 모듈 선택기에서 편집할 모듈을 직접 선택해 주세요. 선택 전에는 모듈 편집 제안을 적용할 수 없습니다.'));
@@ -1688,6 +1861,15 @@ class RisuHelperApp {
             }, `🛟 숨겨진 로어북 ${orphanCount}개 최상위로 복구`)
           )
         )
+      );
+    }
+
+    const originalLength = this.activeSnapshot?.ok ? String(this.activeSnapshot.content || '').length : 0;
+    if (originalLength > this.settings.maxContentChars) {
+      contextBarChildren.push(
+        h(doc, 'div', { class: 'rh-banner' },
+          `✂️ 원문 ${originalLength.toLocaleString()}자 중 앞 ${this.settings.maxContentChars.toLocaleString()}자만 모델에 전달됩니다. ` +
+          '뒷부분 유실을 막기 위해 전체 덮어쓰기는 차단되고 부분 편집만 적용할 수 있습니다. 설정 › "모델에 보내는 원문 길이"에서 늘릴 수 있습니다.')
       );
     }
 
@@ -1773,6 +1955,7 @@ class RisuHelperApp {
           bubble.appendChild(h(doc, 'div', { class: 'rh-msg-bar' }, barLeft, barActions));
 
           const body = h(doc, 'div', { class: 'rh-msg-body' });
+          if (msg.streaming) this._streamingBody = { msg, el: body };
           if (msg.error) {
             body.appendChild(h(doc, 'div', { class: 'rh-banner error' }, `오류: ${msg.error}`));
           } else if (msg.rawView) {
@@ -1787,6 +1970,22 @@ class RisuHelperApp {
 
           for (const err of msg.parseErrors || []) {
             msgWrap.appendChild(h(doc, 'div', { class: 'rh-banner error' }, `제안 블록 파싱 실패: ${err.error}`));
+          }
+          const applicable = this.applicableProposals(msg);
+          if (applicable.length >= 2 || msg.groupId) {
+            msgWrap.appendChild(
+              h(doc, 'div', { class: 'rh-row', style: 'gap:6px;flex-wrap:wrap;' },
+                applicable.length >= 2 && h(doc, 'button', {
+                  class: 'rh-btn primary',
+                  disabled: this.busy,
+                  onclick: () => this.applyAllProposals(msg),
+                }, `모두 적용 (${applicable.length})`),
+                msg.groupId && h(doc, 'button', {
+                  class: 'rh-btn danger',
+                  onclick: () => this.undoProposalGroup(msg),
+                }, '묶음 되돌리기')
+              )
+            );
           }
           for (const item of msg.proposals || []) {
             msgWrap.appendChild(this.renderProposalCard(item));

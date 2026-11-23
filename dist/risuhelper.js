@@ -1,24 +1,25 @@
 //@name risuhelper
 //@display-name RisuHelper
 //@api 3.0
-//@version 0.4.2
+//@version 0.4.3
 //@update-url https://raw.githubusercontent.com/magarindev-ctrl/Risuhelper/main/dist/risuhelper.js
 //@link https://github.com/magarindev-ctrl/Risuhelper RisuHelper GitHub
 
 /*
- * RisuHelper v0.4.2 — RisuAI Plugin API v3
+ * RisuHelper v0.4.3 — RisuAI Plugin API v3
  * License: GPL-3.0-only
  * https://github.com/magarindev-ctrl/Risuhelper
  */
 (() => {
   'use strict';
-  const __RISUHELPER_VERSION__ = "0.4.2";
+  const __RISUHELPER_VERSION__ = "0.4.3";
   const __modules = {
   "src/version.js"(__require, __exports) {
-const VERSION = '0.4.2';
+const VERSION = '0.4.3';
 const PLUGIN_NAME = 'risuhelper';
 const STORAGE_KEY = 'risuhelper_state_v1';
 const PRESET_STORAGE_KEY = 'risuhelper_preset_v1';
+const UNDO_STORAGE_KEY = 'risuhelper_undo_v1';
 
 /**
  * Editable configuration keys present in RisuAI's allowedDbKeys
@@ -97,7 +98,10 @@ const CONFIG_FIELD_META = {
   guiHTML: { label: '설정 · 채팅 HTML (guiHTML)' },
 };
 
-const MAX_LLM_CONTENT_CHARS = 24000;
+// How many characters of the target's original text are sent to the model. Longer originals are
+// truncated (and full overwrites of them blocked), so this is user-configurable in settings.
+const DEFAULT_MAX_CONTENT_CHARS = 60000;
+const MAX_CONTENT_CHAR_OPTIONS = [24000, 60000, 120000, 300000];
 const ALLOWED_CHAR_FIELDS = Object.keys(CHAR_FIELD_META);
 const ALLOWED_MODULE_FIELDS = Object.keys(MODULE_FIELD_META);
 const ALLOWED_LORE_TEXT_FIELDS = ['comment', 'key', 'secondkey', 'content', 'insertorder'];
@@ -118,7 +122,9 @@ const SCREEN_LABELS = {
   __exports.PLUGIN_NAME = PLUGIN_NAME;
   __exports.STORAGE_KEY = STORAGE_KEY;
   __exports.PRESET_STORAGE_KEY = PRESET_STORAGE_KEY;
-  __exports.MAX_LLM_CONTENT_CHARS = MAX_LLM_CONTENT_CHARS;
+  __exports.UNDO_STORAGE_KEY = UNDO_STORAGE_KEY;
+  __exports.DEFAULT_MAX_CONTENT_CHARS = DEFAULT_MAX_CONTENT_CHARS;
+  __exports.MAX_CONTENT_CHAR_OPTIONS = MAX_CONTENT_CHAR_OPTIONS;
   __exports.ALLOWED_CONFIG_KEYS = ALLOWED_CONFIG_KEYS;
   __exports.CONFIG_KEY_TYPES = CONFIG_KEY_TYPES;
   __exports.CHAR_FIELD_META = CHAR_FIELD_META;
@@ -1363,6 +1369,34 @@ const CHAT_INPUT_SELECTOR = 'textarea.text-input-area, textarea#messageInputTran
 const CHIP_ATTR = 'x-risuhelper-chip';
 const DRAG_THRESHOLD_PX = 6;
 
+// Detection diagnostics (opt-in). The detector swallows SafeElement errors on purpose — hosts
+// differ in which calls they support — but a wrong detection must be explainable. While a
+// diagnostic run is active, every swallowed error and the final signals are recorded.
+let activeDiagnostics = null;
+
+function noteDetectError(err) {
+  if (!activeDiagnostics || activeDiagnostics.errors.length >= 30) return;
+  const stackLine = String(err?.stack || '').split('\n')[1] || '';
+  activeDiagnostics.errors.push({
+    message: String(err?.message || err),
+    at: stackLine.trim().replace(/^at\s+/, '').split(' ')[0] || '',
+  });
+}
+
+function summarizeSignals(signals) {
+  const out = {};
+  for (const [key, value] of Object.entries(signals || {})) {
+    if (key === 'moduleDomHints') {
+      out.moduleDomHints = value ? { tab: value.tab ?? null, openIdx: value.openIdx ?? null, items: value.items?.length ?? 0 } : null;
+    } else if (typeof value === 'string') {
+      out[key] = value.slice(0, 120);
+    } else {
+      out[key] = value;
+    }
+  }
+  return out;
+}
+
 /**
  * Safely parses attributes from the opening HTML tag string returned by SafeElement.getOuterHTML().
  * (Plugin v3 SafeElement.getAttribute() only allows 'x-*' attributes.)
@@ -1494,7 +1528,7 @@ async function isLuaModeBar(el, className) {
         return true;
       }
     }
-  } catch {}
+  } catch (err) { noteDetectError(err); }
   return false;
 }
 
@@ -1524,7 +1558,7 @@ async function extractLabelFromColWrapper(el, className) {
         }
       }
     }
-  } catch {}
+  } catch (err) { noteDetectError(err); }
   return '';
 }
 
@@ -1540,14 +1574,14 @@ async function findNearestActiveTabLabel(startNode, maxHops = 6) {
     let parent = null;
     try {
       parent = await cur.getParent();
-    } catch {}
+    } catch (err) { noteDetectError(err); }
     if (!parent || typeof parent.querySelector !== 'function') return '';
     try {
       const tab = await parent.querySelector('button.bg-selected, [role="tab"][aria-selected="true"]');
       if (tab) {
         return String((await tab.textContent()) || '').replace(/\s+/g, ' ').trim().slice(0, 36);
       }
-    } catch {}
+    } catch (err) { noteDetectError(err); }
     cur = parent;
   }
   return '';
@@ -1584,7 +1618,7 @@ async function collectActiveTabs(scopeRoot) {
       const node = await ariaTabs.at(i);
       if (node) pushUnique(await node.textContent());
     }
-  } catch {}
+  } catch (err) { noteDetectError(err); }
   if (found.length === 0) {
     try {
       const clsTabs = await scopeRoot.querySelectorAll('button.bg-darkbutton, button.bg-selected');
@@ -1593,7 +1627,7 @@ async function collectActiveTabs(scopeRoot) {
         const node = await clsTabs.at(i);
         if (node) pushUnique(await node.textContent());
       }
-    } catch {}
+    } catch (err) { noteDetectError(err); }
   }
   return found;
 }
@@ -1606,13 +1640,13 @@ async function resolveModuleScopeRoot(h2Node, rootDoc) {
   let cur = h2Node;
   for (let hop = 0; hop < 3 && cur; hop++) {
     let parent = null;
-    try { parent = await cur.getParent(); } catch {}
+    try { parent = await cur.getParent(); } catch (err) { noteDetectError(err); }
     if (!parent) break;
     if (typeof parent.querySelector === 'function') {
       try {
         const marker = await parent.querySelector('[role="tab"], button.bg-darkbutton, button.bg-selected, [data-risu-idx]');
         if (marker) return parent;
-      } catch {}
+      } catch (err) { noteDetectError(err); }
     }
     cur = parent;
   }
@@ -1648,7 +1682,7 @@ async function collectModuleDomHints(scopeRoot, { activeTabs = [], focusedLoreId
         // Hidden items inside closed folders render empty placeholder divs without `button.valuer`
         let titleBtn = null;
         if (typeof node.querySelector === 'function') {
-          try { titleBtn = await node.querySelector('button.valuer'); } catch {}
+          try { titleBtn = await node.querySelector('button.valuer'); } catch (err) { noteDetectError(err); }
         }
         if (!titleBtn) continue;
 
@@ -1658,13 +1692,13 @@ async function collectModuleDomHints(scopeRoot, { activeTabs = [], focusedLoreId
           const nodeAttrs = parseOpeningTagAttrs(nodeOuter);
           const parsed = parseInt(nodeAttrs['data-risu-idx'], 10);
           if (!Number.isNaN(parsed) && parsed >= 0) idx = parsed;
-        } catch {}
+        } catch (err) { noteDetectError(err); }
         if (idx === null) continue;
 
         let title = '';
         try {
           title = String((await titleBtn.textContent()) || '').replace(/\s+/g, ' ').trim().slice(0, 120);
-        } catch {}
+        } catch (err) { noteDetectError(err); }
         items.push({ idx, title });
 
         // Detect expanded accordion entry; iterating in DOM order picks the innermost entry over outer folders
@@ -1676,15 +1710,15 @@ async function collectModuleDomHints(scopeRoot, { activeTabs = [], focusedLoreId
               try {
                 const txt = String((await ce.innerText()) || '').slice(0, 600);
                 if (txt.trim()) openTextPreview = txt;
-              } catch {}
+              } catch (err) { noteDetectError(err); }
             } else if (openEditableIdx === null) {
               const inp = await node.querySelector('textarea, input');
               if (inp) openInputIdx = idx;
             }
-          } catch {}
+          } catch (err) { noteDetectError(err); }
         }
       }
-    } catch {}
+    } catch (err) { noteDetectError(err); }
   }
 
   // On Trigger tab (or fallback with no [data-risu-idx]), read visible Lua [contenteditable="true"]
@@ -1695,7 +1729,7 @@ async function collectModuleDomHints(scopeRoot, { activeTabs = [], focusedLoreId
         const txt = String((await ce.innerText()) || '').slice(0, 600);
         if (txt.trim()) luaTextPreview = txt;
       }
-    } catch {}
+    } catch (err) { noteDetectError(err); }
   }
 
   // On Additional Assets tab, read visible asset names from table cells
@@ -1711,7 +1745,7 @@ async function collectModuleDomHints(scopeRoot, { activeTabs = [], focusedLoreId
           assetNames.push(txt);
         }
       }
-    } catch {}
+    } catch (err) { noteDetectError(err); }
   }
 
   const openIdx = Number.isInteger(focusedLoreIdx)
@@ -2311,8 +2345,10 @@ function classifyDomSignals(signals) {
  * Inspects the currently focused element in RisuAI's SafeDocument (`rootDoc`).
  * Returns null if nothing editable is focused (or if mainDom is unavailable).
  */
-async function inspectFocusedElement(rootDoc) {
+async function inspectFocusedElement(rootDoc, options = {}) {
   if (!rootDoc) return null;
+  const diag = options.diagnostics ? { errors: [] } : null;
+  if (diag) activeDiagnostics = diag;
   let el;
   try {
     el = await rootDoc.querySelector(FOCUS_SELECTOR);
@@ -2334,7 +2370,7 @@ async function inspectFocusedElement(rootDoc) {
     if (isContentEditable) {
       try {
         liveTextPreview = String((await el.innerText()) || '').slice(0, 600);
-      } catch {}
+      } catch (err) { noteDetectError(err); }
     }
 
     let elRect = null;
@@ -2343,7 +2379,7 @@ async function inspectFocusedElement(rootDoc) {
         const rect = await el.getBoundingClientRect();
         if (hasUsableRect(rect)) elRect = rect;
       }
-    } catch {}
+    } catch (err) { noteDetectError(err); }
 
     const headings = [];
     const activeTabs = [];
@@ -2415,7 +2451,7 @@ async function inspectFocusedElement(rootDoc) {
         if ((checkLocalContext || trackTableRow) && depth > 0 && typeof parent.querySelector === 'function') {
           try {
             focusQueryWorks = Boolean(await parent.querySelector(FOCUS_SELECTOR));
-          } catch {}
+          } catch (err) { noteDetectError(err); }
         }
 
         let prevPrimarySpan = '';
@@ -2436,18 +2472,18 @@ async function inspectFocusedElement(rootDoc) {
             if (depth > 0 && focusQueryWorks) {
               try {
                 isCur = Boolean(await child.querySelector(FOCUS_SELECTOR));
-              } catch {}
+              } catch (err) { noteDetectError(err); }
             } else if (depth === 0 && elRect && typeof child.getBoundingClientRect === 'function') {
               try {
                 const cRect = await child.getBoundingClientRect();
                 isCur = rectsMatch(elRect, cRect);
-              } catch {}
+              } catch (err) { noteDetectError(err); }
             }
             if (!isCur && !focusQueryWorks && !(depth === 0 && elRect)) {
               try {
                 const cOuter = await child.getOuterHTML();
                 isCur = cOuter === outerHtml || (depth > 0 && cOuter === curOuter);
-              } catch {}
+              } catch (err) { noteDetectError(err); }
             }
           }
 
@@ -2566,7 +2602,7 @@ async function inspectFocusedElement(rootDoc) {
               moduleH2Node = h2;
             }
           }
-        } catch {}
+        } catch (err) { noteDetectError(err); }
       }
 
       if (!isChatInput && isChatElementAttrs(pAttrs)) {
@@ -2591,7 +2627,7 @@ async function inspectFocusedElement(rootDoc) {
             moduleH2Node = node;
           }
         }
-      } catch {}
+      } catch (err) { noteDetectError(err); }
     }
 
     const loreTabLabel = loreItemNode ? await findNearestActiveTabLabel(loreItemNode) : '';
@@ -2615,7 +2651,7 @@ async function inspectFocusedElement(rootDoc) {
       });
     }
 
-    return classifyDomSignals({
+    const signals = {
       tag,
       placeholder: attrs.placeholder || '',
       inputType: attrs.type || '',
@@ -2635,9 +2671,17 @@ async function inspectFocusedElement(rootDoc) {
       tableRowIndex,
       moduleDomHints,
       loreTabLabel,
-    });
-  } catch {
+    };
+    const classified = classifyDomSignals(signals);
+    if (diag && classified) {
+      classified.diagnostics = { signals: summarizeSignals(signals), errors: diag.errors };
+    }
+    return classified;
+  } catch (err) {
+    noteDetectError(err);
     return null;
+  } finally {
+    if (diag) activeDiagnostics = null;
   }
 }
 
@@ -2661,13 +2705,13 @@ async function inspectVisibleScreen(rootDoc) {
           moduleH2Node = node;
         }
       }
-    } catch {}
+    } catch (err) { noteDetectError(err); }
 
     // Check explicit chat input presence first; if present and no settings/persona/module modal heading is active, it's the chat screen.
     let chatInputEl = null;
     try {
       chatInputEl = await rootDoc.querySelector(CHAT_INPUT_SELECTOR);
-    } catch {}
+    } catch (err) { noteDetectError(err); }
 
     const headingText = headings.join(' | ');
     const modalHeadings = [
@@ -2851,7 +2895,7 @@ class FocusTracker {
           return this._cachedViewport;
         }
       }
-    } catch {}
+    } catch (err) { noteDetectError(err); }
     // 2. Fallback: body rect (fixed 100dvh viewport in PocketRisu/RisuAI)
     try {
       const body = await this.rootDoc?.querySelector('body');
@@ -2862,7 +2906,7 @@ class FocusTracker {
           return this._cachedViewport;
         }
       }
-    } catch {}
+    } catch (err) { noteDetectError(err); }
     // 3. Fallback: querySelector('html') (unit test mocks)
     try {
       const html = await this.rootDoc?.querySelector('html');
@@ -2873,7 +2917,7 @@ class FocusTracker {
           return this._cachedViewport;
         }
       }
-    } catch {}
+    } catch (err) { noteDetectError(err); }
     if (typeof globalThis.innerWidth === 'number' && globalThis.innerWidth > 0) {
       this._cachedViewport = { width: globalThis.innerWidth, height: globalThis.innerHeight || 768 };
       return this._cachedViewport;
@@ -2886,7 +2930,7 @@ class FocusTracker {
       try {
         const doc = await this.api.getRootDocument();
         if (doc) this.rootDoc = doc;
-      } catch {}
+      } catch (err) { noteDetectError(err); }
     }
     return await this._getViewportSize();
   }
@@ -2908,7 +2952,7 @@ class FocusTracker {
       if (view && view.width > 0 && view.height > 0) {
         this._cachedViewport = view;
       }
-    } catch {}
+    } catch (err) { noteDetectError(err); }
   }
 
   async start() {
@@ -2928,7 +2972,7 @@ class FocusTracker {
             this._handlePointerMove(e);
           });
           if (id) this.listenerIds.push({ type: moveEvt, id });
-        } catch {}
+        } catch (err) { noteDetectError(err); }
       }
 
       for (const endEvt of ['pointerup', 'touchend', 'mouseup', 'pointercancel', 'touchcancel']) {
@@ -2937,7 +2981,7 @@ class FocusTracker {
             this._handlePointerEnd();
           });
           if (id) this.listenerIds.push({ type: endEvt, id });
-        } catch {}
+        } catch (err) { noteDetectError(err); }
       }
 
       for (const evt of ['pointerup', 'click', 'keyup']) {
@@ -2947,7 +2991,7 @@ class FocusTracker {
             this.scheduleScan();
           });
           if (id) this.listenerIds.push({ type: evt, id });
-        } catch {}
+        } catch (err) { noteDetectError(err); }
       }
 
       if (this.showFloatingChip && !this._isDocked) {
@@ -2971,7 +3015,7 @@ class FocusTracker {
 
   async scanNow({ allowScreenFallback = false } = {}) {
     if (!this.rootDoc) return this.lastContext;
-    let ctx = await inspectFocusedElement(this.rootDoc);
+    let ctx = await inspectFocusedElement(this.rootDoc, { diagnostics: Boolean(this.diagnostics) });
     if (!ctx && allowScreenFallback) {
       ctx = await inspectVisibleScreen(this.rootDoc);
     }
@@ -2995,7 +3039,7 @@ class FocusTracker {
         const disp = String((await f.getStyle('display')) || '').trim().toLowerCase();
         if (disp && disp !== 'none') visible.add(i);
       }
-    } catch {}
+    } catch (err) { noteDetectError(err); }
     return visible;
   }
 
@@ -3010,7 +3054,7 @@ class FocusTracker {
         this._dockFrame = tagged;
         return tagged;
       }
-    } catch {}
+    } catch (err) { noteDetectError(err); }
 
     if (typeof this.rootDoc.querySelectorAll !== 'function') return null;
 
@@ -3036,7 +3080,7 @@ class FocusTracker {
         } else {
           otherVisible.push(f);
         }
-      } catch {}
+      } catch (err) { noteDetectError(err); }
     }
 
     const candidates = [...newlyVisible, ...otherVisible];
@@ -3055,13 +3099,13 @@ class FocusTracker {
           await cand.setStyle('width', `${testWidth}px`);
           await new Promise(r => setTimeout(r, 25));
           if (Math.abs(localWin.innerWidth - testWidth) <= 8) {
-            try { await cand.setAttribute(FRAME_ATTR, '1'); } catch {}
+            try { await cand.setAttribute(FRAME_ATTR, '1'); } catch (err) { noteDetectError(err); }
             this._dockFrame = cand;
             return cand;
           }
           await cand.setStyle('width', origStyleW || '100%');
         } catch {
-          try { await cand.setStyle('width', origStyleW || '100%'); } catch {}
+          try { await cand.setStyle('width', origStyleW || '100%'); } catch (err) { noteDetectError(err); }
         }
       }
       return null;
@@ -3071,7 +3115,7 @@ class FocusTracker {
     //    only accept when strictly 1 iframe transitioned from hidden -> visible on showContainer().
     if (newlyVisible.length === 1) {
       const only = newlyVisible[0];
-      try { await only.setAttribute(FRAME_ATTR, '1'); } catch {}
+      try { await only.setAttribute(FRAME_ATTR, '1'); } catch (err) { noteDetectError(err); }
       this._dockFrame = only;
       return only;
     }
@@ -3084,7 +3128,7 @@ class FocusTracker {
       await this._dockMain.setStyle('width', this._savedMainStyle.width || '');
       await this._dockMain.setStyle('maxWidth', this._savedMainStyle.maxWidth || '');
       await this._dockMain.setStyle('boxSizing', this._savedMainStyle.boxSizing || '');
-    } catch {}
+    } catch (err) { noteDetectError(err); }
     this._savedMainStyle = null;
     this._dockMain = null;
   }
@@ -3101,7 +3145,7 @@ class FocusTracker {
   } = {}) {
     if (!this.rootDoc) {
       if (typeof this.api?.getRootDocument === 'function') {
-        try { this.rootDoc = await this.api.getRootDocument(); } catch {}
+        try { this.rootDoc = await this.api.getRootDocument(); } catch (err) { noteDetectError(err); }
       }
     }
     if (!this.rootDoc) {
@@ -3154,7 +3198,7 @@ class FocusTracker {
           await main.setStyle('maxWidth', `calc(100% - ${dockW}px)`);
           this._dockMain = main;
         }
-      } catch {}
+      } catch (err) { noteDetectError(err); }
     } else {
       await this._restoreMainLayout();
     }
@@ -3186,7 +3230,7 @@ class FocusTracker {
         await this._dockFrame.setStyle('width', '100%');
         await this._dockFrame.setStyle('borderLeft', '');
         await this._dockFrame.setStyle('boxShadow', '');
-      } catch {}
+      } catch (err) { noteDetectError(err); }
     }
 
     const wasHiddenForDock = this._chipHiddenForDock;
@@ -3206,7 +3250,7 @@ class FocusTracker {
         pos,
         dragging,
       }));
-    } catch {}
+    } catch (err) { noteDetectError(err); }
   }
 
   /**
@@ -3348,7 +3392,7 @@ class FocusTracker {
           }
         }
       }
-    } catch {}
+    } catch (err) { noteDetectError(err); }
   }
 
   _handlePointerMove(e) {
@@ -3460,7 +3504,7 @@ class FocusTracker {
       try {
         const stale = await this.rootDoc.querySelector(`[${CHIP_ATTR}="1"]`);
         if (stale) await stale.remove();
-      } catch {}
+      } catch (err) { noteDetectError(err); }
 
       // Use <div> instead of <button> so grabbing/dragging never steals :focus from the active editor
       const chip = await this.rootDoc.createElement('div');
@@ -3481,7 +3525,7 @@ class FocusTracker {
             this._handleChipPointerDown(e);
           });
           if (downId) this.chipListenerIds.push({ type: downEvt, id: downId });
-        } catch {}
+        } catch (err) { noteDetectError(err); }
       }
 
       try {
@@ -3493,12 +3537,12 @@ class FocusTracker {
           this.onChipClick(this.lastContext);
         });
         if (clickId) this.chipListenerIds.push({ type: 'click', id: clickId });
-      } catch {}
+      } catch (err) { noteDetectError(err); }
 
       await body.appendChild(chip);
       this.chipEl = chip;
       await this._refreshChipMetrics();
-    } catch {}
+    } catch (err) { noteDetectError(err); }
   }
 
   async setChipVisible(visible) {
@@ -3518,7 +3562,7 @@ class FocusTracker {
       const text = ctx.labelText ? `⋮⋮ ✨ ${ctx.labelText}` : '⋮⋮ ✨ RisuHelper';
       await this.chipEl.setTextContent(text.slice(0, 36));
       await this._refreshChipMetrics();
-    } catch {}
+    } catch (err) { noteDetectError(err); }
   }
 
   async unmountFloatingChip() {
@@ -3532,10 +3576,10 @@ class FocusTracker {
       for (const entry of this.chipListenerIds) {
         try {
           await this.chipEl.removeEventListener(entry.type, entry.id);
-        } catch {}
+        } catch (err) { noteDetectError(err); }
       }
       await this.chipEl.remove();
-    } catch {}
+    } catch (err) { noteDetectError(err); }
     this.chipEl = null;
     this.chipListenerIds = [];
   }
@@ -3560,7 +3604,7 @@ class FocusTracker {
       for (const entry of this.listenerIds) {
         try {
           await this.rootDoc.removeEventListener(entry.type, entry.id);
-        } catch {}
+        } catch (err) { noteDetectError(err); }
       }
     }
     this.listenerIds = [];
@@ -3614,7 +3658,7 @@ async function syncModuleEditorDom(rootDoc, { targetKind, fieldKey, loreIndex, r
         break;
       }
     }
-  } catch {}
+  } catch (err) { noteDetectError(err); }
 
   if (!editH2) {
     return { ok: false, reason: '현재 화면에 모듈 수정 창이 열려 있지 않습니다.' };
@@ -3639,7 +3683,7 @@ async function syncModuleEditorDom(rootDoc, { targetKind, fieldKey, loreIndex, r
   if (targetKind === 'module_lua') {
     try {
       editorEl = await scopeRoot.querySelector('[contenteditable="true"], [contenteditable=""]');
-    } catch {}
+    } catch (err) { noteDetectError(err); }
   } else {
     const wantIdx = targetKind === 'module_lorebook' ? loreIndex : regexIndex;
     if (!Number.isInteger(wantIdx) || wantIdx < 0) {
@@ -3683,7 +3727,7 @@ async function syncModuleEditorDom(rootDoc, { targetKind, fieldKey, loreIndex, r
           }
         }
       }
-    } catch {}
+    } catch (err) { noteDetectError(err); }
   }
 
   if (!editorEl || typeof editorEl.setTextContent !== 'function') {
@@ -3696,7 +3740,7 @@ async function syncModuleEditorDom(rootDoc, { targetKind, fieldKey, loreIndex, r
   try {
     await editorEl.setTextContent(String(text ?? ''));
     if (typeof editorEl.focus === 'function') {
-      try { await editorEl.focus(); } catch {}
+      try { await editorEl.focus(); } catch (err) { noteDetectError(err); }
     }
     return {
       ok: true,
@@ -3954,9 +3998,292 @@ function buildDiffPreview(beforeText, afterText, maxLines = 180) {
   __exports.buildDiffPreview = buildDiffPreview;
 
   },
+  "src/undo-journal.js"(__require, __exports) {
+// Serialisable undo journal.
+//
+// A change is recorded as the list of operations that turn the entity's previous state into
+// the state RisuHelper wrote. Operations are plain JSON, so the journal can be persisted and
+// replayed after a reload. Reverting is guarded: an operation is only undone while the host
+// still holds the value RisuHelper wrote, so later edits by the user are reported as conflicts
+// instead of being overwritten.
+
+const ID_KEYS = ['id', 'chatId'];
+const ANCHOR_KEYS = ['comment', 'key', 'name', 'title'];
+const BAD_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+function cloneJson(value) {
+  return value === undefined ? undefined : JSON.parse(JSON.stringify(value));
+}
+
+// The live entity is cloned structurally (keeps values JSON cannot represent); recorded operation
+// values are always JSON.
+function cloneDeep(value) {
+  if (typeof structuredClone === 'function') {
+    try { return structuredClone(value); } catch {}
+  }
+  return cloneJson(value);
+}
+
+function isPlainObject(v) {
+  return v !== null && typeof v === 'object' && !Array.isArray(v);
+}
+
+function deepEqual(a, b) {
+  if (a === b) return true;
+  if (Array.isArray(a) && Array.isArray(b)) {
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) if (!deepEqual(a[i], b[i])) return false;
+    return true;
+  }
+  if (isPlainObject(a) && isPlainObject(b)) {
+    const ka = Object.keys(a).filter(k => a[k] !== undefined);
+    const kb = Object.keys(b).filter(k => b[k] !== undefined);
+    if (ka.length !== kb.length) return false;
+    for (const k of ka) if (!deepEqual(a[k], b[k])) return false;
+    return true;
+  }
+  return false;
+}
+
+/**
+ * True while `current` still holds what was written. Objects may have gained extra properties
+ * (hosts normalise saved entries), but every written property must be unchanged.
+ */
+function matchesWritten(current, written) {
+  if (current === written) return true;
+  if (Array.isArray(written)) {
+    if (!Array.isArray(current) || current.length !== written.length) return false;
+    for (let i = 0; i < written.length; i++) if (!matchesWritten(current[i], written[i])) return false;
+    return true;
+  }
+  if (isPlainObject(written)) {
+    if (!isPlainObject(current)) return false;
+    for (const k of Object.keys(written)) {
+      if (written[k] === undefined) continue;
+      if (!matchesWritten(current[k], written[k])) return false;
+    }
+    return true;
+  }
+  return false;
+}
+
+function uniqueIdKey(...lists) {
+  for (const key of ID_KEYS) {
+    const ok = lists.every(list => {
+      const seen = new Set();
+      for (const el of list) {
+        if (!isPlainObject(el) || typeof el[key] !== 'string' || !el[key] || seen.has(el[key])) return false;
+        seen.add(el[key]);
+      }
+      return true;
+    });
+    if (ok && lists.some(list => list.length > 0)) return key;
+  }
+  return null;
+}
+
+function anchorOf(element) {
+  if (!isPlainObject(element)) return null;
+  const anchor = {};
+  for (const k of ANCHOR_KEYS) {
+    if (typeof element[k] === 'string') anchor[k] = element[k];
+  }
+  return Object.keys(anchor).length > 0 ? anchor : null;
+}
+
+function indexSegment(index, element) {
+  const anchor = anchorOf(element);
+  return anchor ? { i: index, a: anchor } : index;
+}
+
+/**
+ * Computes the operations that turn `before` into `after`.
+ * Path segments: object key (string), list index (number), `{ k, v }` (list element whose
+ * id-like property `k` equals `v`), or `{ i, a }` (list index plus identifying properties).
+ */
+function diffValues(before, after, path = [], ops = []) {
+  if (deepEqual(before, after)) return ops;
+
+  if (isPlainObject(before) && isPlainObject(after)) {
+    const keys = new Set([...Object.keys(before), ...Object.keys(after)]);
+    for (const key of keys) {
+      if (BAD_KEYS.has(key)) continue;
+      const inBefore = Object.hasOwn(before, key) && before[key] !== undefined;
+      const inAfter = Object.hasOwn(after, key) && after[key] !== undefined;
+      if (inBefore && inAfter) {
+        diffValues(before[key], after[key], [...path, key], ops);
+      } else if (inAfter) {
+        ops.push({ op: 'set', path: [...path, key], had: false, value: cloneJson(after[key]) });
+      } else if (inBefore) {
+        ops.push({ op: 'set', path: [...path, key], had: true, old: cloneJson(before[key]), gone: true });
+      }
+    }
+    return ops;
+  }
+
+  if (Array.isArray(before) && Array.isArray(after)) {
+    const idKey = uniqueIdKey(before, after);
+    if (idKey) {
+      const afterById = new Map(after.map(el => [el[idKey], el]));
+      const beforeIds = new Set(before.map(el => el[idKey]));
+      if (before.every(el => afterById.has(el[idKey]))) {
+        for (const el of before) {
+          diffValues(el, afterById.get(el[idKey]), [...path, { k: idKey, v: el[idKey] }], ops);
+        }
+        after.forEach((el, index) => {
+          if (!beforeIds.has(el[idKey])) ops.push({ op: 'insert', path: [...path], index, value: cloneJson(el) });
+        });
+        return ops;
+      }
+    } else if (after.length >= before.length) {
+      for (let i = 0; i < before.length; i++) {
+        diffValues(before[i], after[i], [...path, indexSegment(i, after[i])], ops);
+      }
+      for (let i = before.length; i < after.length; i++) {
+        ops.push({ op: 'insert', path: [...path], index: i, value: cloneJson(after[i]) });
+      }
+      return ops;
+    }
+  }
+
+  ops.push({ op: 'set', path: [...path], had: true, old: cloneJson(before), value: cloneJson(after) });
+  return ops;
+}
+
+function anchorMatches(element, anchor) {
+  if (!isPlainObject(element)) return false;
+  return Object.keys(anchor).every(k => element[k] === anchor[k]);
+}
+
+function stepInto(container, seg) {
+  if (typeof seg === 'string') {
+    if (!isPlainObject(container) || BAD_KEYS.has(seg)) return null;
+    return { parent: container, key: seg };
+  }
+  if (!Array.isArray(container)) return null;
+  if (typeof seg === 'number') {
+    return seg >= 0 && seg < container.length ? { parent: container, key: seg } : null;
+  }
+  if (seg && typeof seg === 'object' && 'k' in seg) {
+    const idx = container.findIndex(el => isPlainObject(el) && el[seg.k] === seg.v);
+    return idx === -1 ? null : { parent: container, key: idx };
+  }
+  if (seg && typeof seg === 'object' && 'i' in seg) {
+    if (seg.i >= 0 && seg.i < container.length && anchorMatches(container[seg.i], seg.a)) {
+      return { parent: container, key: seg.i };
+    }
+    const hits = [];
+    container.forEach((el, idx) => { if (anchorMatches(el, seg.a)) hits.push(idx); });
+    return hits.length === 1 ? { parent: container, key: hits[0] } : null;
+  }
+  return null;
+}
+
+function locate(root, path) {
+  let container = root;
+  let slot = null;
+  for (let n = 0; n < path.length; n++) {
+    slot = stepInto(container, path[n]);
+    if (!slot) return null;
+    if (n < path.length - 1) container = slot.parent[slot.key];
+  }
+  return slot;
+}
+
+function resolveValue(root, path) {
+  if (path.length === 0) return { found: true, value: root };
+  const slot = locate(root, path);
+  if (!slot) return { found: false };
+  return { found: true, value: slot.parent[slot.key] };
+}
+
+function describePath(path) {
+  return path.map(seg => {
+    if (typeof seg === 'string') return seg;
+    if (typeof seg === 'number') return `#${seg + 1}`;
+    if ('k' in seg) return String(seg.v);
+    return seg.a?.comment || seg.a?.name || seg.a?.title || `#${seg.i + 1}`;
+  }).join(' › ');
+}
+
+/**
+ * Undoes `ops` on `current` (not mutated). Returns the reverted value, how many operations were
+ * undone, and the operations that were skipped because the host no longer holds what was written.
+ */
+function revertOps(current, ops) {
+  let root = cloneDeep(current);
+  let reverted = 0;
+  const conflicts = [];
+
+  for (let n = ops.length - 1; n >= 0; n--) {
+    const op = ops[n];
+    const where = describePath(op.path);
+
+    if (op.op === 'insert') {
+      const target = resolveValue(root, op.path);
+      if (!target.found || !Array.isArray(target.value)) {
+        conflicts.push({ path: where, reason: '추가했던 항목이 들어 있던 목록을 찾을 수 없습니다.' });
+        continue;
+      }
+      const list = target.value;
+      let at = -1;
+      if (op.index < list.length && matchesWritten(list[op.index], op.value)) {
+        at = op.index;
+      } else {
+        for (let i = list.length - 1; i >= 0; i--) {
+          if (matchesWritten(list[i], op.value)) { at = i; break; }
+        }
+      }
+      if (at === -1) {
+        conflicts.push({ path: where, reason: '추가했던 항목이 이후 수정되었거나 삭제되었습니다.' });
+        continue;
+      }
+      list.splice(at, 1);
+      reverted++;
+      continue;
+    }
+
+    if (op.path.length === 0) {
+      if (!matchesWritten(root, op.value)) {
+        conflicts.push({ path: '(전체)', reason: '적용 이후 값이 다시 변경되었습니다.' });
+        continue;
+      }
+      root = cloneJson(op.old);
+      reverted++;
+      continue;
+    }
+
+    const slot = locate(root, op.path);
+    if (!slot) {
+      conflicts.push({ path: where, reason: '대상 항목을 찾을 수 없습니다.' });
+      continue;
+    }
+    const exists = Array.isArray(slot.parent)
+      ? true
+      : Object.hasOwn(slot.parent, slot.key) && slot.parent[slot.key] !== undefined;
+    const untouched = op.gone ? !exists : (exists && matchesWritten(slot.parent[slot.key], op.value));
+    if (!untouched) {
+      conflicts.push({ path: where, reason: '적용 이후 값이 다시 변경되었습니다.' });
+      continue;
+    }
+    if (op.had) slot.parent[slot.key] = cloneJson(op.old);
+    else delete slot.parent[slot.key];
+    reverted++;
+  }
+
+  return { value: root, reverted, conflicts };
+}
+
+  __exports.diffValues = diffValues;
+  __exports.revertOps = revertOps;
+  __exports.deepEqual = deepEqual;
+  __exports.matchesWritten = matchesWritten;
+
+  },
   "src/host-adapter.js"(__require, __exports) {
-const { ALLOWED_CONFIG_KEYS, CONFIG_KEY_TYPES, CHAR_FIELD_META, MODULE_FIELD_META, CONFIG_FIELD_META, MAX_LLM_CONTENT_CHARS, ALLOWED_CHAR_FIELDS, ALLOWED_MODULE_FIELDS, ALLOWED_LORE_TEXT_FIELDS, ALLOWED_PERSONA_TEXT_FIELDS } = __require("src/version.js");
+const { ALLOWED_CONFIG_KEYS, CONFIG_KEY_TYPES, CHAR_FIELD_META, MODULE_FIELD_META, CONFIG_FIELD_META, DEFAULT_MAX_CONTENT_CHARS, ALLOWED_CHAR_FIELDS, ALLOWED_MODULE_FIELDS, ALLOWED_LORE_TEXT_FIELDS, ALLOWED_PERSONA_TEXT_FIELDS } = __require("src/version.js");
 const { applyTextEdits } = __require("src/text-edits.js");
+const { diffValues, revertOps } = __require("src/undo-journal.js");
 
 const BAD_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 const DB_PERMISSION_ERROR =
@@ -4067,11 +4394,11 @@ function assertAllowedFieldKey(kind, fieldKey) {
   if (err) throw new Error(err);
 }
 
-function checkTruncationGuard(beforeText, actionLabel) {
-  if (typeof beforeText === 'string' && beforeText.length > MAX_LLM_CONTENT_CHARS) {
+function checkTruncationGuard(beforeText, actionLabel, limit = DEFAULT_MAX_CONTENT_CHARS) {
+  if (typeof beforeText === 'string' && beforeText.length > limit) {
     return (
-      `현재 원문(${beforeText.length.toLocaleString()}자)이 모델 입력 한도(${MAX_LLM_CONTENT_CHARS.toLocaleString()}자)를 초과해 앞부분만 전달되었습니다. ` +
-      `뒷부분 유실을 방지하기 위해 ${actionLabel}은(는) 차단됩니다. 부분 편집(patch_text / edits)을 사용해 주세요.`
+      `현재 원문(${beforeText.length.toLocaleString()}자)이 모델 입력 한도(${limit.toLocaleString()}자)를 초과해 앞부분만 전달되었습니다. ` +
+      `뒷부분 유실을 방지하기 위해 ${actionLabel}은(는) 차단됩니다. 부분 편집(patch_text / edits)을 사용하거나, 설정에서 "모델에 보내는 원문 길이"를 늘려 주세요.`
     );
   }
   return null;
@@ -4103,21 +4430,6 @@ function isSameCharacter(char, charIndex, binding) {
     return false;
   }
   return true;
-}
-
-function removeCreatedItem(list, insertedIndex, matcher) {
-  if (!Array.isArray(list)) return false;
-  if (insertedIndex >= 0 && insertedIndex < list.length && matcher(list[insertedIndex])) {
-    list.splice(insertedIndex, 1);
-    return true;
-  }
-  for (let i = list.length - 1; i >= 0; i--) {
-    if (matcher(list[i])) {
-      list.splice(i, 1);
-      return true;
-    }
-  }
-  return false;
 }
 
 /**
@@ -4917,7 +5229,11 @@ class HostAdapter {
   constructor(api) {
     this.api = api;
     this.undoStack = [];
-    this.maxUndo = 100;
+    this.maxUndoUnits = 200;
+    this.maxUndoBytes = 1_000_000;
+    this.onUndoChange = null;
+    this.maxContentChars = DEFAULT_MAX_CONTENT_CHARS;
+    this._activeGroup = null;
     this._probedFlavor = null;
     this._lastMatchedModuleId = null;
   }
@@ -5628,16 +5944,228 @@ class HostAdapter {
     return { ok: true, target: t, label: '일반 대화 / 질문', content: '' };
   }
 
-  _pushUndo(entry) {
-    this.undoStack.push({
+  // ---------------------------------------------------------------------------------------------
+  // Undo journal. Every write goes through a _commit* helper, which stores the JSON operations
+  // (src/undo-journal.js) that turn the previous entity state into the written one. Records are
+  // serialisable (exportUndoState / importUndoState), can be grouped, and revert with guards.
+  // ---------------------------------------------------------------------------------------------
+
+  get maxUndo() { return this.maxUndoUnits; }
+  set maxUndo(n) { this.maxUndoUnits = n; }
+
+  /** Undo units in stack order: a group of records counts as one unit. */
+  _undoUnits() {
+    const units = [];
+    for (const rec of this.undoStack) {
+      const last = units[units.length - 1];
+      if (rec.groupId && last && last.groupId === rec.groupId) last.records.push(rec);
+      else units.push({ groupId: rec.groupId || null, records: [rec] });
+    }
+    return units;
+  }
+
+  undoUnitCount() {
+    return this._undoUnits().length;
+  }
+
+  /** Label of what the next global undo would revert (for the UI). */
+  peekUndoLabel() {
+    const units = this._undoUnits();
+    const top = units[units.length - 1];
+    if (!top) return '';
+    if (top.groupId && top.records.length > 1) {
+      return `${top.records[0].groupLabel || '묶음 적용'} (${top.records.length}건)`;
+    }
+    return top.records[0].label;
+  }
+
+  _emitUndoChange(info = {}) {
+    if (typeof this.onUndoChange === 'function') {
+      try { this.onUndoChange(info); } catch {}
+    }
+  }
+
+  _enforceUndoLimits() {
+    const evicted = [];
+    const totalSize = () => this.undoStack.reduce((sum, r) => sum + (r.size || 0), 0);
+    let units = this._undoUnits();
+    while (units.length > 1 && (units.length > this.maxUndoUnits || totalSize() > this.maxUndoBytes)) {
+      const oldest = units.shift();
+      for (const rec of oldest.records) {
+        const at = this.undoStack.indexOf(rec);
+        if (at !== -1) this.undoStack.splice(at, 1);
+        evicted.push(rec.label);
+      }
+    }
+    return evicted;
+  }
+
+  _recordChange(entity, ops, label, opts = {}) {
+    const change = { entity, ops };
+    const size = JSON.stringify(change).length;
+    if (opts.appendTo) {
+      const existing = this.undoStack.find(r => r.id === opts.appendTo);
+      if (existing) {
+        existing.changes.push(change);
+        existing.size = (existing.size || 0) + size;
+        this._emitUndoChange({});
+        return existing.id;
+      }
+    }
+    const record = {
       id: makeUuid(),
       timestamp: Date.now(),
-      ...entry,
-    });
-    if (this.undoStack.length > this.maxUndo) {
-      this.undoStack.shift();
+      label: String(label || '변경'),
+      groupId: this._activeGroup?.id || null,
+      groupLabel: this._activeGroup?.label || null,
+      changes: [change],
+      size,
+    };
+    this.undoStack.push(record);
+    const evicted = this._enforceUndoLimits();
+    this._emitUndoChange({ evicted });
+    return record.id;
+  }
+
+  async _commitCharacter(char, charIndex, nextChar, label, opts = {}) {
+    const ops = diffValues(char, nextChar);
+    await this._setCharacter(nextChar);
+    return this._recordChange({ type: 'char', binding: { charIndex, ...getCharIdentity(char) } }, ops, label, opts);
+  }
+
+  async _commitChat(chat, charIndex, chatIndex, nextChat, label, opts = {}) {
+    const ops = diffValues(chat, nextChat);
+    let identity = { charId: null, charName: null };
+    try {
+      identity = getCharIdentity(await this._getCharacter());
+    } catch {}
+    await this._setChat(charIndex, chatIndex, nextChat);
+    return this._recordChange({ type: 'chat', chatIndex, binding: { charIndex, ...identity } }, ops, label, opts);
+  }
+
+  async _commitDb(before, next, label, opts = {}) {
+    const ops = diffValues(before, next);
+    await this.writeDbSubset(next);
+    return this._recordChange({ type: 'db', keys: Object.keys(next) }, ops, label, opts);
+  }
+
+  /** Applies several proposals as one undo unit. */
+  async runGroup(label, fn) {
+    if (this._activeGroup) return fn();
+    this._activeGroup = { id: makeUuid(), label: String(label || '묶음 적용') };
+    const groupId = this._activeGroup.id;
+    try {
+      const result = await fn();
+      return { groupId, result };
+    } finally {
+      this._activeGroup = null;
     }
-    return this.undoStack[this.undoStack.length - 1].id;
+  }
+
+  async _revertRecord(record) {
+    let reverted = 0;
+    const conflicts = [];
+    for (let n = record.changes.length - 1; n >= 0; n--) {
+      const { entity, ops } = record.changes[n];
+      if (!Array.isArray(ops) || ops.length === 0) continue;
+
+      if (entity.type === 'char') {
+        const { char: latest } = await this._requireSameActiveCharacter(entity.binding, '되돌리기');
+        const res = revertOps(latest, ops);
+        if (res.reverted > 0) await this._setCharacter(res.value);
+        reverted += res.reverted;
+        conflicts.push(...res.conflicts);
+      } else if (entity.type === 'chat') {
+        const { charIndex } = await this._requireSameActiveCharacter(entity.binding, '되돌리기');
+        const latestChat = await this._readChatAt(charIndex, entity.chatIndex);
+        if (!latestChat) throw new Error('되돌릴 채팅을 찾을 수 없습니다.');
+        const res = revertOps(latestChat, ops);
+        if (res.reverted > 0) await this._setChat(charIndex, entity.chatIndex, res.value);
+        reverted += res.reverted;
+        conflicts.push(...res.conflicts);
+      } else if (entity.type === 'db') {
+        const current = (await this.readDbSubset(entity.keys)) || {};
+        const scoped = {};
+        for (const k of entity.keys) {
+          if (Object.hasOwn(current, k)) scoped[k] = current[k];
+        }
+        const res = revertOps(scoped, ops);
+        if (res.reverted > 0) {
+          const partial = {};
+          for (const k of entity.keys) {
+            if (Object.hasOwn(res.value, k)) partial[k] = res.value[k];
+          }
+          if (Object.keys(partial).length > 0) await this.writeDbSubset(partial);
+        }
+        reverted += res.reverted;
+        conflicts.push(...res.conflicts);
+      }
+    }
+    return { reverted, conflicts };
+  }
+
+  /**
+   * Undoes one record (`undoId`), or — without an id — the most recent unit (a whole group if the
+   * last change was applied as a group). Values the user changed afterwards are left alone and
+   * reported in `conflicts`.
+   */
+  async undo(undoId = null) {
+    if (this.undoStack.length === 0) throw new Error('되돌릴 내역이 없습니다.');
+    let records;
+    if (undoId) {
+      const rec = this.undoStack.find(item => item.id === undoId);
+      if (!rec) throw new Error('되돌릴 내역이 없습니다. (기록이 정리되었거나 이미 되돌렸습니다)');
+      records = [rec];
+    } else {
+      const units = this._undoUnits();
+      records = [...units[units.length - 1].records].reverse();
+    }
+    return this._undoRecords(records);
+  }
+
+  async undoGroup(groupId) {
+    const records = this.undoStack.filter(r => r.groupId === groupId).reverse();
+    if (records.length === 0) throw new Error('되돌릴 내역이 없습니다. (기록이 정리되었거나 이미 되돌렸습니다)');
+    return this._undoRecords(records);
+  }
+
+  async _undoRecords(records) {
+    let undone = 0;
+    let reverted = 0;
+    const conflicts = [];
+    const labels = [];
+    for (const rec of records) {
+      const res = await this._revertRecord(rec);
+      const at = this.undoStack.indexOf(rec);
+      if (at !== -1) this.undoStack.splice(at, 1);
+      reverted += res.reverted;
+      conflicts.push(...res.conflicts);
+      if (res.reverted > 0) undone++;
+      labels.push(rec.label);
+    }
+    this._emitUndoChange({});
+    if (reverted === 0 && conflicts.length > 0) {
+      throw new Error(
+        `되돌리지 않았습니다: 적용 이후 값이 다시 변경되어 덮어쓰지 않았습니다 (${conflicts.slice(0, 3).map(c => c.path).join(', ')}). 이 기록은 목록에서 제거했습니다.`
+      );
+    }
+    const label = records.length > 1 ? `${records[records.length - 1].groupLabel || '묶음 적용'} (${records.length}건)` : labels[0];
+    return { ok: true, label, undone, reverted, conflicts };
+  }
+
+  exportUndoState() {
+    return { version: 1, records: this.undoStack.map(r => ({ ...r })) };
+  }
+
+  importUndoState(state) {
+    if (!state || state.version !== 1 || !Array.isArray(state.records)) return 0;
+    const valid = state.records.filter(r =>
+      r && typeof r.id === 'string' && typeof r.label === 'string' && Array.isArray(r.changes) &&
+      r.changes.every(c => c && c.entity && typeof c.entity.type === 'string' && Array.isArray(c.ops))
+    );
+    this.undoStack = valid.map(r => ({ ...r }));
+    this._enforceUndoLimits();
+    return this.undoStack.length;
   }
 
   async _loadLorebookForPreview(scope, proposal, target) {
@@ -5700,13 +6228,91 @@ class HostAdapter {
   /**
    * Computes the resulting text, metadata diffs, warnings, and pinned target binding before mutating anything.
    */
+  /**
+   * Every index or id a proposal names must exist before anything is previewed or written.
+   * Kept in one place so that a new action cannot forget the check: a reference that does not
+   * resolve must fail loudly, never be redirected to another item or stored as-is.
+   */
+  async _findReferenceError(proposal, target) {
+    let modulesCache = null;
+    const loadModules = async () => {
+      if (!modulesCache) modulesCache = await this.readModules();
+      return modulesCache;
+    };
+
+    if (proposal.moduleIndex !== undefined && proposal.moduleIndex !== null) {
+      const { modules, permissionDenied } = await loadModules();
+      if (permissionDenied) return DB_PERMISSION_ERROR;
+      if (!Number.isInteger(proposal.moduleIndex) || !modules[proposal.moduleIndex]) {
+        return `제안이 가리키는 모듈(#${Number(proposal.moduleIndex) + 1})이 없습니다. (설치된 모듈 ${modules.length}개)`;
+      }
+    }
+
+    if (proposal.action === 'update_config' && proposal.changes && typeof proposal.changes === 'object') {
+      const changes = proposal.changes;
+      if (Object.hasOwn(changes, 'selectedPersona')) {
+        const { personas, permissionDenied } = await this.readPersonas();
+        if (permissionDenied) return DB_PERMISSION_ERROR;
+        if (!Number.isInteger(changes.selectedPersona) || !personas[changes.selectedPersona]) {
+          return `선택하려는 페르소나(#${Number(changes.selectedPersona) + 1})가 없습니다. (등록된 페르소나 ${personas.length}개)`;
+        }
+      }
+      if (Array.isArray(changes.enabledModules)) {
+        const { modules, permissionDenied } = await loadModules();
+        if (permissionDenied) return DB_PERMISSION_ERROR;
+        const knownIds = new Set(modules.map(m => m?.id).filter(Boolean));
+        const unknown = changes.enabledModules.filter(id => !knownIds.has(id));
+        if (unknown.length > 0) {
+          return `활성화하려는 모듈 ID가 설치된 모듈에 없습니다: ${unknown.map(String).join(', ')}`;
+        }
+      }
+    }
+
+    if (proposal.action === 'upsert_regex' && proposal.regexIndex !== undefined && proposal.regexIndex !== null) {
+      const scope = proposal.scope || (target?.targetKind === 'module_regex' ? 'module' : 'character');
+      let list = [];
+      if (scope === 'module') {
+        const { modules, permissionDenied } = await loadModules();
+        if (permissionDenied) return DB_PERMISSION_ERROR;
+        const modIdx = Number.isInteger(proposal.moduleIndex)
+          ? proposal.moduleIndex
+          : resolveModuleIndex(modules, target, this._lastMatchedModuleId).index;
+        list = Array.isArray(modules[modIdx]?.regex) ? modules[modIdx].regex : [];
+      } else {
+        const { char } = await this.readActiveCharacter();
+        list = Array.isArray(char?.customscript) ? char.customscript : [];
+      }
+      if (!Number.isInteger(proposal.regexIndex) || !list[proposal.regexIndex]) {
+        return `수정할 정규식 스크립트 #${Number(proposal.regexIndex) + 1}을(를) 찾을 수 없습니다. (현재 ${list.length}개) 새로 만들려면 regexIndex를 빼 주세요.`;
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Computes the preview for a proposal. The returned `target` is what the card pins and later
+   * passes back to applyProposal, so it must describe the item the proposal changes — not carry
+   * over the field of whatever was under the cursor (e.g. `fieldKey: 'desc'` on a lorebook target).
+   */
   async previewProposal(proposal, activeTarget) {
+    const res = await this._previewProposalInner(proposal, activeTarget);
+    if (res && res.target && validateAllowedFieldKey(res.target.targetKind, res.target.fieldKey)) {
+      const { fieldKey: _stale, ...rest } = res.target;
+      res.target = rest;
+    }
+    return res;
+  }
+
+  async _previewProposalInner(proposal, activeTarget) {
     let target;
     try {
       target = this._resolveSafeTarget(proposal, activeTarget);
     } catch (err) {
       return { ok: false, error: err.message };
     }
+    const referenceError = await this._findReferenceError(proposal, target);
+    if (referenceError) return { ok: false, error: referenceError };
 
     if (proposal.action === 'patch_text' || proposal.action === 'replace_text') {
       const snap = await this.readTargetSnapshot(target);
@@ -5767,7 +6373,7 @@ class HostAdapter {
       }
       const before = snap.content;
       if (proposal.action === 'replace_text') {
-        const truncErr = checkTruncationGuard(before, '전체 덮어쓰기(replace_text)');
+        const truncErr = this._checkTruncationGuard(before, '전체 덮어쓰기(replace_text)');
         if (truncErr) {
           return { ok: false, error: truncErr, before, label: snap.label, target: snap.target };
         }
@@ -5807,7 +6413,7 @@ class HostAdapter {
       if (snap.moduleUncertain) return { ok: false, error: MODULE_UNCERTAIN_ERROR, label: snap.label, target: snap.target };
       const before = snap.content;
       if (!proposal.edits) {
-        const truncErr = checkTruncationGuard(before, 'Lua 전체 교체');
+        const truncErr = this._checkTruncationGuard(before, 'Lua 전체 교체');
         if (truncErr) {
           return { ok: false, error: truncErr, before, label: snap.label, target: snap.target };
         }
@@ -5856,7 +6462,7 @@ class HostAdapter {
 
       const before = String(snap.entry[fieldKey] ?? '');
       if (!proposal.edits && (proposal[fieldKey] !== undefined || (fieldKey === 'content' && proposal.content !== undefined))) {
-        const truncErr = checkTruncationGuard(before, '로어북 본문 전체 덮어쓰기');
+        const truncErr = this._checkTruncationGuard(before, '로어북 본문 전체 덮어쓰기');
         if (truncErr) return { ok: false, error: truncErr, before, label: snap.label, target: snap.target };
       }
 
@@ -5934,7 +6540,7 @@ class HostAdapter {
 
       const before = String(snap.entry[fieldKey] ?? '');
       if (!proposal.edits && !proposal.fieldEdits && proposal[fieldKey] !== undefined) {
-        const truncErr = checkTruncationGuard(before, '페르소나 전체 덮어쓰기');
+        const truncErr = this._checkTruncationGuard(before, '페르소나 전체 덮어쓰기');
         if (truncErr) return { ok: false, error: truncErr, before, label: snap.label, target: snap.target };
       }
 
@@ -6099,6 +6705,8 @@ class HostAdapter {
    */
   async applyProposal(proposal, activeTarget, options = {}) {
     const target = this._resolveSafeTarget(proposal, activeTarget);
+    const referenceError = await this._findReferenceError(proposal, target);
+    if (referenceError) throw new Error(referenceError);
 
     switch (proposal.action) {
       case 'patch_text':
@@ -6127,284 +6735,29 @@ class HostAdapter {
 
   async _applyTextTarget(proposal, target, options = {}) {
     const kind = target.targetKind;
-    const compute = (before, label) => {
-      if (proposal.action === 'replace_text') {
-        const truncErr = checkTruncationGuard(before, '전체 덮어쓰기(replace_text)');
-        if (truncErr) throw new Error(truncErr);
-        return String(proposal.content ?? '');
-      }
-      return applyTextEdits(before, proposal.edits, label);
-    };
+    const editsOf = () => (proposal.action === 'patch_text' ? proposal.edits : undefined);
+    const fullTextOf = () => (proposal.action === 'replace_text' ? proposal.content : undefined);
 
-    if (kind === 'char_field') {
-      const fieldKey = target.fieldKey || 'desc';
-      assertAllowedFieldKey('char_field', fieldKey);
-      const { char, charIndex } = await this._requireSameActiveCharacter(options.hostBinding, '적용');
-      const charBinding = { charIndex, ...getCharIdentity(char) };
-
-      if (fieldKey === 'depthPrompt') {
-        const hadKey = Object.hasOwn(char, 'depth_prompt');
-        const prevValue = clone(char.depth_prompt);
-        const nextChar = clone(char);
-        const curDepth = Number.isFinite(Number(nextChar.depth_prompt?.depth)) ? Number(nextChar.depth_prompt.depth) : 0;
-        const nextPrompt = compute(String(nextChar.depth_prompt?.prompt ?? ''), '깊이 프롬프트');
-        nextChar.depth_prompt = { ...(nextChar.depth_prompt || {}), depth: curDepth, prompt: nextPrompt };
-        await this._setCharacter(nextChar);
-
-        const undoId = this._pushUndo({
-          label: '캐릭터 깊이 프롬프트 수정',
-          restore: async () => {
-            const { char: latest } = await this._requireSameActiveCharacter(charBinding, '되돌리기');
-            const restored = clone(latest);
-            if (hadKey) restored.depth_prompt = clone(prevValue);
-            else delete restored.depth_prompt;
-            await this._setCharacter(restored);
-          },
-        });
-        return { ok: true, undoId, summary: '캐릭터 깊이 프롬프트에 적용했습니다.' };
-      }
-
-      const hadKey = Object.hasOwn(char, fieldKey);
-      const prevValue = clone(char[fieldKey]);
-
-      const nextChar = clone(char);
-      nextChar[fieldKey] = compute(String(nextChar[fieldKey] ?? ''), fieldKey);
-      await this._setCharacter(nextChar);
-
-      const undoId = this._pushUndo({
-        label: `캐릭터 ${fieldKey} 수정`,
-        restore: async () => {
-          const { char: latest } = await this._requireSameActiveCharacter(charBinding, '되돌리기');
-          const restored = clone(latest);
-          if (hadKey) restored[fieldKey] = clone(prevValue);
-          else delete restored[fieldKey];
-          await this._setCharacter(restored);
-        },
-      });
-      return { ok: true, undoId, summary: `캐릭터 ${CHAR_FIELD_META[fieldKey]?.label || fieldKey}에 적용했습니다.` };
-    }
-
-    if (kind === 'char_alt_greeting') {
-      const { char, charIndex } = await this._requireSameActiveCharacter(options.hostBinding, '적용');
-      const list = Array.isArray(char.alternateGreetings) ? char.alternateGreetings : [];
-      const idx = target.greetingIndex;
-      if (!Number.isInteger(idx) || idx < 0 || idx >= list.length) {
-        throw new Error('수정할 추가 첫 메시지 인덱스가 올바르지 않습니다.');
-      }
-      const prevValue = clone(list[idx]);
-      const charBinding = { charIndex, ...getCharIdentity(char) };
-
-      const nextChar = clone(char);
-      nextChar.alternateGreetings[idx] = compute(String(nextChar.alternateGreetings[idx] ?? ''), `추가 첫 메시지 #${idx + 1}`);
-      await this._setCharacter(nextChar);
-
-      const undoId = this._pushUndo({
-        label: `추가 첫 메시지 #${idx + 1} 수정`,
-        restore: async () => {
-          const { char: latest } = await this._requireSameActiveCharacter(charBinding, '되돌리기');
-          if (!Array.isArray(latest.alternateGreetings) || idx >= latest.alternateGreetings.length) {
-            throw new Error('되돌릴 추가 첫 메시지 항목을 찾을 수 없습니다.');
-          }
-          const restored = clone(latest);
-          restored.alternateGreetings[idx] = clone(prevValue);
-          await this._setCharacter(restored);
-        },
-      });
-      return { ok: true, undoId, summary: `캐릭터 추가 첫 메시지 #${idx + 1}에 적용했습니다.` };
-    }
-
-    if (kind === 'chat_note') {
-      const fieldKey = target.fieldKey || 'note';
-      assertAllowedFieldKey('chat_note', fieldKey);
-      const { chat, charIndex, chatIndex } = await this._requireSameActiveChat(options.hostBinding, '적용');
-      const hadKey = Object.hasOwn(chat, 'note');
-      const prevValue = clone(chat.note);
-
-      const nextChat = clone(chat);
-      nextChat.note = compute(String(nextChat.note ?? ''), '작가의 노트');
-      await this._setChat(charIndex, chatIndex, nextChat);
-
-      const undoId = this._pushUndo({
-        label: '작가의 노트 수정',
-        restore: async () => {
-          const latestChat = await this._readChatAt(charIndex, chatIndex);
-          if (!latestChat) throw new Error('되돌릴 채팅을 찾을 수 없습니다.');
-          const restored = clone(latestChat);
-          if (hadKey) restored.note = clone(prevValue);
-          else delete restored.note;
-          await this._setChat(charIndex, chatIndex, restored);
-        },
-      });
-      return { ok: true, undoId, summary: '현재 채팅의 작가의 노트에 적용했습니다.' };
-    }
-
-    if (kind === 'chat_message') {
-      const { chat, charIndex, chatIndex } = await this._requireSameActiveChat(options.hostBinding, '적용');
-      const idx = target.messageIndex;
-      if (!Number.isInteger(idx) || idx < 0 || !chat.message?.[idx]) {
-        throw new Error('수정할 채팅 메시지 인덱스가 올바르지 않습니다.');
-      }
-      const pinnedChatId = options.hostBinding?.chatId || null;
-      if (pinnedChatId && chat.message[idx].chatId && chat.message[idx].chatId !== pinnedChatId) {
-        throw new Error('대상 채팅 메시지가 변경되어 적용을 중단했습니다. 다시 제안받아 주세요.');
-      }
-      const prevData = clone(chat.message[idx].data);
-      const hasSwipe = Array.isArray(chat.message[idx].swipes) && Number.isInteger(chat.message[idx].swipeId);
-      const swipeId = hasSwipe ? chat.message[idx].swipeId : null;
-      const prevSwipeVal = hasSwipe ? clone(chat.message[idx].swipes[swipeId]) : undefined;
-
-      const nextChat = clone(chat);
-      const nextText = compute(String(nextChat.message[idx].data ?? ''), `채팅 메시지 #${idx + 1}`);
-      nextChat.message[idx].data = nextText;
-      if (hasSwipe) {
-        nextChat.message[idx].swipes[swipeId] = nextText;
-      }
-      await this._setChat(charIndex, chatIndex, nextChat);
-
-      const undoId = this._pushUndo({
-        label: `채팅 메시지 #${idx + 1} 수정`,
-        restore: async () => {
-          const latestChat = await this._readChatAt(charIndex, chatIndex);
-          if (!latestChat?.message?.[idx]) throw new Error('되돌릴 채팅 메시지를 찾을 수 없습니다.');
-          if (pinnedChatId && latestChat.message[idx].chatId && latestChat.message[idx].chatId !== pinnedChatId) {
-            throw new Error('되돌릴 채팅 메시지가 변경되어 복구를 중단했습니다.');
-          }
-          const restored = clone(latestChat);
-          restored.message[idx].data = clone(prevData);
-          if (hasSwipe && Array.isArray(restored.message[idx].swipes)) {
-            restored.message[idx].swipes[swipeId] = clone(prevSwipeVal);
-          }
-          await this._setChat(charIndex, chatIndex, restored);
-        },
-      });
-      return { ok: true, undoId, summary: `채팅 메시지 #${idx + 1}에 적용했습니다.` };
-    }
-
-    if (kind === 'char_lorebook') {
-      const fieldKey = target.fieldKey || 'content';
-      assertAllowedFieldKey('char_lorebook', fieldKey);
-      const { char, charIndex } = await this._requireSameActiveCharacter(options.hostBinding, '적용');
-      const idx = target.loreIndex;
-      if (!Number.isInteger(idx) || !char.globalLore?.[idx]) {
-        throw new Error('수정할 캐릭터 로어북 인덱스가 올바르지 않습니다.');
-      }
-      const prevFieldValue = clone(char.globalLore[idx][fieldKey]);
-      const charBinding = { charIndex, ...getCharIdentity(char) };
-
-      const nextChar = clone(char);
-      const nextStr = compute(String(nextChar.globalLore[idx][fieldKey] ?? ''), '캐릭터 로어북');
-      if (fieldKey === 'insertorder') {
-        const num = Number(nextStr.trim());
-        if (!Number.isFinite(num)) throw new Error('배치 순서(insertorder)는 유한한 숫자여야 합니다.');
-        nextChar.globalLore[idx][fieldKey] = num;
-      } else {
-        nextChar.globalLore[idx][fieldKey] = nextStr;
-      }
-      await this._setCharacter(nextChar);
-
-      const undoId = this._pushUndo({
-        label: `캐릭터 로어북 #${idx + 1} 수정`,
-        restore: async () => {
-          const { char: latest } = await this._requireSameActiveCharacter(charBinding, '되돌리기');
-          if (!latest.globalLore?.[idx]) throw new Error('되돌릴 캐릭터 로어북 항목을 찾을 수 없습니다.');
-          const restored = clone(latest);
-          restored.globalLore[idx][fieldKey] = clone(prevFieldValue);
-          await this._setCharacter(restored);
-        },
-      });
-      return { ok: true, undoId, summary: `캐릭터 로어북 #${idx + 1}의 ${fieldKey}을(를) 수정했습니다.` };
-    }
-
-    if (kind === 'chat_lorebook') {
-      const fieldKey = target.fieldKey || 'content';
-      assertAllowedFieldKey('chat_lorebook', fieldKey);
-      const { chat, charIndex, chatIndex } = await this._requireSameActiveChat(options.hostBinding, '적용');
-      const idx = target.loreIndex;
-      if (!Number.isInteger(idx) || !chat.localLore?.[idx]) {
-        throw new Error('수정할 채팅 로어북 인덱스가 올바르지 않습니다.');
-      }
-      const prevFieldValue = clone(chat.localLore[idx][fieldKey]);
-
-      const nextChat = clone(chat);
-      const nextStr = compute(String(nextChat.localLore[idx][fieldKey] ?? ''), '채팅 로어북');
-      if (fieldKey === 'insertorder') {
-        const num = Number(nextStr.trim());
-        if (!Number.isFinite(num)) throw new Error('배치 순서(insertorder)는 유한한 숫자여야 합니다.');
-        nextChat.localLore[idx][fieldKey] = num;
-      } else {
-        nextChat.localLore[idx][fieldKey] = nextStr;
-      }
-      await this._setChat(charIndex, chatIndex, nextChat);
-
-      const undoId = this._pushUndo({
-        label: `채팅 로어북 #${idx + 1} 수정`,
-        restore: async () => {
-          const latestChat = await this._readChatAt(charIndex, chatIndex);
-          if (!latestChat?.localLore?.[idx]) throw new Error('되돌릴 채팅 로어북 항목을 찾을 수 없습니다.');
-          const restored = clone(latestChat);
-          restored.localLore[idx][fieldKey] = clone(prevFieldValue);
-          await this._setChat(charIndex, chatIndex, restored);
-        },
-      });
-      return { ok: true, undoId, summary: `채팅 로어북 #${idx + 1}의 ${fieldKey}을(를) 수정했습니다.` };
-    }
-
+    // --- kinds handled by a dedicated operation ---
     if (kind === 'char_lua' || kind === 'module_lua') {
       return await this._applyUpdateLua({
         scope: kind === 'module_lua' ? 'module' : 'character',
         moduleIndex: target.moduleIndex,
-        edits: proposal.action === 'patch_text' ? proposal.edits : undefined,
-        code: proposal.action === 'replace_text' ? proposal.content : undefined,
+        edits: editsOf(),
+        code: fullTextOf(),
       }, target, options);
     }
-
     if (kind === 'persona') {
       const fieldKey = target.fieldKey || 'personaPrompt';
       assertAllowedFieldKey('persona', fieldKey);
       return await this._applyUpdatePersona({
         personaIndex: target.personaIndex,
-        [fieldKey]: proposal.action === 'replace_text' ? proposal.content : undefined,
-        edits: proposal.action === 'patch_text' && fieldKey === 'personaPrompt' ? proposal.edits : undefined,
+        [fieldKey]: fullTextOf(),
+        edits: fieldKey === 'personaPrompt' ? editsOf() : undefined,
         fieldKey,
-        fieldEdits: proposal.action === 'patch_text' ? proposal.edits : undefined,
+        fieldEdits: editsOf(),
       }, target, options);
     }
-
-    if (kind === 'module_field') {
-      const fieldKey = target.fieldKey || 'backgroundEmbedding';
-      assertAllowedFieldKey('module_field', fieldKey);
-      const { modules, permissionDenied } = await this.readModules();
-      if (permissionDenied) throw new Error(DB_PERMISSION_ERROR);
-      const modIdx = this._resolveWriteModuleIndex(modules, proposal, target, options);
-      if (!modules[modIdx]) throw new Error('수정할 모듈을 찾을 수 없습니다.');
-      const moduleId = modules[modIdx].id;
-      const moduleName = modules[modIdx].name || '무제';
-      const hadKey = Object.hasOwn(modules[modIdx], fieldKey);
-      const prevValue = clone(modules[modIdx][fieldKey]);
-
-      const nextModules = clone(modules);
-      nextModules[modIdx][fieldKey] = compute(String(nextModules[modIdx][fieldKey] ?? ''), `모듈 ${fieldKey}`);
-      await this.writeDbSubset({ modules: nextModules });
-
-      const undoId = this._pushUndo({
-        label: `모듈 "${moduleName}" ${fieldKey} 수정`,
-        restore: async () => {
-          const { modules: latestModules } = await this.readModules();
-          const idx = moduleId ? latestModules.findIndex(m => m.id === moduleId) : modIdx;
-          if (idx === -1 || !latestModules[idx]) throw new Error('되돌릴 모듈을 찾을 수 없습니다.');
-          const restored = clone(latestModules);
-          if (hadKey) restored[idx][fieldKey] = clone(prevValue);
-          else delete restored[idx][fieldKey];
-          await this.writeDbSubset({ modules: restored });
-        },
-      });
-      return {
-        ok: true,
-        undoId,
-        summary: `${MODULE_FIELD_META[fieldKey]?.label || `모듈 ${fieldKey}`} (${moduleName})에 적용했습니다.`,
-      };
-    }
-
     if (kind === 'module_lorebook') {
       const fieldKey = target.fieldKey || 'content';
       assertAllowedFieldKey('module_lorebook', fieldKey);
@@ -6413,10 +6766,19 @@ class HostAdapter {
         moduleIndex: target.moduleIndex,
         loreIndex: target.loreIndex,
         fieldKey,
-        edits: proposal.action === 'patch_text' ? proposal.edits : undefined,
-        [fieldKey]: proposal.action === 'replace_text' ? proposal.content : undefined,
+        edits: editsOf(),
+        [fieldKey]: fullTextOf(),
       }, target, options);
     }
+
+    const compute = (before, label) => {
+      if (proposal.action === 'replace_text') {
+        const truncErr = this._checkTruncationGuard(before, '전체 덮어쓰기(replace_text)');
+        if (truncErr) throw new Error(truncErr);
+        return String(proposal.content ?? '');
+      }
+      return applyTextEdits(before, proposal.edits, label);
+    };
 
     if (kind === 'config' && target.fieldKey && ALLOWED_CONFIG_KEYS.includes(target.fieldKey)) {
       const cfg = await this.readAllowedConfig();
@@ -6425,102 +6787,198 @@ class HostAdapter {
       return await this._applyUpdateConfig({ changes: { [target.fieldKey]: nextVal } });
     }
 
+    // --- kinds that rewrite exactly one text slot of the character, the chat or a module ---
+    // `locate(root)` returns where the text lives on the cloned entity: { holder, key, label,
+    // summary, numeric?, after? }. Reading, writing and undo are shared by every kind.
+    const writeSlot = async (scope, locate) => {
+      const opened = await this._openScope(scope, proposal, target, options);
+      const slot = locate(opened.root, opened);
+      const nextStr = compute(String(slot.holder[slot.key] ?? ''), slot.label);
+      if (slot.numeric) {
+        const num = Number(nextStr.trim());
+        if (!Number.isFinite(num)) throw new Error('배치 순서(insertorder)는 유한한 숫자여야 합니다.');
+        slot.holder[slot.key] = num;
+      } else {
+        slot.holder[slot.key] = nextStr;
+      }
+      if (slot.after) slot.after(nextStr);
+      const undoId = await opened.commit(`${slot.label} 수정`);
+      return { ok: true, undoId, summary: slot.summary };
+    };
+
+    const loreSlot = (scopeName, listKey) => (root) => {
+      const fieldKey = target.fieldKey || 'content';
+      const idx = target.loreIndex;
+      if (!Number.isInteger(idx) || !root[listKey]?.[idx]) {
+        throw new Error(`수정할 ${scopeName} 로어북 인덱스가 올바르지 않습니다.`);
+      }
+      return {
+        holder: root[listKey][idx],
+        key: fieldKey,
+        numeric: fieldKey === 'insertorder',
+        label: `${scopeName} 로어북 #${idx + 1}`,
+        summary: `${scopeName} 로어북 #${idx + 1}의 ${fieldKey}을(를) 수정했습니다.`,
+      };
+    };
+
+    if (kind === 'char_field') {
+      const fieldKey = target.fieldKey || 'desc';
+      assertAllowedFieldKey('char_field', fieldKey);
+      if (fieldKey === 'depthPrompt') {
+        return await writeSlot('character', (root) => {
+          const depth = Number.isFinite(Number(root.depth_prompt?.depth)) ? Number(root.depth_prompt.depth) : 0;
+          root.depth_prompt = { ...(root.depth_prompt || {}), depth };
+          return { holder: root.depth_prompt, key: 'prompt', label: '캐릭터 깊이 프롬프트', summary: '캐릭터 깊이 프롬프트에 적용했습니다.' };
+        });
+      }
+      return await writeSlot('character', (root) => ({
+        holder: root,
+        key: fieldKey,
+        label: `캐릭터 ${fieldKey}`,
+        summary: `캐릭터 ${CHAR_FIELD_META[fieldKey]?.label || fieldKey}에 적용했습니다.`,
+      }));
+    }
+
+    if (kind === 'char_alt_greeting') {
+      return await writeSlot('character', (root) => {
+        const idx = target.greetingIndex;
+        if (!Array.isArray(root.alternateGreetings) || !Number.isInteger(idx) || idx < 0 || idx >= root.alternateGreetings.length) {
+          throw new Error('수정할 추가 첫 메시지 인덱스가 올바르지 않습니다.');
+        }
+        return {
+          holder: root.alternateGreetings,
+          key: idx,
+          label: `추가 첫 메시지 #${idx + 1}`,
+          summary: `캐릭터 추가 첫 메시지 #${idx + 1}에 적용했습니다.`,
+        };
+      });
+    }
+
+    if (kind === 'chat_note') {
+      assertAllowedFieldKey('chat_note', target.fieldKey || 'note');
+      return await writeSlot('chat', (root) => ({
+        holder: root, key: 'note', label: '작가의 노트', summary: '현재 채팅의 작가의 노트에 적용했습니다.',
+      }));
+    }
+
+    if (kind === 'chat_message') {
+      return await writeSlot('chat', (root) => {
+        const idx = target.messageIndex;
+        const message = Number.isInteger(idx) && idx >= 0 ? root.message?.[idx] : null;
+        if (!message) throw new Error('수정할 채팅 메시지 인덱스가 올바르지 않습니다.');
+        const pinnedChatId = options.hostBinding?.chatId || null;
+        if (pinnedChatId && message.chatId && message.chatId !== pinnedChatId) {
+          throw new Error('대상 채팅 메시지가 변경되어 적용을 중단했습니다. 다시 제안받아 주세요.');
+        }
+        const hasSwipe = Array.isArray(message.swipes) && Number.isInteger(message.swipeId);
+        return {
+          holder: message,
+          key: 'data',
+          label: `채팅 메시지 #${idx + 1}`,
+          summary: `채팅 메시지 #${idx + 1}에 적용했습니다.`,
+          after: (text) => { if (hasSwipe) message.swipes[message.swipeId] = text; },
+        };
+      });
+    }
+
+    if (kind === 'char_lorebook') {
+      assertAllowedFieldKey('char_lorebook', target.fieldKey || 'content');
+      return await writeSlot('character', loreSlot('캐릭터', 'globalLore'));
+    }
+
+    if (kind === 'chat_lorebook') {
+      assertAllowedFieldKey('chat_lorebook', target.fieldKey || 'content');
+      return await writeSlot('chat', loreSlot('채팅', 'localLore'));
+    }
+
+    if (kind === 'module_field') {
+      const fieldKey = target.fieldKey || 'backgroundEmbedding';
+      assertAllowedFieldKey('module_field', fieldKey);
+      return await writeSlot('module', (root) => ({
+        holder: root,
+        key: fieldKey,
+        label: `모듈 "${root.name || '무제'}" ${fieldKey}`,
+        summary: `${MODULE_FIELD_META[fieldKey]?.label || `모듈 ${fieldKey}`} (${root.name || '무제'})에 적용했습니다.`,
+      }));
+    }
+
     throw new Error(`현재 대상(${kind || '없음'})에는 직접 텍스트 적용을 지원하지 않습니다. 상단에서 대상을 선택해 주세요.`);
   }
 
-  async _applyCreateLorebook(proposal, target, options = {}) {
-    const scope = proposal.scope || target.loreScope || (target.targetKind?.startsWith('module_') ? 'module' : target.targetKind === 'chat_lorebook' ? 'chat' : 'character');
-    const buildEntry = (liveList) => {
-      const folderRes = resolveLorebookFolderProposal(liveList, proposal, null);
-      if (!folderRes.ok) throw new Error(folderRes.error);
-      const resolvedInput = folderRes.resolvedFolder !== undefined
-        ? { ...proposal, folder: folderRes.resolvedFolder }
-        : proposal;
-      return normalizeLorebookEntry(resolvedInput);
-    };
-
+  /**
+   * Opens the entity a scoped operation works on — the active character, the active chat, or one
+   * installed module — and returns a cloned `root` to mutate plus `commit(label)`, which writes
+   * it and records the undo entry. One implementation serves all three scopes.
+   */
+  async _openScope(scope, proposal, target, options = {}, verb = '적용') {
     if (scope === 'chat') {
-      const { chat, charIndex, chatIndex } = await this._requireSameActiveChat(options.hostBinding, '적용');
-      const nextChat = clone(chat);
-      nextChat.localLore = Array.isArray(nextChat.localLore) ? nextChat.localLore : [];
-      const entry = buildEntry(nextChat.localLore);
-      const insertedIndex = nextChat.localLore.length;
-      nextChat.localLore.push(entry);
-      await this._setChat(charIndex, chatIndex, nextChat);
-
-      const snapshotEntry = clone(entry);
-      const undoId = this._pushUndo({
-        label: `채팅 로어북 생성 (${entry.comment})`,
-        restore: async () => {
-          const latestChat = await this._readChatAt(charIndex, chatIndex);
-          if (!latestChat) throw new Error('되돌릴 채팅을 찾을 수 없습니다.');
-          const restored = clone(latestChat);
-          removeCreatedItem(restored.localLore, insertedIndex, e =>
-            e && e.comment === snapshotEntry.comment && e.key === snapshotEntry.key && e.content === snapshotEntry.content
-          );
-          await this._setChat(charIndex, chatIndex, restored);
-        },
-      });
-      return { ok: true, undoId, summary: `새 채팅 로어북 "${entry.comment}"을(를) 추가했습니다.` };
+      const { chat, charIndex, chatIndex } = await this._requireSameActiveChat(options.hostBinding, verb);
+      const next = clone(chat);
+      return {
+        scope: 'chat',
+        name: '채팅',
+        root: next,
+        listKeys: { lore: 'localLore' },
+        commit: (label) => this._commitChat(chat, charIndex, chatIndex, next, label),
+      };
     }
-
     if (scope === 'module') {
       const { modules, permissionDenied } = await this.readModules();
       if (permissionDenied) throw new Error(DB_PERMISSION_ERROR);
       const modIdx = this._resolveWriteModuleIndex(modules, proposal, target, options);
       if (!modules[modIdx]) throw new Error('대상 모듈을 찾을 수 없습니다.');
-      const moduleId = modules[modIdx].id;
       const nextModules = clone(modules);
-      nextModules[modIdx].lorebook = Array.isArray(nextModules[modIdx].lorebook) ? nextModules[modIdx].lorebook : [];
-      const entry = buildEntry(nextModules[modIdx].lorebook);
-      const insertedIndex = nextModules[modIdx].lorebook.length;
-      nextModules[modIdx].lorebook.push(entry);
-      await this.writeDbSubset({ modules: nextModules });
-
-      const snapshotEntry = clone(entry);
-      const undoId = this._pushUndo({
-        label: `모듈 로어북 생성 (${entry.comment})`,
-        restore: async () => {
-          const { modules: latestModules } = await this.readModules();
-          const idx = latestModules.findIndex(m => m.id === moduleId);
-          if (idx === -1) throw new Error('되돌릴 모듈을 찾을 수 없습니다.');
-          const restored = clone(latestModules);
-          removeCreatedItem(restored[idx].lorebook, insertedIndex, e =>
-            e && e.comment === snapshotEntry.comment && e.key === snapshotEntry.key && e.content === snapshotEntry.content
-          );
-          await this.writeDbSubset({ modules: restored });
-        },
-      });
-      return { ok: true, undoId, summary: `모듈 "${nextModules[modIdx].name}"에 새 로어북 "${entry.comment}"을(를) 추가했습니다.` };
+      return {
+        scope: 'module',
+        name: `모듈 "${modules[modIdx].name}"`,
+        root: nextModules[modIdx],
+        listKeys: { lore: 'lorebook', regex: 'regex', trigger: 'trigger' },
+        commit: (label) => this._commitDb({ modules }, { modules: nextModules }, label),
+      };
     }
+    const { char, charIndex } = await this._requireSameActiveCharacter(options.hostBinding, verb);
+    const next = clone(char);
+    return {
+      scope: 'character',
+      name: '캐릭터',
+      root: next,
+      listKeys: { lore: 'globalLore', regex: 'customscript', trigger: 'triggerscript' },
+      commit: (label) => this._commitCharacter(char, charIndex, next, label),
+    };
+  }
 
-    // Default: character lorebook
-    const { char, charIndex } = await this._requireSameActiveCharacter(options.hostBinding, '적용');
-    const charBinding = { charIndex, ...getCharIdentity(char) };
-    const nextChar = clone(char);
-    nextChar.globalLore = Array.isArray(nextChar.globalLore) ? nextChar.globalLore : [];
-    const entry = buildEntry(nextChar.globalLore);
-    const insertedIndex = nextChar.globalLore.length;
-    nextChar.globalLore.push(entry);
-    await this._setCharacter(nextChar);
+  _checkTruncationGuard(beforeText, actionLabel) {
+    return checkTruncationGuard(beforeText, actionLabel, this.maxContentChars);
+  }
 
-    const snapshotEntry = clone(entry);
-    const undoId = this._pushUndo({
-      label: `캐릭터 로어북 생성 (${entry.comment})`,
-      restore: async () => {
-        const { char: latest } = await this._requireSameActiveCharacter(charBinding, '되돌리기');
-        const restored = clone(latest);
-        removeCreatedItem(restored.globalLore, insertedIndex, e =>
-          e && e.comment === snapshotEntry.comment && e.key === snapshotEntry.key && e.content === snapshotEntry.content
-        );
-        await this._setCharacter(restored);
-      },
-    });
-    return { ok: true, undoId, summary: `새 캐릭터 로어북 "${entry.comment}"을(를) 추가했습니다.` };
+  _loreScopeOf(proposal, target) {
+    return proposal?.scope || target?.loreScope ||
+      (target?.targetKind?.startsWith('module_') ? 'module' : target?.targetKind === 'chat_lorebook' ? 'chat' : 'character');
+  }
+
+  /** Returns the scope's list for `kind` ('lore' | 'regex'), creating it on the clone if missing. */
+  _scopeList(opened, kind) {
+    const key = opened.listKeys[kind];
+    if (!Array.isArray(opened.root[key])) opened.root[key] = [];
+    return opened.root[key];
+  }
+
+  async _applyCreateLorebook(proposal, target, options = {}) {
+    const opened = await this._openScope(this._loreScopeOf(proposal, target), proposal, target, options);
+    const list = this._scopeList(opened, 'lore');
+
+    const folderRes = resolveLorebookFolderProposal(list, proposal, null);
+    if (!folderRes.ok) throw new Error(folderRes.error);
+    const entry = normalizeLorebookEntry(
+      folderRes.resolvedFolder !== undefined ? { ...proposal, folder: folderRes.resolvedFolder } : proposal
+    );
+    list.push(entry);
+
+    const undoId = await opened.commit(`${opened.name} 로어북 생성 (${entry.comment})`);
+    return { ok: true, undoId, summary: `${opened.name}에 새 로어북 "${entry.comment}"을(를) 추가했습니다.` };
   }
 
   async _applyUpdateLorebook(proposal, target, options = {}) {
-    const scope = proposal.scope || target.loreScope || (target.targetKind?.startsWith('module_') ? 'module' : target.targetKind === 'chat_lorebook' ? 'chat' : 'character');
     const loreIndex = Number.isInteger(proposal.loreIndex) ? proposal.loreIndex : target.loreIndex;
     if (!Number.isInteger(loreIndex) || loreIndex < 0) {
       throw new Error('수정할 로어북 인덱스(loreIndex)가 필요합니다.');
@@ -6528,528 +6986,134 @@ class HostAdapter {
     const fieldKey = proposal.fieldKey || 'content';
     assertAllowedFieldKey('char_lorebook', fieldKey);
 
-    const mutateEntry = (existing, liveList) => {
-      if (!proposal.edits && (proposal[fieldKey] !== undefined || (fieldKey === 'content' && proposal.content !== undefined))) {
-        const truncErr = checkTruncationGuard(String(existing[fieldKey] ?? ''), '로어북 전체 덮어쓰기');
-        if (truncErr) throw new Error(truncErr);
-      }
-      const folderRes = resolveLorebookFolderProposal(liveList, proposal, existing);
-      if (!folderRes.ok) throw new Error(folderRes.error);
-      const resolvedInput = folderRes.resolvedFolder !== undefined
-        ? { ...proposal, folder: folderRes.resolvedFolder }
-        : proposal;
-      const next = normalizeLorebookEntry(resolvedInput, existing);
-      if (proposal.edits) {
-        const nextStr = applyTextEdits(String(existing[fieldKey] ?? ''), proposal.edits, '로어북');
-        if (fieldKey === 'insertorder') {
-          const num = Number(nextStr.trim());
-          if (!Number.isFinite(num)) throw new Error('배치 순서(insertorder)는 유한한 숫자여야 합니다.');
-          next[fieldKey] = num;
-        } else {
-          next[fieldKey] = nextStr;
-        }
-      }
-      return next;
-    };
+    const opened = await this._openScope(this._loreScopeOf(proposal, target), proposal, target, options);
+    const list = this._scopeList(opened, 'lore');
+    const existing = list[loreIndex];
+    if (!existing) throw new Error(`${opened.name} 로어북 #${loreIndex + 1}을(를) 찾을 수 없습니다.`);
 
-    if (scope === 'chat') {
-      const { chat, charIndex, chatIndex } = await this._requireSameActiveChat(options.hostBinding, '적용');
-      if (!chat?.localLore?.[loreIndex]) throw new Error(`채팅 로어북 #${loreIndex + 1}을(를) 찾을 수 없습니다.`);
-      const prevEntry = clone(chat.localLore[loreIndex]);
-      const nextChat = clone(chat);
-      nextChat.localLore[loreIndex] = mutateEntry(nextChat.localLore[loreIndex], nextChat.localLore);
-      await this._setChat(charIndex, chatIndex, nextChat);
-
-      const undoId = this._pushUndo({
-        label: `채팅 로어북 #${loreIndex + 1} 수정`,
-        restore: async () => {
-          const latestChat = await this._readChatAt(charIndex, chatIndex);
-          if (!latestChat?.localLore?.[loreIndex]) throw new Error('되돌릴 채팅 로어북 항목을 찾을 수 없습니다.');
-          const restored = clone(latestChat);
-          restored.localLore[loreIndex] = clone(prevEntry);
-          await this._setChat(charIndex, chatIndex, restored);
-        },
-      });
-      return { ok: true, undoId, summary: `채팅 로어북 #${loreIndex + 1}을(를) 수정했습니다.` };
+    if (!proposal.edits && (proposal[fieldKey] !== undefined || (fieldKey === 'content' && proposal.content !== undefined))) {
+      const truncErr = this._checkTruncationGuard(String(existing[fieldKey] ?? ''), '로어북 전체 덮어쓰기');
+      if (truncErr) throw new Error(truncErr);
     }
-
-    if (scope === 'module') {
-      const { modules, permissionDenied } = await this.readModules();
-      if (permissionDenied) throw new Error(DB_PERMISSION_ERROR);
-      const modIdx = this._resolveWriteModuleIndex(modules, proposal, target, options);
-      if (!modules[modIdx]?.lorebook?.[loreIndex]) throw new Error('대상 모듈 로어북 항목을 찾을 수 없습니다.');
-      const moduleId = modules[modIdx].id;
-      const prevEntry = clone(modules[modIdx].lorebook[loreIndex]);
-      const nextModules = clone(modules);
-      nextModules[modIdx].lorebook[loreIndex] = mutateEntry(nextModules[modIdx].lorebook[loreIndex], nextModules[modIdx].lorebook);
-      await this.writeDbSubset({ modules: nextModules });
-
-      const undoId = this._pushUndo({
-        label: `모듈 로어북 #${loreIndex + 1} 수정`,
-        restore: async () => {
-          const { modules: latestModules } = await this.readModules();
-          const idx = latestModules.findIndex(m => m.id === moduleId);
-          if (idx === -1 || !latestModules[idx].lorebook?.[loreIndex]) throw new Error('되돌릴 모듈 로어북 항목을 찾을 수 없습니다.');
-          const restored = clone(latestModules);
-          restored[idx].lorebook[loreIndex] = clone(prevEntry);
-          await this.writeDbSubset({ modules: restored });
-        },
-      });
-      return { ok: true, undoId, summary: `모듈 "${nextModules[modIdx].name}" 로어북 #${loreIndex + 1}을(를) 수정했습니다.` };
+    const folderRes = resolveLorebookFolderProposal(list, proposal, existing);
+    if (!folderRes.ok) throw new Error(folderRes.error);
+    const next = normalizeLorebookEntry(
+      folderRes.resolvedFolder !== undefined ? { ...proposal, folder: folderRes.resolvedFolder } : proposal,
+      existing
+    );
+    if (proposal.edits) {
+      const nextStr = applyTextEdits(String(existing[fieldKey] ?? ''), proposal.edits, '로어북');
+      if (fieldKey === 'insertorder') {
+        const num = Number(nextStr.trim());
+        if (!Number.isFinite(num)) throw new Error('배치 순서(insertorder)는 유한한 숫자여야 합니다.');
+        next[fieldKey] = num;
+      } else {
+        next[fieldKey] = nextStr;
+      }
     }
+    list[loreIndex] = next;
 
-    const { char, charIndex } = await this._requireSameActiveCharacter(options.hostBinding, '적용');
-    if (!char?.globalLore?.[loreIndex]) throw new Error(`캐릭터 로어북 #${loreIndex + 1}을(를) 찾을 수 없습니다.`);
-    const charBinding = { charIndex, ...getCharIdentity(char) };
-    const prevEntry = clone(char.globalLore[loreIndex]);
-    const nextChar = clone(char);
-    nextChar.globalLore[loreIndex] = mutateEntry(nextChar.globalLore[loreIndex], nextChar.globalLore);
-    await this._setCharacter(nextChar);
-
-    const undoId = this._pushUndo({
-      label: `캐릭터 로어북 #${loreIndex + 1} 수정`,
-      restore: async () => {
-        const { char: latest } = await this._requireSameActiveCharacter(charBinding, '되돌리기');
-        if (!latest.globalLore?.[loreIndex]) throw new Error('되돌릴 캐릭터 로어북 항목을 찾을 수 없습니다.');
-        const restored = clone(latest);
-        restored.globalLore[loreIndex] = clone(prevEntry);
-        await this._setCharacter(restored);
-      },
-    });
-    return { ok: true, undoId, summary: `캐릭터 로어북 #${loreIndex + 1}을(를) 수정했습니다.` };
+    const undoId = await opened.commit(`${opened.name} 로어북 #${loreIndex + 1} 수정`);
+    return { ok: true, undoId, summary: `${opened.name} 로어북 #${loreIndex + 1}을(를) 수정했습니다.` };
   }
 
   async _applyOrganizeLorebook(proposal, target, options = {}) {
-    const scope = proposal.scope || target.loreScope || (target.targetKind?.startsWith('module_') ? 'module' : target.targetKind === 'chat_lorebook' ? 'chat' : 'character');
+    const opened = await this._openScope(this._loreScopeOf(proposal, target), proposal, target, options);
+    const list = this._scopeList(opened, 'lore');
 
-    const applyToList = (liveList) => {
-      const plan = planOrganizeLorebook(liveList, proposal);
-      if (!plan.ok) throw new Error(plan.error);
+    const plan = planOrganizeLorebook(list, proposal);
+    if (!plan.ok) throw new Error(plan.error);
 
-      const prevStates = plan.movableIndices.map(idx => ({
-        idx,
-        hadFolder: Object.hasOwn(liveList[idx], 'folder'),
-        prevFolder: liveList[idx].folder,
-      }));
-
-      let createdFolder = null;
-      let createdFolderIndex = -1;
-      let targetFolderKey = plan.folderKey;
-
-      if (plan.willCreateFolder) {
-        createdFolder = normalizeLorebookEntry({
-          mode: 'folder',
-          comment: plan.newFolderName,
-          key: '',
-        });
-        createdFolderIndex = liveList.length;
-        liveList.push(createdFolder);
-        targetFolderKey = createdFolder.key;
-      }
-
-      for (const idx of plan.movableIndices) {
-        if (plan.isRoot) {
-          delete liveList[idx].folder;
-        } else {
-          liveList[idx].folder = targetFolderKey;
-        }
-      }
-
-      return { plan, prevStates, createdFolder, createdFolderIndex, targetFolderKey };
-    };
-
-    const restoreList = (latestList, { prevStates, createdFolder, createdFolderIndex }) => {
-      for (const st of prevStates) {
-        if (!latestList?.[st.idx]) continue;
-        if (st.hadFolder) latestList[st.idx].folder = st.prevFolder;
-        else delete latestList[st.idx].folder;
-      }
-      if (createdFolder) {
-        removeCreatedItem(latestList, createdFolderIndex, e =>
-          e && e.mode === 'folder' && e.key === createdFolder.key
-        );
-      }
-    };
-
-    const formatSummary = (scopePrefix, result) => {
-      const count = result.plan.movableIndices.length;
-      if (result.plan.isRoot) {
-        return `${scopePrefix} 로어북 ${count}개를 최상위 목록으로 이동했습니다.`;
-      }
-      if (result.createdFolder) {
-        return `${scopePrefix}에 새 폴더 "${result.createdFolder.comment}"을(를) 만들고 로어북 ${count}개를 이동했습니다.`;
-      }
-      return `${scopePrefix} 로어북 ${count}개를 "${result.plan.folderLabel}" 폴더로 이동했습니다.`;
-    };
-
-    if (scope === 'chat') {
-      const { chat, charIndex, chatIndex } = await this._requireSameActiveChat(options.hostBinding, '적용');
-      const nextChat = clone(chat);
-      nextChat.localLore = Array.isArray(nextChat.localLore) ? nextChat.localLore : [];
-      const result = applyToList(nextChat.localLore);
-      await this._setChat(charIndex, chatIndex, nextChat);
-
-      const undoId = this._pushUndo({
-        label: `채팅 로어북 폴더 정리 (${result.plan.movableIndices.length}개)`,
-        restore: async () => {
-          const latestChat = await this._readChatAt(charIndex, chatIndex);
-          if (!latestChat) throw new Error('되돌릴 채팅을 찾을 수 없습니다.');
-          const restored = clone(latestChat);
-          restoreList(restored.localLore, result);
-          await this._setChat(charIndex, chatIndex, restored);
-        },
-      });
-      return {
-        ok: true,
-        undoId,
-        folderKey: result.targetFolderKey,
-        movedCount: result.plan.movableIndices.length,
-        createdFolder: Boolean(result.createdFolder),
-        summary: formatSummary('채팅', result),
-      };
+    let createdFolder = null;
+    let targetFolderKey = plan.folderKey;
+    if (plan.willCreateFolder) {
+      createdFolder = normalizeLorebookEntry({ mode: 'folder', comment: plan.newFolderName, key: '' });
+      list.push(createdFolder);
+      targetFolderKey = createdFolder.key;
+    }
+    for (const idx of plan.movableIndices) {
+      if (plan.isRoot) delete list[idx].folder;
+      else list[idx].folder = targetFolderKey;
     }
 
-    if (scope === 'module') {
-      const { modules, permissionDenied } = await this.readModules();
-      if (permissionDenied) throw new Error(DB_PERMISSION_ERROR);
-      const modIdx = this._resolveWriteModuleIndex(modules, proposal, target, options);
-      if (!modules[modIdx]) throw new Error('대상 모듈을 찾을 수 없습니다.');
-      const moduleId = modules[modIdx].id;
-      const nextModules = clone(modules);
-      nextModules[modIdx].lorebook = Array.isArray(nextModules[modIdx].lorebook) ? nextModules[modIdx].lorebook : [];
-      const result = applyToList(nextModules[modIdx].lorebook);
-      await this.writeDbSubset({ modules: nextModules });
-
-      const undoId = this._pushUndo({
-        label: `모듈 "${nextModules[modIdx].name}" 로어북 폴더 정리 (${result.plan.movableIndices.length}개)`,
-        restore: async () => {
-          const { modules: latestModules } = await this.readModules();
-          const idx = latestModules.findIndex(m => m.id === moduleId);
-          if (idx === -1) throw new Error('되돌릴 모듈을 찾을 수 없습니다.');
-          const restored = clone(latestModules);
-          restoreList(restored[idx].lorebook, result);
-          await this.writeDbSubset({ modules: restored });
-        },
-      });
-      return {
-        ok: true,
-        undoId,
-        folderKey: result.targetFolderKey,
-        movedCount: result.plan.movableIndices.length,
-        createdFolder: Boolean(result.createdFolder),
-        summary: formatSummary(`모듈 "${nextModules[modIdx].name}"`, result),
-      };
-    }
-
-    const { char, charIndex } = await this._requireSameActiveCharacter(options.hostBinding, '적용');
-    const charBinding = { charIndex, ...getCharIdentity(char) };
-    const nextChar = clone(char);
-    nextChar.globalLore = Array.isArray(nextChar.globalLore) ? nextChar.globalLore : [];
-    const result = applyToList(nextChar.globalLore);
-    await this._setCharacter(nextChar);
-
-    const undoId = this._pushUndo({
-      label: `캐릭터 로어북 폴더 정리 (${result.plan.movableIndices.length}개)`,
-      restore: async () => {
-        const { char: latest } = await this._requireSameActiveCharacter(charBinding, '되돌리기');
-        const restored = clone(latest);
-        restoreList(restored.globalLore, result);
-        await this._setCharacter(restored);
-      },
-    });
-    return {
-      ok: true,
-      undoId,
-      folderKey: result.targetFolderKey,
-      movedCount: result.plan.movableIndices.length,
-      createdFolder: Boolean(result.createdFolder),
-      summary: formatSummary('캐릭터', result),
-    };
+    const count = plan.movableIndices.length;
+    const undoId = await opened.commit(`${opened.name} 로어북 폴더 정리 (${count}개)`);
+    let summary;
+    if (plan.isRoot) summary = `${opened.name} 로어북 ${count}개를 최상위 목록으로 이동했습니다.`;
+    else if (createdFolder) summary = `${opened.name}에 새 폴더 "${createdFolder.comment}"을(를) 만들고 로어북 ${count}개를 이동했습니다.`;
+    else summary = `${opened.name} 로어북 ${count}개를 "${plan.folderLabel}" 폴더로 이동했습니다.`;
+    return { ok: true, undoId, folderKey: targetFolderKey, movedCount: count, createdFolder: Boolean(createdFolder), summary };
   }
 
   /**
    * Rescues orphaned lorebook entries whose `folder` property points to a nonexistent folder key
-   * by clearing `entry.folder` (moving them back to root) in one atomic write with surgical Undo.
+   * by clearing `entry.folder` (moving them back to root) in one write with a single undo entry.
    */
   async recoverOrphanedLorebooks(target = {}, options = {}) {
-    const scope =
-      target?.loreScope ||
-      (target?.targetKind === 'chat_lorebook' ? 'chat' :
-        target?.targetKind?.startsWith('module_') ? 'module' : 'character');
-
-    const rescueList = (liveList) => {
-      const orphaned = findOrphanedLorebooks(liveList);
-      const prevStates = orphaned.map(idx => ({
-        idx,
-        hadFolder: Object.hasOwn(liveList[idx], 'folder'),
-        prevFolder: liveList[idx].folder,
-      }));
-      for (const idx of orphaned) {
-        delete liveList[idx].folder;
-      }
-      return prevStates;
-    };
-
-    const restoreRescued = (latestList, prevStates) => {
-      for (const st of prevStates) {
-        if (!latestList?.[st.idx]) continue;
-        if (st.hadFolder) latestList[st.idx].folder = st.prevFolder;
-        else delete latestList[st.idx].folder;
-      }
-    };
-
-    if (scope === 'chat') {
-      const { chat, charIndex, chatIndex } = await this._requireSameActiveChat(options.hostBinding, '복구');
-      const nextChat = clone(chat);
-      nextChat.localLore = Array.isArray(nextChat.localLore) ? nextChat.localLore : [];
-      const prevStates = rescueList(nextChat.localLore);
-      if (prevStates.length === 0) {
-        return { ok: true, recoveredCount: 0, undoId: null, summary: '복구할 숨겨진 채팅 로어북이 없습니다.' };
-      }
-      await this._setChat(charIndex, chatIndex, nextChat);
-      const undoId = this._pushUndo({
-        label: `숨겨진 채팅 로어북 ${prevStates.length}개 복구`,
-        restore: async () => {
-          const latestChat = await this._readChatAt(charIndex, chatIndex);
-          if (!latestChat) throw new Error('되돌릴 채팅을 찾을 수 없습니다.');
-          const restored = clone(latestChat);
-          restoreRescued(restored.localLore, prevStates);
-          await this._setChat(charIndex, chatIndex, restored);
-        },
-      });
-      return {
-        ok: true,
-        recoveredCount: prevStates.length,
-        undoId,
-        summary: `숨겨진 채팅 로어북 ${prevStates.length}개를 최상위 목록으로 복구했습니다.`,
-      };
+    const opened = await this._openScope(this._loreScopeOf({}, target), {}, target, options, '복구');
+    const list = this._scopeList(opened, 'lore');
+    const orphaned = findOrphanedLorebooks(list);
+    if (orphaned.length === 0) {
+      return { ok: true, recoveredCount: 0, undoId: null, summary: `복구할 숨겨진 ${opened.name} 로어북이 없습니다.` };
     }
-
-    if (scope === 'module') {
-      const { modules, permissionDenied } = await this.readModules();
-      if (permissionDenied) throw new Error(DB_PERMISSION_ERROR);
-      const modIdx = this._resolveWriteModuleIndex(modules, {}, target, options);
-      if (!modules[modIdx]) throw new Error('대상 모듈을 찾을 수 없습니다.');
-      const moduleId = modules[modIdx].id;
-      const nextModules = clone(modules);
-      nextModules[modIdx].lorebook = Array.isArray(nextModules[modIdx].lorebook) ? nextModules[modIdx].lorebook : [];
-      const prevStates = rescueList(nextModules[modIdx].lorebook);
-      if (prevStates.length === 0) {
-        return { ok: true, recoveredCount: 0, undoId: null, summary: '복구할 숨겨진 모듈 로어북이 없습니다.' };
-      }
-      await this.writeDbSubset({ modules: nextModules });
-      const undoId = this._pushUndo({
-        label: `모듈 "${nextModules[modIdx].name}" 숨겨진 로어북 ${prevStates.length}개 복구`,
-        restore: async () => {
-          const { modules: latestModules } = await this.readModules();
-          const idx = latestModules.findIndex(m => m.id === moduleId);
-          if (idx === -1) throw new Error('되돌릴 모듈을 찾을 수 없습니다.');
-          const restored = clone(latestModules);
-          restoreRescued(restored[idx].lorebook, prevStates);
-          await this.writeDbSubset({ modules: restored });
-        },
-      });
-      return {
-        ok: true,
-        recoveredCount: prevStates.length,
-        undoId,
-        summary: `모듈 "${nextModules[modIdx].name}"의 숨겨진 로어북 ${prevStates.length}개를 최상위 목록으로 복구했습니다.`,
-      };
-    }
-
-    const { char, charIndex } = await this._requireSameActiveCharacter(options.hostBinding, '복구');
-    const charBinding = { charIndex, ...getCharIdentity(char) };
-    const nextChar = clone(char);
-    nextChar.globalLore = Array.isArray(nextChar.globalLore) ? nextChar.globalLore : [];
-    const prevStates = rescueList(nextChar.globalLore);
-    if (prevStates.length === 0) {
-      return { ok: true, recoveredCount: 0, undoId: null, summary: '복구할 숨겨진 캐릭터 로어북이 없습니다.' };
-    }
-    await this._setCharacter(nextChar);
-    const undoId = this._pushUndo({
-      label: `숨겨진 캐릭터 로어북 ${prevStates.length}개 복구`,
-      restore: async () => {
-        const { char: latest } = await this._requireSameActiveCharacter(charBinding, '되돌리기');
-        const restored = clone(latest);
-        restoreRescued(restored.globalLore, prevStates);
-        await this._setCharacter(restored);
-      },
-    });
+    for (const idx of orphaned) delete list[idx].folder;
+    const undoId = await opened.commit(`${opened.name} 숨겨진 로어북 ${orphaned.length}개 복구`);
     return {
       ok: true,
-      recoveredCount: prevStates.length,
+      recoveredCount: orphaned.length,
       undoId,
-      summary: `숨겨진 캐릭터 로어북 ${prevStates.length}개를 최상위 목록으로 복구했습니다.`,
+      summary: `${opened.name}의 숨겨진 로어북 ${orphaned.length}개를 최상위 목록으로 복구했습니다.`,
     };
   }
 
   async _applyUpdateLua(proposal, target, options = {}) {
     const scope = proposal.scope || (target.targetKind === 'module_lua' ? 'module' : 'character');
+    const opened = await this._openScope(scope, proposal, target, options);
+    const triggerKey = opened.listKeys.trigger;
 
-    if (scope === 'module') {
-      const { modules, permissionDenied } = await this.readModules();
-      if (permissionDenied) throw new Error(DB_PERMISSION_ERROR);
-      const modIdx = this._resolveWriteModuleIndex(modules, proposal, target, options);
-      if (!modules[modIdx]) throw new Error('대상 모듈을 찾을 수 없습니다.');
-      const luaInfo = extractLuaFromTriggers(modules[modIdx].trigger);
-      if (luaInfo.hasOtherTriggers && options.requireDestructiveConfirm && !options.destructiveConfirmed) {
-        throw new Error('기존 V1/V2 트리거 삭제 확인 체크가 필요합니다.');
-      }
-      if (!proposal.edits) {
-        const truncErr = checkTruncationGuard(luaInfo.code, '모듈 Lua 전체 교체');
-        if (truncErr) throw new Error(truncErr);
-      }
-
-      const moduleId = modules[modIdx].id;
-      const prevTriggers = clone(modules[modIdx].trigger);
-      const nextModules = clone(modules);
-      const nextCode = proposal.edits
-        ? applyTextEdits(luaInfo.code, proposal.edits, '모듈 Lua')
-        : String(proposal.code ?? proposal.content ?? '');
-      nextModules[modIdx].trigger = buildLuaTriggers(nextCode);
-      await this.writeDbSubset({ modules: nextModules });
-
-      const undoId = this._pushUndo({
-        label: `모듈 Lua 수정 (${nextModules[modIdx].name})`,
-        restore: async () => {
-          const { modules: latestModules } = await this.readModules();
-          const idx = latestModules.findIndex(m => m.id === moduleId);
-          if (idx === -1) throw new Error('되돌릴 모듈을 찾을 수 없습니다.');
-          const restored = clone(latestModules);
-          restored[idx].trigger = clone(prevTriggers);
-          await this.writeDbSubset({ modules: restored });
-        },
-      });
-      return { ok: true, undoId, summary: `모듈 "${nextModules[modIdx].name}" Lua 스크립트를 저장했습니다.` };
-    }
-
-    const { char, charIndex } = await this._requireSameActiveCharacter(options.hostBinding, '적용');
-    const luaInfo = extractLuaFromTriggers(char.triggerscript);
+    const luaInfo = extractLuaFromTriggers(opened.root[triggerKey]);
     if (luaInfo.hasOtherTriggers && options.requireDestructiveConfirm && !options.destructiveConfirmed) {
       throw new Error('기존 V1/V2 트리거 삭제 확인 체크가 필요합니다.');
     }
     if (!proposal.edits) {
-      const truncErr = checkTruncationGuard(luaInfo.code, '캐릭터 Lua 전체 교체');
+      const truncErr = this._checkTruncationGuard(luaInfo.code, `${opened.name} Lua 전체 교체`);
       if (truncErr) throw new Error(truncErr);
     }
-
-    const charBinding = { charIndex, ...getCharIdentity(char) };
-    const prevTriggers = clone(char.triggerscript);
-    const nextChar = clone(char);
     const nextCode = proposal.edits
-      ? applyTextEdits(luaInfo.code, proposal.edits, '캐릭터 Lua')
+      ? applyTextEdits(luaInfo.code, proposal.edits, `${opened.name} Lua`)
       : String(proposal.code ?? proposal.content ?? '');
-    nextChar.triggerscript = buildLuaTriggers(nextCode);
-    await this._setCharacter(nextChar);
+    opened.root[triggerKey] = buildLuaTriggers(nextCode);
 
-    const undoId = this._pushUndo({
-      label: `캐릭터 Lua 수정 (${nextChar.name})`,
-      restore: async () => {
-        const { char: latest } = await this._requireSameActiveCharacter(charBinding, '되돌리기');
-        const restored = clone(latest);
-        restored.triggerscript = clone(prevTriggers);
-        await this._setCharacter(restored);
-      },
-    });
-    return { ok: true, undoId, summary: `캐릭터 "${nextChar.name}" Lua 트리거 스크립트를 저장했습니다.` };
+    const ownerName = opened.scope === 'module' ? opened.name : `캐릭터 "${opened.root.name}"`;
+    const undoId = await opened.commit(`${opened.name} Lua 수정`);
+    return { ok: true, undoId, summary: `${ownerName} Lua 트리거 스크립트를 저장했습니다.` };
   }
 
   async _applyUpsertRegex(proposal, target, options = {}) {
     const scope = proposal.scope || (target.targetKind === 'module_regex' ? 'module' : 'character');
     const idx = Number.isInteger(proposal.regexIndex) ? proposal.regexIndex : null;
+    const opened = await this._openScope(scope, proposal, target, options);
+    const list = this._scopeList(opened, 'regex');
 
-    if (scope === 'module') {
-      const { modules, permissionDenied } = await this.readModules();
-      if (permissionDenied) throw new Error(DB_PERMISSION_ERROR);
-      const modIdx = this._resolveWriteModuleIndex(modules, proposal, target, options);
-      if (!modules[modIdx]) throw new Error('대상 모듈을 찾을 수 없습니다.');
-      const moduleId = modules[modIdx].id;
-      const nextModules = clone(modules);
-      nextModules[modIdx].regex = Array.isArray(nextModules[modIdx].regex) ? nextModules[modIdx].regex : [];
+    const isUpdate = idx !== null && Boolean(list[idx]);
+    if (isUpdate) list[idx] = normalizeRegexEntry(proposal, list[idx]);
+    else list.push(normalizeRegexEntry(proposal));
 
-      const isUpdate = idx !== null && Boolean(nextModules[modIdx].regex[idx]);
-      const prevEntry = isUpdate ? clone(nextModules[modIdx].regex[idx]) : null;
-      const savedEntry = isUpdate
-        ? normalizeRegexEntry(proposal, nextModules[modIdx].regex[idx])
-        : normalizeRegexEntry(proposal);
-      const insertedIndex = isUpdate ? idx : nextModules[modIdx].regex.length;
-      if (isUpdate) nextModules[modIdx].regex[idx] = savedEntry;
-      else nextModules[modIdx].regex.push(savedEntry);
-
-      await this.writeDbSubset({ modules: nextModules });
-      const snapshotEntry = clone(savedEntry);
-      const undoId = this._pushUndo({
-        label: `모듈 정규식 저장 (${proposal.comment || 'Regex'})`,
-        restore: async () => {
-          const { modules: latestModules } = await this.readModules();
-          const mIdx = latestModules.findIndex(m => m.id === moduleId);
-          if (mIdx === -1) throw new Error('되돌릴 모듈을 찾을 수 없습니다.');
-          const restored = clone(latestModules);
-          if (isUpdate) {
-            if (!restored[mIdx].regex?.[idx]) throw new Error('되돌릴 모듈 정규식 항목을 찾을 수 없습니다.');
-            restored[mIdx].regex[idx] = clone(prevEntry);
-          } else {
-            removeCreatedItem(restored[mIdx].regex, insertedIndex, e =>
-              e && e.comment === snapshotEntry.comment && e.in === snapshotEntry.in && e.out === snapshotEntry.out
-            );
-          }
-          await this.writeDbSubset({ modules: restored });
-        },
-      });
-      return { ok: true, undoId, summary: `모듈 "${nextModules[modIdx].name}" 정규식을 저장했습니다.` };
-    }
-
-    const { char, charIndex } = await this._requireSameActiveCharacter(options.hostBinding, '적용');
-    const charBinding = { charIndex, ...getCharIdentity(char) };
-    const nextChar = clone(char);
-    nextChar.customscript = Array.isArray(nextChar.customscript) ? nextChar.customscript : [];
-
-    const isUpdate = idx !== null && Boolean(nextChar.customscript[idx]);
-    const prevEntry = isUpdate ? clone(nextChar.customscript[idx]) : null;
-    const savedEntry = isUpdate
-      ? normalizeRegexEntry(proposal, nextChar.customscript[idx])
-      : normalizeRegexEntry(proposal);
-    const insertedIndex = isUpdate ? idx : nextChar.customscript.length;
-    if (isUpdate) nextChar.customscript[idx] = savedEntry;
-    else nextChar.customscript.push(savedEntry);
-
-    await this._setCharacter(nextChar);
-    const snapshotEntry = clone(savedEntry);
-    const undoId = this._pushUndo({
-      label: `캐릭터 정규식 저장 (${proposal.comment || 'Regex'})`,
-      restore: async () => {
-        const { char: latest } = await this._requireSameActiveCharacter(charBinding, '되돌리기');
-        const restored = clone(latest);
-        if (isUpdate) {
-          if (!restored.customscript?.[idx]) throw new Error('되돌릴 캐릭터 정규식 항목을 찾을 수 없습니다.');
-          restored.customscript[idx] = clone(prevEntry);
-        } else {
-          removeCreatedItem(restored.customscript, insertedIndex, e =>
-            e && e.comment === snapshotEntry.comment && e.in === snapshotEntry.in && e.out === snapshotEntry.out
-          );
-        }
-        await this._setCharacter(restored);
-      },
-    });
-    return { ok: true, undoId, summary: `캐릭터 정규식 "${proposal.comment || 'New Regex'}"을(를) 저장했습니다.` };
+    const undoId = await opened.commit(`${opened.name} 정규식 저장 (${proposal.comment || 'Regex'})`);
+    return { ok: true, undoId, summary: `${opened.name} 정규식 "${proposal.comment || 'New Regex'}"을(를) 저장했습니다.` };
   }
 
-  async _bindPersonaToActiveChat(personaId) {
+  /**
+   * Binds a persona to the active chat. The chat change is appended to the undo record `appendTo`
+   * so persona + binding are undone together. Returns false when there is no active chat.
+   */
+  async _bindPersonaToActiveChat(personaId, appendTo) {
     const { chat, charIndex, chatIndex } = await this.readActiveChat();
-    if (!chat) return null;
-    const hadKey = Object.hasOwn(chat, 'bindedPersona');
-    const prevBindedPersona = chat.bindedPersona;
+    if (!chat) return false;
     const nextChat = clone(chat);
     nextChat.bindedPersona = personaId;
-    await this._setChat(charIndex, chatIndex, nextChat);
-    return async () => {
-      const latestChat = await this._readChatAt(charIndex, chatIndex);
-      if (!latestChat) return;
-      const restored = clone(latestChat);
-      if (hadKey) restored.bindedPersona = prevBindedPersona;
-      else delete restored.bindedPersona;
-      await this._setChat(charIndex, chatIndex, restored);
-    };
+    await this._commitChat(chat, charIndex, chatIndex, nextChat, '', { appendTo });
+    return true;
   }
 
   async _applyCreatePersona(proposal, options) {
@@ -7064,27 +7128,15 @@ class HostAdapter {
       largePortrait: Boolean(proposal.largePortrait),
       id: makeUuid(),
     };
-    const insertedIndex = nextPersonas.length;
     nextPersonas.push(newPersona);
-    await this.writeDbSubset({ personas: nextPersonas });
+    const undoId = await this._commitDb({ personas }, { personas: nextPersonas }, `새 페르소나 생성 (${newPersona.name})`);
 
-    let restoreChat = null;
+    let restoreChat = false;
     const shouldBind = Boolean(options.bindToCurrentChat ?? proposal.bindToCurrentChat);
     if (shouldBind) {
-      restoreChat = await this._bindPersonaToActiveChat(newPersona.id);
+      restoreChat = await this._bindPersonaToActiveChat(newPersona.id, undoId);
     }
 
-    const createdId = newPersona.id;
-    const undoId = this._pushUndo({
-      label: `새 페르소나 생성 (${newPersona.name})`,
-      restore: async () => {
-        const { personas: latestPersonas } = await this.readPersonas();
-        const restored = clone(latestPersonas);
-        removeCreatedItem(restored, insertedIndex, p => p && p.id === createdId);
-        await this.writeDbSubset({ personas: restored });
-        if (restoreChat) await restoreChat();
-      },
-    });
     return {
       ok: true,
       undoId,
@@ -7107,7 +7159,6 @@ class HostAdapter {
       assertAllowedFieldKey('persona', proposal.fieldKey);
     }
 
-    const prevPersona = clone(personas[idx]);
     const nextPersonas = clone(personas);
     const cur = nextPersonas[idx];
     if (!cur.id) cur.id = makeUuid();
@@ -7115,7 +7166,7 @@ class HostAdapter {
     if (!proposal.edits && !proposal.fieldEdits) {
       const checkKey = proposal.fieldKey || 'personaPrompt';
       if (proposal[checkKey] !== undefined) {
-        const truncErr = checkTruncationGuard(String(cur[checkKey] ?? ''), '페르소나 전체 덮어쓰기');
+        const truncErr = this._checkTruncationGuard(String(cur[checkKey] ?? ''), '페르소나 전체 덮어쓰기');
         if (truncErr) throw new Error(truncErr);
       }
     }
@@ -7131,28 +7182,14 @@ class HostAdapter {
       cur.personaPrompt = String(proposal.personaPrompt);
     }
 
-    await this.writeDbSubset({ personas: nextPersonas });
+    const undoId = await this._commitDb({ personas }, { personas: nextPersonas }, `페르소나 수정 (${cur.name})`);
 
-    let restoreChat = null;
+    let restoreChat = false;
     const shouldBind = Boolean(options.bindToCurrentChat ?? proposal.bindToCurrentChat);
     if (shouldBind) {
-      restoreChat = await this._bindPersonaToActiveChat(cur.id);
+      restoreChat = await this._bindPersonaToActiveChat(cur.id, undoId);
     }
 
-    const savedId = cur.id;
-    const undoId = this._pushUndo({
-      label: `페르소나 수정 (${cur.name})`,
-      restore: async () => {
-        const { personas: latestPersonas } = await this.readPersonas();
-        const restored = clone(latestPersonas);
-        let targetIdx = restored.findIndex(p => p && p.id === savedId);
-        if (targetIdx === -1 && restored[idx]) targetIdx = idx;
-        if (targetIdx === -1) throw new Error('되돌릴 페르소나를 찾을 수 없습니다.');
-        restored[targetIdx] = clone(prevPersona);
-        await this.writeDbSubset({ personas: restored });
-        if (restoreChat) await restoreChat();
-      },
-    });
     return {
       ok: true,
       undoId,
@@ -7193,24 +7230,8 @@ class HostAdapter {
       next[k] = val;
     }
 
-    await this.writeDbSubset(next);
-    const undoId = this._pushUndo({
-      label: `설정 변경 (${keys.join(', ')})`,
-      restore: async () => { await this.writeDbSubset(prev); },
-    });
+    const undoId = await this._commitDb(prev, next, `설정 변경 (${keys.join(', ')})`);
     return { ok: true, undoId, summary: `설정(${keys.join(', ')})을 적용했습니다.` };
-  }
-
-  async undo(undoId = null) {
-    if (this.undoStack.length === 0) throw new Error('되돌릴 내역이 없습니다.');
-    let idx = this.undoStack.length - 1;
-    if (undoId) {
-      idx = this.undoStack.findIndex(item => item.id === undoId);
-      if (idx === -1) throw new Error('해당 되돌리기 기록을 찾을 수 없습니다.');
-    }
-    const [entry] = this.undoStack.splice(idx, 1);
-    await entry.restore();
-    return { ok: true, label: entry.label };
   }
 }
 
@@ -7449,7 +7470,7 @@ function getQuickPromptsForContext(context) {
   },
   "src/llm.js"(__require, __exports) {
 const { buildKnowledgeForContext } = __require("src/knowledge.js");
-const { ALLOWED_CONFIG_KEYS, MAX_LLM_CONTENT_CHARS, ALLOWED_CHAR_FIELDS, ALLOWED_LORE_TEXT_FIELDS, ALLOWED_PERSONA_TEXT_FIELDS } = __require("src/version.js");
+const { ALLOWED_CONFIG_KEYS, DEFAULT_MAX_CONTENT_CHARS, ALLOWED_CHAR_FIELDS, ALLOWED_LORE_TEXT_FIELDS, ALLOWED_PERSONA_TEXT_FIELDS } = __require("src/version.js");
 
 const MAX_RESPONSE_BYTES = 1024 * 1024; // 1 MiB safety limit
 const BAD_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
@@ -7768,6 +7789,34 @@ function parseAssistantReply(rawText) {
   return { prose, proposals, errors, rawText: text };
 }
 
+// Properties each action understands. Anything else in a proposal is ignored by the host adapter;
+// the UI shows it on the card so an improvised property is never dropped (or stored) silently.
+const COMMON_PROPOSAL_KEYS = ['action', 'title', 'scope', 'target', 'moduleIndex'];
+const LORE_ENTRY_KEYS = [
+  'comment', 'key', 'secondkey', 'content', 'insertorder', 'alwaysActive', 'selective', 'useRegex',
+  'activationPercent', 'mode', 'folder', 'folderName', 'folderIndex',
+];
+const PROPOSAL_KEYS_BY_ACTION = {
+  patch_text: ['edits'],
+  replace_text: ['content'],
+  create_lorebook: LORE_ENTRY_KEYS,
+  update_lorebook: [...LORE_ENTRY_KEYS, 'loreIndex', 'fieldKey', 'edits'],
+  organize_lorebook: ['folder', 'folderName', 'folderIndex', 'createFolderIfMissing', 'loreIndices', 'moveToRoot'],
+  update_lua: ['edits', 'code', 'content'],
+  upsert_regex: ['regexIndex', 'comment', 'in', 'out', 'type', 'flag', 'ableFlag'],
+  create_persona: ['name', 'note', 'personaPrompt', 'content', 'icon', 'largePortrait', 'bindToCurrentChat'],
+  update_persona: ['personaIndex', 'name', 'note', 'personaPrompt', 'largePortrait', 'edits', 'fieldKey', 'fieldEdits', 'bindToCurrentChat'],
+  update_config: ['changes'],
+};
+
+function findUnknownProposalKeys(item) {
+  if (!item || typeof item !== 'object' || Array.isArray(item)) return [];
+  const known = PROPOSAL_KEYS_BY_ACTION[item.action];
+  if (!known) return [];
+  const allowed = new Set([...COMMON_PROPOSAL_KEYS, ...known]);
+  return Object.keys(item).filter(k => !allowed.has(k));
+}
+
 function validateFieldKeyForKind(kind, fieldKey) {
   if (fieldKey === undefined || fieldKey === null || fieldKey === '') return null;
   if (typeof fieldKey !== 'string' || BAD_KEYS.has(fieldKey)) {
@@ -7888,13 +7937,14 @@ function validateProposal(item) {
 /**
  * Builds the system prompt + message list sent to Risuai.runLLMModel().
  */
-function buildConversationMessages({ context, snapshot, extraContext, history, userInput, maxHistoryTurns = 12 }) {
+function buildConversationMessages({ context, snapshot, extraContext, history, userInput, maxHistoryTurns = 12, maxContentChars = DEFAULT_MAX_CONTENT_CHARS }) {
+  const contentLimit = Number.isFinite(Number(maxContentChars)) && Number(maxContentChars) > 0 ? Number(maxContentChars) : DEFAULT_MAX_CONTENT_CHARS;
   const knowledge = buildKnowledgeForContext(context);
   const targetLabel = snapshot?.label || context?.labelText || '일반 화면';
   const currentText = snapshot?.content ?? '';
-  const isTruncated = currentText.length > MAX_LLM_CONTENT_CHARS;
+  const isTruncated = currentText.length > contentLimit;
   const clippedContent = isTruncated
-    ? currentText.slice(0, MAX_LLM_CONTENT_CHARS) + `\n... (총 ${currentText.length}자 중 앞 ${MAX_LLM_CONTENT_CHARS.toLocaleString()}자만 표시)`
+    ? currentText.slice(0, contentLimit) + `\n... (총 ${currentText.length}자 중 앞 ${contentLimit.toLocaleString()}자만 표시)`
     : currentText;
 
   const extraBlocks = [];
@@ -7927,7 +7977,7 @@ function buildConversationMessages({ context, snapshot, extraContext, history, u
   }
 
   const truncationRule = isTruncated
-    ? `\n⚠️ [원문 잘림 경고] 현재 원문(${currentText.length.toLocaleString()}자)은 앞 ${MAX_LLM_CONTENT_CHARS.toLocaleString()}자만 제공되었습니다. 뒷부분 유실을 막기 위해 replace_text 및 전체 code 덮어쓰기는 차단됩니다. 반드시 patch_text 또는 edits로 보이는 구간만 부분 편집하세요.`
+    ? `\n⚠️ [원문 잘림 경고] 현재 원문(${currentText.length.toLocaleString()}자)은 앞 ${contentLimit.toLocaleString()}자만 제공되었습니다. 뒷부분 유실을 막기 위해 replace_text 및 전체 code 덮어쓰기는 차단됩니다. 반드시 patch_text 또는 edits로 보이는 구간만 부분 편집하세요.`
     : '';
 
   const screenNote = context?.screen === 'chat'
@@ -7996,6 +8046,7 @@ JSON 헤더 안에는 주석이나 trailing comma를 넣지 말고 유효한 JSO
   ];
 }
 
+  __exports.findUnknownProposalKeys = findUnknownProposalKeys;
   __exports.readModelResponse = readModelResponse;
   __exports.callRisuModel = callRisuModel;
   __exports.extractProposalBlocks = extractProposalBlocks;
@@ -10705,11 +10756,11 @@ function buildListItem(doc, rawItemText) {
 
   },
   "src/ui.js"(__require, __exports) {
-const { VERSION, STORAGE_KEY, PRESET_STORAGE_KEY, CHAR_FIELD_META, MODULE_FIELD_META, CONFIG_FIELD_META, SCREEN_LABELS } = __require("src/version.js");
+const { VERSION, STORAGE_KEY, PRESET_STORAGE_KEY, UNDO_STORAGE_KEY, DEFAULT_MAX_CONTENT_CHARS, MAX_CONTENT_CHAR_OPTIONS, CHAR_FIELD_META, MODULE_FIELD_META, CONFIG_FIELD_META, SCREEN_LABELS } = __require("src/version.js");
 const { STYLES } = __require("src/style.js");
 const { FocusTracker, normalizeChipPos, MIN_DOCK_VIEWPORT_PX } = __require("src/focus-detector.js");
 const { HostAdapter, resolveModuleIndex, summarizeLoreList } = __require("src/host-adapter.js");
-const { callRisuModel, parseAssistantReply, buildConversationMessages } = __require("src/llm.js");
+const { callRisuModel, parseAssistantReply, buildConversationMessages, findUnknownProposalKeys } = __require("src/llm.js");
 const { buildDiffPreview } = __require("src/text-edits.js");
 const { getQuickPromptsForContext } = __require("src/knowledge.js");
 const { newPresetState, validatePresetState, assembleRisuHelperMessages } = __require("src/preset-engine.js");
@@ -10720,8 +10771,10 @@ const DEFAULT_SETTINGS = {
   modelMode: 'model',
   timeoutSeconds: 120,
   maxHistoryTurns: 12,
+  maxContentChars: DEFAULT_MAX_CONTENT_CHARS,
   showFloatingChip: true,
   showHostActionButton: false,
+  showDetectDiagnostics: false,
   autoFillModuleEditor: false,
   floatingChipPos: null,
   dockMode: false,
@@ -10859,7 +10912,15 @@ class RisuHelperApp {
 
   async init() {
     await this.loadSettings();
+    this.applyContentLimit();
     await this.loadPresetState();
+    await this.loadUndoState();
+    this.adapter.onUndoChange = (info) => {
+      this.scheduleSaveUndoState();
+      if (info?.evicted?.length) {
+        this.showToast(`되돌리기 기록이 가득 차 가장 오래된 ${info.evicted.length}건을 정리했습니다. (정리된 변경은 더 이상 되돌릴 수 없습니다)`);
+      }
+    };
     this.mountBaseStyles();
     this.syncHostTheme();
     this.bindVisualViewport();
@@ -10886,6 +10947,7 @@ class RisuHelperApp {
 
     // Start cursor focus tracker asynchronously (gracefully continues in manual mode if mainDom is declined)
     this.tracker.showFloatingChip = this.settings.showFloatingChip;
+    this.tracker.diagnostics = Boolean(this.settings.showDetectDiagnostics);
     this.tracker.chipPos = normalizeChipPos(this.settings.floatingChipPos);
     const trackerStarted = await this.tracker.start().catch(() => false);
     await this.syncHostActionButton();
@@ -10979,6 +11041,104 @@ class RisuHelperApp {
     try {
       await this.api.pluginStorage.setItem(STORAGE_KEY, JSON.stringify(this.settings));
     } catch {}
+  }
+
+  /** Sends the configured "original text length" limit to the adapter (overwrite guard). */
+  applyContentLimit() {
+    const n = Number(this.settings.maxContentChars);
+    this.settings.maxContentChars = MAX_CONTENT_CHAR_OPTIONS.includes(n) ? n : DEFAULT_MAX_CONTENT_CHARS;
+    this.adapter.maxContentChars = this.settings.maxContentChars;
+  }
+
+  // Undo history is kept in pluginStorage so it survives a reload of the page or the plugin.
+  async loadUndoState() {
+    if (!this.api.pluginStorage?.getItem) return;
+    try {
+      const raw = await this.api.pluginStorage.getItem(UNDO_STORAGE_KEY);
+      if (raw) this.adapter.importUndoState(typeof raw === 'string' ? JSON.parse(raw) : raw);
+    } catch {}
+  }
+
+  scheduleSaveUndoState() {
+    if (!this.api.pluginStorage?.setItem) return;
+    clearTimeout(this._undoSaveTimer);
+    this._undoSaveTimer = setTimeout(async () => {
+      try {
+        await this.api.pluginStorage.setItem(UNDO_STORAGE_KEY, JSON.stringify(this.adapter.exportUndoState()));
+      } catch {}
+    }, 120);
+  }
+
+  /** Clears "applied" on cards whose undo record no longer exists (undone globally or evicted). */
+  syncAppliedCards() {
+    const liveIds = new Set(this.adapter.undoStack.map(r => r.id));
+    for (const msg of this.messages) {
+      for (const item of msg.proposals || []) {
+        if (item.applied && item.undoId && !liveIds.has(item.undoId)) {
+          item.applied = false;
+          item.undoId = null;
+          item.statusMessage = '되돌림 완료';
+        }
+      }
+      if (msg.groupId && !this.adapter.undoStack.some(r => r.groupId === msg.groupId)) {
+        msg.groupId = null;
+      }
+    }
+  }
+
+  describeUndoResult(res) {
+    const skipped = res.conflicts?.length || 0;
+    return skipped > 0
+      ? `되돌림: ${res.label} — 단, 이후 직접 수정된 ${skipped}곳은 덮어쓰지 않고 그대로 두었습니다.`
+      : `되돌림: ${res.label}`;
+  }
+
+  applicableProposals(msg) {
+    return (msg.proposals || []).filter(item => item.preview?.ok && !item.applied);
+  }
+
+  /** Applies every applicable proposal of one reply as a single undo unit. */
+  async applyAllProposals(msg) {
+    const attempted = new Set();
+    const { groupId } = await this.adapter.runGroup(`묶음 적용`, async () => {
+      for (let guard = 0; guard < 200; guard++) {
+        const next = this.applicableProposals(msg).find(item => !attempted.has(item));
+        if (!next) break;
+        attempted.add(next);
+        await this.applyProposalItem(next);
+      }
+    });
+    const appliedCount = [...attempted].filter(item => item.applied).length;
+    msg.groupId = appliedCount > 0 ? groupId : null;
+    this.showToast(`${appliedCount}건을 한 번에 적용했습니다. "묶음 되돌리기" 한 번으로 모두 되돌릴 수 있습니다.`);
+    this.render();
+  }
+
+  async undoProposalGroup(msg) {
+    if (!msg.groupId) return;
+    try {
+      const res = await this.adapter.undoGroup(msg.groupId);
+      this.syncAppliedCards();
+      await this.refreshContextSnapshot();
+      this.showToast(this.describeUndoResult(res));
+    } catch (err) {
+      this.syncAppliedCards();
+      this.showToast(`되돌리기 실패: ${err.message}`);
+    }
+    this.render();
+  }
+
+  /** Re-renders only the streaming reply's body; the composer and pickers stay as they are. */
+  updateStreamingBody(msg) {
+    const slot = this._streamingBody;
+    if (!slot || slot.msg !== msg || !slot.el) return false;
+    try {
+      slot.el.textContent = '';
+      renderMarkdown(this.doc, slot.el, msg.content, { onCopy: (codeText) => this.copyText(codeText) });
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   async loadPresetState() {
@@ -11212,6 +11372,7 @@ class RisuHelperApp {
       history: historyMessages,
       userInput,
       maxHistoryTurns: this.settings.maxHistoryTurns,
+      maxContentChars: this.settings.maxContentChars,
     });
 
     let activeChar = null;
@@ -11284,7 +11445,7 @@ class RisuHelperApp {
     const flushChunkRender = () => {
       chunkRenderTimer = null;
       lastChunkRenderAt = Date.now();
-      this.render();
+      if (!this.updateStreamingBody(assistantMsg)) this.render();
       this.scrollChatToBottom();
     };
 
@@ -11342,6 +11503,7 @@ class RisuHelperApp {
           bindToCurrentChat: Boolean(prop.bindToCurrentChat),
           destructiveConfirmed: false,
           statusMessage: '',
+          unknownKeys: findUnknownProposalKeys(prop),
         });
       }
     } catch (err) {
@@ -11546,8 +11708,9 @@ class RisuHelperApp {
           item.moduleSyncNotice = '⚠️ DB에서 되돌렸습니다. 열려 있는 "모듈 수정" 화면에 이전 내용이 남아 있으면 하단 "모듈 수정"을 누르지 말고 다른 설정 탭을 다녀오세요.';
         }
       }
-      this.showToast(`되돌렸습니다: ${res.label}`);
+      this.showToast(this.describeUndoResult(res));
     } catch (err) {
+      this.syncAppliedCards();
       this.showToast(`되돌리기 실패: ${err.message}`);
     }
     this.render();
@@ -11693,6 +11856,12 @@ class RisuHelperApp {
     if (preview.label) {
       bodyChildren.push(
         h(doc, 'div', { style: 'font-size:11.5px;color:var(--rh-muted);' }, `적용 대상(고정): ${preview.label}`)
+      );
+    }
+    if (item.unknownKeys?.length) {
+      bodyChildren.push(
+        h(doc, 'div', { class: 'rh-banner' },
+          `지원하지 않는 속성이 제안에 들어 있어 무시됩니다: ${item.unknownKeys.join(', ')}. 이 속성이 꼭 필요한 변경이라면 결과가 요청과 다를 수 있습니다.`)
       );
     }
 
@@ -12044,6 +12213,24 @@ class RisuHelperApp {
               await this.saveSettings();
             },
           })
+        ),
+        h(doc, 'div', { class: 'rh-field' },
+          h(doc, 'span', {}, '모델에 보내는 원문 길이 (초과분은 잘리고 전체 덮어쓰기가 막힘)'),
+          h(doc, 'select', {
+            class: 'rh-select',
+            onchange: async (e) => {
+              this.settings.maxContentChars = Number(e.target.value);
+              this.applyContentLimit();
+              await this.saveSettings();
+              await this.refreshContextSnapshot();
+              this.render();
+            },
+          },
+            ...MAX_CONTENT_CHAR_OPTIONS.map(n =>
+              h(doc, 'option', { value: String(n), selected: this.settings.maxContentChars === n },
+                `${n.toLocaleString()}자${n === DEFAULT_MAX_CONTENT_CHARS ? ' (기본)' : n === MAX_CONTENT_CHAR_OPTIONS[0] ? ' (컨텍스트가 작은 모델용)' : ''}`)
+            )
+          )
         )
       ),
       h(doc, 'div', { class: 'rh-field' },
@@ -12133,6 +12320,20 @@ class RisuHelperApp {
           h(doc, 'label', {},
             h(doc, 'input', {
               type: 'checkbox',
+              checked: this.settings.showDetectDiagnostics,
+              onchange: async (e) => {
+                this.settings.showDetectDiagnostics = Boolean(e.target.checked);
+                this.tracker.diagnostics = this.settings.showDetectDiagnostics;
+                await this.saveSettings();
+                if (this.tracker.enabled) await this.tracker.scanNow({ allowScreenFallback: true });
+                this.render();
+              },
+            }),
+            '감지 근거 표시 (대상이 잘못 잡힐 때 원인 확인용)'
+          ),
+          h(doc, 'label', {},
+            h(doc, 'input', {
+              type: 'checkbox',
               checked: this.settings.autoFillModuleEditor,
               onchange: async (e) => {
                 this.settings.autoFillModuleEditor = Boolean(e.target.checked);
@@ -12176,6 +12377,7 @@ class RisuHelperApp {
 
   render() {
     const doc = this.doc;
+    this._streamingBody = null;
     const prevInput = doc.querySelector('.rh-composer-input')?.value ?? '';
     const prevPresetScroll = doc.querySelector('.rh-preset-body')?.scrollTop ?? null;
     const prevChatScroll = doc.querySelector('.rh-chat')?.scrollTop ?? null;
@@ -12254,18 +12456,22 @@ class RisuHelperApp {
             this.render();
           },
         }, this.settings.wideMode ? '좁게' : '넓게'),
-        this.adapter.undoStack.length > 0 && h(doc, 'button', {
+        this.adapter.undoUnitCount() > 0 && h(doc, 'button', {
           class: 'rh-btn',
+          title: `다음에 되돌릴 변경: ${this.adapter.peekUndoLabel()}`,
           onclick: async () => {
             try {
               const res = await this.adapter.undo();
+              this.syncAppliedCards();
               await this.refreshContextSnapshot();
-              this.showToast(`되돌림: ${res.label}`);
+              this.showToast(this.describeUndoResult(res));
             } catch (err) {
+              this.syncAppliedCards();
               this.showToast(err.message);
             }
+            this.render();
           },
-        }, `되돌리기 (${this.adapter.undoStack.length})`)
+        }, `되돌리기 (${this.adapter.undoUnitCount()})`)
       )
     );
 
@@ -12362,6 +12568,24 @@ class RisuHelperApp {
       }
     }
 
+    if (this.settings.showDetectDiagnostics && ctx.diagnostics) {
+      const sig = ctx.diagnostics.signals || {};
+      const lines = [
+        `판정: ${ctx.targetKind}${ctx.fieldKey ? ` / ${ctx.fieldKey}` : ''} (화면: ${ctx.screen})`,
+        `옆 라벨: "${sig.nearbyLabel || ''}"  placeholder: "${sig.placeholder || ''}"  태그: ${sig.tag || ''}${sig.inputType ? `[${sig.inputType}]` : ''}`,
+        `제목: ${(sig.headings || []).join(' | ') || '(없음)'}`,
+        `활성 탭: ${(sig.activeTabs || []).join(' | ') || '(없음)'}  로어북 탭: "${sig.loreTabLabel || ''}"`,
+        `항목 번호: ${sig.loreIdx ?? '(없음)'}  설정 ID: ${sig.settingId || '(없음)'}`,
+        ...(ctx.diagnostics.errors || []).map(e => `무시된 오류: ${e.message}${e.at ? ` (${e.at})` : ''}`),
+      ];
+      contextBarChildren.push(
+        h(doc, 'details', { class: 'rh-preview-details' },
+          h(doc, 'summary', {}, `🔎 감지 근거 보기${ctx.diagnostics.errors?.length ? ` · 무시된 오류 ${ctx.diagnostics.errors.length}건` : ''}`),
+          h(doc, 'pre', { class: 'rh-preview-pre' }, lines.join('\n'))
+        )
+      );
+    }
+
     if (this.activeSnapshot?.ok && this.activeSnapshot.moduleUncertain) {
       contextBarChildren.push(h(doc, 'div', { class: 'rh-banner error' },
         '열려 있는 모듈을 자동으로 확정하지 못했습니다. 아래 모듈 선택기에서 편집할 모듈을 직접 선택해 주세요. 선택 전에는 모듈 편집 제안을 적용할 수 없습니다.'));
@@ -12395,6 +12619,15 @@ class RisuHelperApp {
             }, `🛟 숨겨진 로어북 ${orphanCount}개 최상위로 복구`)
           )
         )
+      );
+    }
+
+    const originalLength = this.activeSnapshot?.ok ? String(this.activeSnapshot.content || '').length : 0;
+    if (originalLength > this.settings.maxContentChars) {
+      contextBarChildren.push(
+        h(doc, 'div', { class: 'rh-banner' },
+          `✂️ 원문 ${originalLength.toLocaleString()}자 중 앞 ${this.settings.maxContentChars.toLocaleString()}자만 모델에 전달됩니다. ` +
+          '뒷부분 유실을 막기 위해 전체 덮어쓰기는 차단되고 부분 편집만 적용할 수 있습니다. 설정 › "모델에 보내는 원문 길이"에서 늘릴 수 있습니다.')
       );
     }
 
@@ -12480,6 +12713,7 @@ class RisuHelperApp {
           bubble.appendChild(h(doc, 'div', { class: 'rh-msg-bar' }, barLeft, barActions));
 
           const body = h(doc, 'div', { class: 'rh-msg-body' });
+          if (msg.streaming) this._streamingBody = { msg, el: body };
           if (msg.error) {
             body.appendChild(h(doc, 'div', { class: 'rh-banner error' }, `오류: ${msg.error}`));
           } else if (msg.rawView) {
@@ -12494,6 +12728,22 @@ class RisuHelperApp {
 
           for (const err of msg.parseErrors || []) {
             msgWrap.appendChild(h(doc, 'div', { class: 'rh-banner error' }, `제안 블록 파싱 실패: ${err.error}`));
+          }
+          const applicable = this.applicableProposals(msg);
+          if (applicable.length >= 2 || msg.groupId) {
+            msgWrap.appendChild(
+              h(doc, 'div', { class: 'rh-row', style: 'gap:6px;flex-wrap:wrap;' },
+                applicable.length >= 2 && h(doc, 'button', {
+                  class: 'rh-btn primary',
+                  disabled: this.busy,
+                  onclick: () => this.applyAllProposals(msg),
+                }, `모두 적용 (${applicable.length})`),
+                msg.groupId && h(doc, 'button', {
+                  class: 'rh-btn danger',
+                  onclick: () => this.undoProposalGroup(msg),
+                }, '묶음 되돌리기')
+              )
+            );
           }
           for (const item of msg.proposals || []) {
             msgWrap.appendChild(this.renderProposalCard(item));

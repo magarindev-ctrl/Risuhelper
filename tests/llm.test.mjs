@@ -104,6 +104,7 @@ test('buildConversationMessages injects targeted knowledge, snapshot, extra cont
     context: { screen: 'scripts', targetKind: 'char_lua' },
     snapshot: { label: '긴 Lua', content: 'x'.repeat(25000), target: { targetKind: 'char_lua' } },
     userInput: '일부만 수정해 줘',
+    maxContentChars: 24000,
   });
   assert.match(longMsgs[0].content, /원문 잘림 경고/);
   assert.match(longMsgs[0].content, /replace_text 및 전체 code 덮어쓰기는 차단/);
@@ -232,3 +233,38 @@ test('validateProposal and buildConversationMessages support organize_lorebook a
   assert.match(msgs[0].content, /organize_lorebook/);
 });
 
+
+test('buildConversationMessages passes the whole original when it fits the configured limit and truncates only beyond it', () => {
+  const content = 'A'.repeat(29990) + 'TAIL-MARKER';
+  const base = { context: { screen: 'character' }, snapshot: { label: '긴 설명', content, target: { targetKind: 'char_field', fieldKey: 'desc' } }, history: [], userInput: 'q' };
+
+  const full = buildConversationMessages({ ...base, maxContentChars: 60000 });
+  assert.ok(full[0].content.includes('TAIL-MARKER'));
+  assert.ok(!full[0].content.includes('원문 잘림 경고'));
+
+  const cut = buildConversationMessages({ ...base, maxContentChars: 10000 });
+  assert.ok(!cut[0].content.includes('TAIL-MARKER'));
+  assert.ok(cut[0].content.includes('원문 잘림 경고'));
+  assert.ok(cut[0].content.includes('10,000'));
+});
+
+test('findUnknownProposalKeys lists properties outside an action schema and accepts every documented one', async () => {
+  const { findUnknownProposalKeys } = await import('../src/llm.js');
+  assert.deepEqual(
+    findUnknownProposalKeys({ action: 'create_lorebook', title: 't', scope: 'character', comment: 'c', key: 'k', content: 'b', folderColor: 'red', pinned: true }).sort(),
+    ['folderColor', 'pinned']
+  );
+  const documented = [
+    { action: 'patch_text', title: 't', edits: [{ before: 'a', after: 'b' }] },
+    { action: 'replace_text', title: 't', content: 'x' },
+    { action: 'create_lorebook', scope: 'chat', comment: 'c', key: 'k', secondkey: '', selective: false, alwaysActive: false, insertorder: 100, content: 'b', mode: 'normal', folderName: 'f' },
+    { action: 'update_lorebook', scope: 'module', moduleIndex: 0, loreIndex: 0, comment: 'c', key: 'k', edits: [], fieldKey: 'content', folderIndex: 3 },
+    { action: 'organize_lorebook', scope: 'character', folderName: 'f', createFolderIfMissing: true, loreIndices: [0], moveToRoot: false },
+    { action: 'update_lua', scope: 'character', edits: [], code: 'x' },
+    { action: 'upsert_regex', scope: 'character', regexIndex: 0, comment: 'n', in: 'a', out: 'b', type: 'editdisplay', flag: 'g', ableFlag: true },
+    { action: 'create_persona', name: 'n', note: 'm', personaPrompt: 'p', bindToCurrentChat: true },
+    { action: 'update_persona', personaIndex: 0, name: 'n', note: 'm', personaPrompt: 'p', bindToCurrentChat: false },
+    { action: 'update_config', changes: { temperature: 80 } },
+  ];
+  for (const p of documented) assert.deepEqual(findUnknownProposalKeys(p), [], p.action);
+});

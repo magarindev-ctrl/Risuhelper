@@ -1,7 +1,8 @@
-const VERSION = '0.4.2';
+const VERSION = '0.4.3';
 const PLUGIN_NAME = 'risuhelper';
 const STORAGE_KEY = 'risuhelper_state_v1';
 const PRESET_STORAGE_KEY = 'risuhelper_preset_v1';
+const UNDO_STORAGE_KEY = 'risuhelper_undo_v1';
 
 /**
  * Editable configuration keys present in RisuAI's allowedDbKeys
@@ -80,7 +81,10 @@ const CONFIG_FIELD_META = {
   guiHTML: { label: '설정 · 채팅 HTML (guiHTML)' },
 };
 
-const MAX_LLM_CONTENT_CHARS = 24000;
+// How many characters of the target's original text are sent to the model. Longer originals are
+// truncated (and full overwrites of them blocked), so this is user-configurable in settings.
+const DEFAULT_MAX_CONTENT_CHARS = 60000;
+const MAX_CONTENT_CHAR_OPTIONS = [24000, 60000, 120000, 300000];
 const ALLOWED_CHAR_FIELDS = Object.keys(CHAR_FIELD_META);
 const ALLOWED_MODULE_FIELDS = Object.keys(MODULE_FIELD_META);
 const ALLOWED_LORE_TEXT_FIELDS = ['comment', 'key', 'secondkey', 'content', 'insertorder'];
@@ -102,7 +106,9 @@ export {
   PLUGIN_NAME,
   STORAGE_KEY,
   PRESET_STORAGE_KEY,
-  MAX_LLM_CONTENT_CHARS,
+  UNDO_STORAGE_KEY,
+  DEFAULT_MAX_CONTENT_CHARS,
+  MAX_CONTENT_CHAR_OPTIONS,
   ALLOWED_CONFIG_KEYS,
   CONFIG_KEY_TYPES,
   CHAR_FIELD_META,

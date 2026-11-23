@@ -1,6 +1,6 @@
 # RisuHelper 아키텍처 및 RisuAI 포크 호환성 분석
 
-> 버전: `0.4.0` · 라이선스: `GPL-3.0-only` · 외부 런타임 의존성: 0개
+> 버전: `0.4.3` · 라이선스: `GPL-3.0-only` · 외부 런타임 의존성: 0개
 
 ---
 
@@ -79,6 +79,10 @@ User Input + Detected/Manual Target
   - 캐릭터(`ALLOWED_CHAR_FIELDS`), 로어북(`ALLOWED_LORE_TEXT_FIELDS`), 페르소나(`ALLOWED_PERSONA_TEXT_FIELDS`), 설정(`ALLOWED_CONFIG_KEYS`) 필드 화이트리스트를 강제하며, `patch_text`/`replace_text`에서 `proposal.target`으로 대상을 탈취하는 시도를 차단합니다.
   - 모델 입력 상한(`24,000자`)을 초과해 잘린 원문에는 전체 덮어쓰기(`replace_text` / Lua 전체 `code` 교체)를 차단하고 부분 편집(`patch_text` / `edits`)만 허용합니다.
   - 기존 V1/V2 트리거가 있는 상태에서 Lua로 전환할 때는 삭제·대체 경고와 명시적 확인 체크박스를 요구합니다.
+- **되돌리기 기록(Undo Journal)**: 모든 쓰기는 `_commitCharacter` / `_commitChat` / `_commitDb`를 거치며, 이전 상태를 쓴 상태로 바꾸는 연산 목록(`src/undo-journal.js`의 `diffValues`)을 기록합니다. 기록은 순수 JSON이라 `pluginStorage`에 저장되어 새로고침 뒤에도 복원됩니다. 복원(`revertOps`)은 호스트가 아직 RisuHelper가 쓴 값을 갖고 있는 연산만 되돌리고, 이후 사용자가 고친 값은 충돌로 보고합니다. 목록 항목은 `id`/`chatId`가 있으면 그것으로, 없으면 인덱스와 식별 속성(`comment`, `key`, `name`)으로 다시 찾으므로 순서가 바뀌어도 동작합니다. 여러 제안은 `runGroup`으로 한 단위가 됩니다.
+- **범위 공통 쓰기 경로**: 캐릭터·채팅·모듈 세 범위는 `_openScope`가 복제본(`root`)과 `commit(label)`을 돌려주는 하나의 경로를 씁니다. 로어북 생성·수정·폴더 정리·복구, Lua, 정규식, 단일 텍스트 필드 쓰기가 범위별 분기 없이 구현됩니다.
+- **참조 검증(`_findReferenceError`)**: 제안이 이름으로 지정한 인덱스·ID는 미리보기와 적용 양쪽에서 같은 함수로 검사합니다. 존재하지 않으면 다른 항목으로 넘기거나 그대로 저장하지 않고 오류로 끝냅니다. 스키마에 없는 속성은 `findUnknownProposalKeys`로 찾아 카드에 표시합니다.
+- **감지 진단**: 감지기는 호스트마다 지원이 다른 `SafeElement` 호출의 오류를 의도적으로 삼키지만, 진단을 켜면 삼킨 오류와 최종 신호를 `ctx.diagnostics`에 남겨 패널에서 볼 수 있습니다.
 - **추측하지 않는 대상 판정**:
   - 필드 라벨·placeholder는 전체 일치(`labelIs`)로만 매칭합니다. 부분 일치는 `캐릭터 설명 Prefix`(전역 설정)나 `Additional Description`을 캐릭터 설명으로 오인해 엉뚱한 데이터를 덮어쓰게 만듭니다.
   - 알 수 없는 라벨, 목록 검색창, 매핑이 없는 PocketRisu `data-setting-id` 항목은 편집 가능한 대상이 아닌 `general` / `config(fieldKey 없음)`으로 분류합니다.

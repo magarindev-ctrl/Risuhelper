@@ -1,7 +1,7 @@
 import { buildKnowledgeForContext } from './knowledge.js';
 import {
   ALLOWED_CONFIG_KEYS,
-  MAX_LLM_CONTENT_CHARS,
+  DEFAULT_MAX_CONTENT_CHARS,
   ALLOWED_CHAR_FIELDS,
   ALLOWED_LORE_TEXT_FIELDS,
   ALLOWED_PERSONA_TEXT_FIELDS,
@@ -324,6 +324,34 @@ function parseAssistantReply(rawText) {
   return { prose, proposals, errors, rawText: text };
 }
 
+// Properties each action understands. Anything else in a proposal is ignored by the host adapter;
+// the UI shows it on the card so an improvised property is never dropped (or stored) silently.
+const COMMON_PROPOSAL_KEYS = ['action', 'title', 'scope', 'target', 'moduleIndex'];
+const LORE_ENTRY_KEYS = [
+  'comment', 'key', 'secondkey', 'content', 'insertorder', 'alwaysActive', 'selective', 'useRegex',
+  'activationPercent', 'mode', 'folder', 'folderName', 'folderIndex',
+];
+const PROPOSAL_KEYS_BY_ACTION = {
+  patch_text: ['edits'],
+  replace_text: ['content'],
+  create_lorebook: LORE_ENTRY_KEYS,
+  update_lorebook: [...LORE_ENTRY_KEYS, 'loreIndex', 'fieldKey', 'edits'],
+  organize_lorebook: ['folder', 'folderName', 'folderIndex', 'createFolderIfMissing', 'loreIndices', 'moveToRoot'],
+  update_lua: ['edits', 'code', 'content'],
+  upsert_regex: ['regexIndex', 'comment', 'in', 'out', 'type', 'flag', 'ableFlag'],
+  create_persona: ['name', 'note', 'personaPrompt', 'content', 'icon', 'largePortrait', 'bindToCurrentChat'],
+  update_persona: ['personaIndex', 'name', 'note', 'personaPrompt', 'largePortrait', 'edits', 'fieldKey', 'fieldEdits', 'bindToCurrentChat'],
+  update_config: ['changes'],
+};
+
+function findUnknownProposalKeys(item) {
+  if (!item || typeof item !== 'object' || Array.isArray(item)) return [];
+  const known = PROPOSAL_KEYS_BY_ACTION[item.action];
+  if (!known) return [];
+  const allowed = new Set([...COMMON_PROPOSAL_KEYS, ...known]);
+  return Object.keys(item).filter(k => !allowed.has(k));
+}
+
 function validateFieldKeyForKind(kind, fieldKey) {
   if (fieldKey === undefined || fieldKey === null || fieldKey === '') return null;
   if (typeof fieldKey !== 'string' || BAD_KEYS.has(fieldKey)) {
@@ -444,13 +472,14 @@ function validateProposal(item) {
 /**
  * Builds the system prompt + message list sent to Risuai.runLLMModel().
  */
-function buildConversationMessages({ context, snapshot, extraContext, history, userInput, maxHistoryTurns = 12 }) {
+function buildConversationMessages({ context, snapshot, extraContext, history, userInput, maxHistoryTurns = 12, maxContentChars = DEFAULT_MAX_CONTENT_CHARS }) {
+  const contentLimit = Number.isFinite(Number(maxContentChars)) && Number(maxContentChars) > 0 ? Number(maxContentChars) : DEFAULT_MAX_CONTENT_CHARS;
   const knowledge = buildKnowledgeForContext(context);
   const targetLabel = snapshot?.label || context?.labelText || '일반 화면';
   const currentText = snapshot?.content ?? '';
-  const isTruncated = currentText.length > MAX_LLM_CONTENT_CHARS;
+  const isTruncated = currentText.length > contentLimit;
   const clippedContent = isTruncated
-    ? currentText.slice(0, MAX_LLM_CONTENT_CHARS) + `\n... (총 ${currentText.length}자 중 앞 ${MAX_LLM_CONTENT_CHARS.toLocaleString()}자만 표시)`
+    ? currentText.slice(0, contentLimit) + `\n... (총 ${currentText.length}자 중 앞 ${contentLimit.toLocaleString()}자만 표시)`
     : currentText;
 
   const extraBlocks = [];
@@ -483,7 +512,7 @@ function buildConversationMessages({ context, snapshot, extraContext, history, u
   }
 
   const truncationRule = isTruncated
-    ? `\n⚠️ [원문 잘림 경고] 현재 원문(${currentText.length.toLocaleString()}자)은 앞 ${MAX_LLM_CONTENT_CHARS.toLocaleString()}자만 제공되었습니다. 뒷부분 유실을 막기 위해 replace_text 및 전체 code 덮어쓰기는 차단됩니다. 반드시 patch_text 또는 edits로 보이는 구간만 부분 편집하세요.`
+    ? `\n⚠️ [원문 잘림 경고] 현재 원문(${currentText.length.toLocaleString()}자)은 앞 ${contentLimit.toLocaleString()}자만 제공되었습니다. 뒷부분 유실을 막기 위해 replace_text 및 전체 code 덮어쓰기는 차단됩니다. 반드시 patch_text 또는 edits로 보이는 구간만 부분 편집하세요.`
     : '';
 
   const screenNote = context?.screen === 'chat'
@@ -553,6 +582,7 @@ JSON 헤더 안에는 주석이나 trailing comma를 넣지 말고 유효한 JSO
 }
 
 export {
+  findUnknownProposalKeys,
   readModelResponse,
   callRisuModel,
   extractProposalBlocks,

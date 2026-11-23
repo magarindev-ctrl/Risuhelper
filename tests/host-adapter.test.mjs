@@ -362,6 +362,7 @@ test('HostAdapter exposes all metadata changes in previewProposal for lorebook, 
 test('HostAdapter blocks full overwrite on >24,000-char truncated targets while allowing patch_text', async () => {
   const { state, adapter } = createMockHost();
   const tailMarker = 'TAIL_MUST_SURVIVE';
+  adapter.maxContentChars = 24000;
   state.character.desc = 'A'.repeat(24500) + '\n' + tailMarker;
   const target = { targetKind: 'char_field', fieldKey: 'desc' };
 
@@ -1114,4 +1115,178 @@ test('findOrphanedLorebooks and recoverOrphanedLorebooks detect and rescue trapp
   await adapter.undo(rescued.undoId);
   assert.equal(state.character.globalLore[3].folder, '세계관');
   assert.equal(state.character.globalLore[4].folder, '\\uf000folder:valid-1');
+});
+
+// --- Undo journal: persistence, grouping, eviction notice, conflict protection ---
+
+test('undo history survives a reload: a fresh adapter restores a change from the exported journal', async () => {
+  const { api, state, adapter } = createMockHost();
+  const target = { targetKind: 'char_field', fieldKey: 'desc' };
+  const preview = await adapter.previewProposal({ action: 'replace_text', content: 'CHANGED' }, target);
+  await adapter.applyProposal({ action: 'replace_text', content: 'CHANGED' }, preview.target, { hostBinding: preview.hostBinding });
+  assert.equal(state.character.desc, 'CHANGED');
+
+  const stored = JSON.parse(JSON.stringify(adapter.exportUndoState()));
+  const reloaded = new HostAdapter(api);
+  assert.equal(reloaded.undoUnitCount(), 0);
+  reloaded.importUndoState(stored);
+  assert.equal(reloaded.undoUnitCount(), 1);
+
+  await reloaded.undo();
+  assert.equal(state.character.desc, '차분한 마도사.\n별을 연구한다.');
+  assert.equal(reloaded.undoUnitCount(), 0);
+});
+
+test('changes applied as one group are undone together with a single undo', async () => {
+  const { state, adapter } = createMockHost();
+  const apply = async (target, proposal) => {
+    const pv = await adapter.previewProposal(proposal, target);
+    assert.equal(pv.ok, true, pv.error);
+    return adapter.applyProposal(proposal, pv.target, { hostBinding: pv.hostBinding });
+  };
+  await adapter.runGroup('한 번에 적용', async () => {
+    await apply({ targetKind: 'char_field', fieldKey: 'desc' }, { action: 'replace_text', content: 'D2' });
+    await apply({ targetKind: 'char_field', fieldKey: 'firstMessage' }, { action: 'replace_text', content: 'F2' });
+    await apply({ targetKind: 'char_lorebook', loreIndex: 0, fieldKey: 'content' }, { action: 'replace_text', content: 'L2' });
+  });
+  assert.deepEqual([state.character.desc, state.character.firstMessage, state.character.globalLore[0].content], ['D2', 'F2', 'L2']);
+  assert.equal(adapter.undoUnitCount(), 1);
+
+  const res = await adapter.undo();
+  assert.equal(res.undone, 3);
+  assert.deepEqual(
+    [state.character.desc, state.character.firstMessage, state.character.globalLore[0].content],
+    ['차분한 마도사.\n별을 연구한다.', '안녕, 여행자.', '북쪽의 오래된 왕국이다.']
+  );
+  assert.equal(adapter.undoUnitCount(), 0);
+});
+
+test('dropping old undo history is reported instead of happening silently', async () => {
+  const { adapter } = createMockHost();
+  adapter.maxUndoUnits = 3;
+  const evicted = [];
+  adapter.onUndoChange = (info) => { if (info.evicted?.length) evicted.push(...info.evicted); };
+  for (let i = 0; i < 5; i++) {
+    const p = { action: 'replace_text', content: `v${i}` };
+    const pv = await adapter.previewProposal(p, { targetKind: 'char_field', fieldKey: 'desc' });
+    await adapter.applyProposal(p, pv.target, { hostBinding: pv.hostBinding });
+  }
+  assert.equal(adapter.undoUnitCount(), 3);
+  assert.equal(evicted.length, 2);
+});
+
+test('undo does not overwrite a field the user edited after the change was applied', async () => {
+  const { state, adapter } = createMockHost();
+  const p = { action: 'replace_text', content: 'WRITTEN BY PLUGIN' };
+  const pv = await adapter.previewProposal(p, { targetKind: 'char_field', fieldKey: 'desc' });
+  await adapter.applyProposal(p, pv.target, { hostBinding: pv.hostBinding });
+  state.character.desc = 'EDITED BY THE USER AFTERWARDS';
+
+  await assert.rejects(() => adapter.undo(), /이후|변경/);
+  assert.equal(state.character.desc, 'EDITED BY THE USER AFTERWARDS');
+});
+
+// --- Configurable model input limit ---
+
+test('the model input limit is configurable: a longer original is fully editable once the limit covers it', async () => {
+  const { state, adapter } = createMockHost();
+  state.character.desc = 'x'.repeat(30000);
+  const target = { targetKind: 'char_field', fieldKey: 'desc' };
+  const proposal = { action: 'replace_text', content: 'short' };
+
+  adapter.maxContentChars = 24000;
+  const blocked = await adapter.previewProposal(proposal, target);
+  assert.equal(blocked.ok, false);
+  assert.match(blocked.error, /24,000자/);
+
+  adapter.maxContentChars = 60000;
+  const allowed = await adapter.previewProposal(proposal, target);
+  assert.equal(allowed.ok, true, allowed.error);
+  await adapter.applyProposal(proposal, allowed.target, { hostBinding: allowed.hostBinding });
+  assert.equal(state.character.desc, 'short');
+});
+
+test('the default model input limit is above the old fixed 24,000 characters', async () => {
+  const { adapter } = createMockHost();
+  assert.ok(adapter.maxContentChars >= 60000);
+});
+
+// --- References named by a proposal must exist before anything is written ---
+
+test('a config change that points at a persona or module that does not exist is rejected', async () => {
+  const { state, adapter } = createMockHost();
+  const cfgTarget = { targetKind: 'config' };
+
+  const badPersona = await adapter.previewProposal({ action: 'update_config', changes: { selectedPersona: 99 } }, cfgTarget);
+  assert.equal(badPersona.ok, false);
+  assert.match(badPersona.error, /페르소나/);
+  await assert.rejects(() => adapter.applyProposal({ action: 'update_config', changes: { selectedPersona: 99 } }, cfgTarget, {}), /페르소나/);
+  assert.equal(state.db.selectedPersona, 0);
+
+  const badModule = await adapter.previewProposal({ action: 'update_config', changes: { enabledModules: ['mod-1', 'no-such-module'] } }, cfgTarget);
+  assert.equal(badModule.ok, false);
+  assert.match(badModule.error, /no-such-module/);
+  await assert.rejects(() => adapter.applyProposal({ action: 'update_config', changes: { enabledModules: ['no-such-module'] } }, cfgTarget, {}), /no-such-module/);
+  assert.deepEqual(state.db.enabledModules, ['mod-1']);
+
+  const good = await adapter.previewProposal({ action: 'update_config', changes: { enabledModules: [] } }, cfgTarget);
+  assert.equal(good.ok, true, good.error);
+});
+
+test('updating a regex script by an index that does not exist is rejected instead of silently creating a new script', async () => {
+  const { state, adapter } = createMockHost();
+  state.character.customscript = [{ comment: 'Only', in: 'a', out: 'b', type: 'editdisplay', flag: 'g', ableFlag: false }];
+  const proposal = { action: 'upsert_regex', scope: 'character', regexIndex: 7, comment: 'Ghost', in: 'x', out: 'y' };
+  const target = { targetKind: 'char_regex' };
+
+  const preview = await adapter.previewProposal(proposal, target);
+  assert.equal(preview.ok, false);
+  assert.match(preview.error, /#8/);
+  await assert.rejects(() => adapter.applyProposal(proposal, target, {}), /#8/);
+  assert.equal(state.character.customscript.length, 1);
+
+  const create = { action: 'upsert_regex', scope: 'character', comment: 'New', in: 'x', out: 'y' };
+  const okPreview = await adapter.previewProposal(create, target);
+  assert.equal(okPreview.ok, true, okPreview.error);
+});
+
+test('a proposal naming a module index that does not exist is rejected instead of being redirected to another module', async () => {
+  const { state, adapter } = createMockHost();
+  const proposal = { action: 'create_lorebook', scope: 'module', moduleIndex: 5, comment: 'X', key: 'x', content: 'body' };
+  const target = { targetKind: 'module_lorebook' };
+
+  const preview = await adapter.previewProposal(proposal, target);
+  assert.equal(preview.ok, false);
+  assert.match(preview.error, /모듈/);
+  await assert.rejects(() => adapter.applyProposal(proposal, target, {}), /모듈/);
+  assert.equal(state.db.modules[0].lorebook.length, 1);
+});
+
+// --- A proposal for a different kind of item than the one under the cursor ---
+
+test('proposals for another kind of item apply cleanly when the cursor is in a character field', async () => {
+  const cases = [
+    ['create_lorebook', { action: 'create_lorebook', scope: 'character', comment: '새 항목', key: 'k2', content: '본문' },
+      s => s.character.globalLore.some(e => e.comment === '새 항목')],
+    ['organize_lorebook', { action: 'organize_lorebook', scope: 'character', folderName: '폴더', createFolderIfMissing: true, loreIndices: [0] },
+      s => s.character.globalLore.some(e => e.mode === 'folder' && e.comment === '폴더')],
+    ['update_lorebook', { action: 'update_lorebook', scope: 'character', loreIndex: 0, content: '바뀐 본문' },
+      s => s.character.globalLore[0].content === '바뀐 본문'],
+    ['create_lorebook (chat)', { action: 'create_lorebook', scope: 'chat', comment: '채팅 항목', key: 'k3', content: '본문' },
+      s => s.character.chats[0].localLore.some(e => e.comment === '채팅 항목')],
+    ['upsert_regex', { action: 'upsert_regex', scope: 'character', comment: '정규식', in: 'a', out: 'b' },
+      s => s.character.customscript.some(e => e.comment === '정규식')],
+    ['create_persona', { action: 'create_persona', name: '새 페르소나', personaPrompt: '설명' },
+      s => s.db.personas.some(p => p.name === '새 페르소나')],
+    ['update_config', { action: 'update_config', changes: { temperature: 55 } },
+      s => s.db.temperature === 55],
+  ];
+  for (const [name, proposal, applied] of cases) {
+    const { state, adapter } = createMockHost();
+    const cursor = { targetKind: 'char_field', fieldKey: 'desc' };
+    const preview = await adapter.previewProposal(proposal, cursor);
+    assert.equal(preview.ok, true, `${name}: preview failed: ${preview.error}`);
+    await adapter.applyProposal(proposal, preview.target || cursor, { hostBinding: preview.hostBinding });
+    assert.ok(applied(state), `${name}: change was not applied`);
+  }
 });

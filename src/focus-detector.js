@@ -5,6 +5,34 @@ const CHAT_INPUT_SELECTOR = 'textarea.text-input-area, textarea#messageInputTran
 const CHIP_ATTR = 'x-risuhelper-chip';
 const DRAG_THRESHOLD_PX = 6;
 
+// Detection diagnostics (opt-in). The detector swallows SafeElement errors on purpose — hosts
+// differ in which calls they support — but a wrong detection must be explainable. While a
+// diagnostic run is active, every swallowed error and the final signals are recorded.
+let activeDiagnostics = null;
+
+function noteDetectError(err) {
+  if (!activeDiagnostics || activeDiagnostics.errors.length >= 30) return;
+  const stackLine = String(err?.stack || '').split('\n')[1] || '';
+  activeDiagnostics.errors.push({
+    message: String(err?.message || err),
+    at: stackLine.trim().replace(/^at\s+/, '').split(' ')[0] || '',
+  });
+}
+
+function summarizeSignals(signals) {
+  const out = {};
+  for (const [key, value] of Object.entries(signals || {})) {
+    if (key === 'moduleDomHints') {
+      out.moduleDomHints = value ? { tab: value.tab ?? null, openIdx: value.openIdx ?? null, items: value.items?.length ?? 0 } : null;
+    } else if (typeof value === 'string') {
+      out[key] = value.slice(0, 120);
+    } else {
+      out[key] = value;
+    }
+  }
+  return out;
+}
+
 /**
  * Safely parses attributes from the opening HTML tag string returned by SafeElement.getOuterHTML().
  * (Plugin v3 SafeElement.getAttribute() only allows 'x-*' attributes.)
@@ -136,7 +164,7 @@ async function isLuaModeBar(el, className) {
         return true;
       }
     }
-  } catch {}
+  } catch (err) { noteDetectError(err); }
   return false;
 }
 
@@ -166,7 +194,7 @@ async function extractLabelFromColWrapper(el, className) {
         }
       }
     }
-  } catch {}
+  } catch (err) { noteDetectError(err); }
   return '';
 }
 
@@ -182,14 +210,14 @@ async function findNearestActiveTabLabel(startNode, maxHops = 6) {
     let parent = null;
     try {
       parent = await cur.getParent();
-    } catch {}
+    } catch (err) { noteDetectError(err); }
     if (!parent || typeof parent.querySelector !== 'function') return '';
     try {
       const tab = await parent.querySelector('button.bg-selected, [role="tab"][aria-selected="true"]');
       if (tab) {
         return String((await tab.textContent()) || '').replace(/\s+/g, ' ').trim().slice(0, 36);
       }
-    } catch {}
+    } catch (err) { noteDetectError(err); }
     cur = parent;
   }
   return '';
@@ -226,7 +254,7 @@ async function collectActiveTabs(scopeRoot) {
       const node = await ariaTabs.at(i);
       if (node) pushUnique(await node.textContent());
     }
-  } catch {}
+  } catch (err) { noteDetectError(err); }
   if (found.length === 0) {
     try {
       const clsTabs = await scopeRoot.querySelectorAll('button.bg-darkbutton, button.bg-selected');
@@ -235,7 +263,7 @@ async function collectActiveTabs(scopeRoot) {
         const node = await clsTabs.at(i);
         if (node) pushUnique(await node.textContent());
       }
-    } catch {}
+    } catch (err) { noteDetectError(err); }
   }
   return found;
 }
@@ -248,13 +276,13 @@ async function resolveModuleScopeRoot(h2Node, rootDoc) {
   let cur = h2Node;
   for (let hop = 0; hop < 3 && cur; hop++) {
     let parent = null;
-    try { parent = await cur.getParent(); } catch {}
+    try { parent = await cur.getParent(); } catch (err) { noteDetectError(err); }
     if (!parent) break;
     if (typeof parent.querySelector === 'function') {
       try {
         const marker = await parent.querySelector('[role="tab"], button.bg-darkbutton, button.bg-selected, [data-risu-idx]');
         if (marker) return parent;
-      } catch {}
+      } catch (err) { noteDetectError(err); }
     }
     cur = parent;
   }
@@ -290,7 +318,7 @@ async function collectModuleDomHints(scopeRoot, { activeTabs = [], focusedLoreId
         // Hidden items inside closed folders render empty placeholder divs without `button.valuer`
         let titleBtn = null;
         if (typeof node.querySelector === 'function') {
-          try { titleBtn = await node.querySelector('button.valuer'); } catch {}
+          try { titleBtn = await node.querySelector('button.valuer'); } catch (err) { noteDetectError(err); }
         }
         if (!titleBtn) continue;
 
@@ -300,13 +328,13 @@ async function collectModuleDomHints(scopeRoot, { activeTabs = [], focusedLoreId
           const nodeAttrs = parseOpeningTagAttrs(nodeOuter);
           const parsed = parseInt(nodeAttrs['data-risu-idx'], 10);
           if (!Number.isNaN(parsed) && parsed >= 0) idx = parsed;
-        } catch {}
+        } catch (err) { noteDetectError(err); }
         if (idx === null) continue;
 
         let title = '';
         try {
           title = String((await titleBtn.textContent()) || '').replace(/\s+/g, ' ').trim().slice(0, 120);
-        } catch {}
+        } catch (err) { noteDetectError(err); }
         items.push({ idx, title });
 
         // Detect expanded accordion entry; iterating in DOM order picks the innermost entry over outer folders
@@ -318,15 +346,15 @@ async function collectModuleDomHints(scopeRoot, { activeTabs = [], focusedLoreId
               try {
                 const txt = String((await ce.innerText()) || '').slice(0, 600);
                 if (txt.trim()) openTextPreview = txt;
-              } catch {}
+              } catch (err) { noteDetectError(err); }
             } else if (openEditableIdx === null) {
               const inp = await node.querySelector('textarea, input');
               if (inp) openInputIdx = idx;
             }
-          } catch {}
+          } catch (err) { noteDetectError(err); }
         }
       }
-    } catch {}
+    } catch (err) { noteDetectError(err); }
   }
 
   // On Trigger tab (or fallback with no [data-risu-idx]), read visible Lua [contenteditable="true"]
@@ -337,7 +365,7 @@ async function collectModuleDomHints(scopeRoot, { activeTabs = [], focusedLoreId
         const txt = String((await ce.innerText()) || '').slice(0, 600);
         if (txt.trim()) luaTextPreview = txt;
       }
-    } catch {}
+    } catch (err) { noteDetectError(err); }
   }
 
   // On Additional Assets tab, read visible asset names from table cells
@@ -353,7 +381,7 @@ async function collectModuleDomHints(scopeRoot, { activeTabs = [], focusedLoreId
           assetNames.push(txt);
         }
       }
-    } catch {}
+    } catch (err) { noteDetectError(err); }
   }
 
   const openIdx = Number.isInteger(focusedLoreIdx)
@@ -953,8 +981,10 @@ function classifyDomSignals(signals) {
  * Inspects the currently focused element in RisuAI's SafeDocument (`rootDoc`).
  * Returns null if nothing editable is focused (or if mainDom is unavailable).
  */
-async function inspectFocusedElement(rootDoc) {
+async function inspectFocusedElement(rootDoc, options = {}) {
   if (!rootDoc) return null;
+  const diag = options.diagnostics ? { errors: [] } : null;
+  if (diag) activeDiagnostics = diag;
   let el;
   try {
     el = await rootDoc.querySelector(FOCUS_SELECTOR);
@@ -976,7 +1006,7 @@ async function inspectFocusedElement(rootDoc) {
     if (isContentEditable) {
       try {
         liveTextPreview = String((await el.innerText()) || '').slice(0, 600);
-      } catch {}
+      } catch (err) { noteDetectError(err); }
     }
 
     let elRect = null;
@@ -985,7 +1015,7 @@ async function inspectFocusedElement(rootDoc) {
         const rect = await el.getBoundingClientRect();
         if (hasUsableRect(rect)) elRect = rect;
       }
-    } catch {}
+    } catch (err) { noteDetectError(err); }
 
     const headings = [];
     const activeTabs = [];
@@ -1057,7 +1087,7 @@ async function inspectFocusedElement(rootDoc) {
         if ((checkLocalContext || trackTableRow) && depth > 0 && typeof parent.querySelector === 'function') {
           try {
             focusQueryWorks = Boolean(await parent.querySelector(FOCUS_SELECTOR));
-          } catch {}
+          } catch (err) { noteDetectError(err); }
         }
 
         let prevPrimarySpan = '';
@@ -1078,18 +1108,18 @@ async function inspectFocusedElement(rootDoc) {
             if (depth > 0 && focusQueryWorks) {
               try {
                 isCur = Boolean(await child.querySelector(FOCUS_SELECTOR));
-              } catch {}
+              } catch (err) { noteDetectError(err); }
             } else if (depth === 0 && elRect && typeof child.getBoundingClientRect === 'function') {
               try {
                 const cRect = await child.getBoundingClientRect();
                 isCur = rectsMatch(elRect, cRect);
-              } catch {}
+              } catch (err) { noteDetectError(err); }
             }
             if (!isCur && !focusQueryWorks && !(depth === 0 && elRect)) {
               try {
                 const cOuter = await child.getOuterHTML();
                 isCur = cOuter === outerHtml || (depth > 0 && cOuter === curOuter);
-              } catch {}
+              } catch (err) { noteDetectError(err); }
             }
           }
 
@@ -1208,7 +1238,7 @@ async function inspectFocusedElement(rootDoc) {
               moduleH2Node = h2;
             }
           }
-        } catch {}
+        } catch (err) { noteDetectError(err); }
       }
 
       if (!isChatInput && isChatElementAttrs(pAttrs)) {
@@ -1233,7 +1263,7 @@ async function inspectFocusedElement(rootDoc) {
             moduleH2Node = node;
           }
         }
-      } catch {}
+      } catch (err) { noteDetectError(err); }
     }
 
     const loreTabLabel = loreItemNode ? await findNearestActiveTabLabel(loreItemNode) : '';
@@ -1257,7 +1287,7 @@ async function inspectFocusedElement(rootDoc) {
       });
     }
 
-    return classifyDomSignals({
+    const signals = {
       tag,
       placeholder: attrs.placeholder || '',
       inputType: attrs.type || '',
@@ -1277,9 +1307,17 @@ async function inspectFocusedElement(rootDoc) {
       tableRowIndex,
       moduleDomHints,
       loreTabLabel,
-    });
-  } catch {
+    };
+    const classified = classifyDomSignals(signals);
+    if (diag && classified) {
+      classified.diagnostics = { signals: summarizeSignals(signals), errors: diag.errors };
+    }
+    return classified;
+  } catch (err) {
+    noteDetectError(err);
     return null;
+  } finally {
+    if (diag) activeDiagnostics = null;
   }
 }
 
@@ -1303,13 +1341,13 @@ async function inspectVisibleScreen(rootDoc) {
           moduleH2Node = node;
         }
       }
-    } catch {}
+    } catch (err) { noteDetectError(err); }
 
     // Check explicit chat input presence first; if present and no settings/persona/module modal heading is active, it's the chat screen.
     let chatInputEl = null;
     try {
       chatInputEl = await rootDoc.querySelector(CHAT_INPUT_SELECTOR);
-    } catch {}
+    } catch (err) { noteDetectError(err); }
 
     const headingText = headings.join(' | ');
     const modalHeadings = [
@@ -1493,7 +1531,7 @@ class FocusTracker {
           return this._cachedViewport;
         }
       }
-    } catch {}
+    } catch (err) { noteDetectError(err); }
     // 2. Fallback: body rect (fixed 100dvh viewport in PocketRisu/RisuAI)
     try {
       const body = await this.rootDoc?.querySelector('body');
@@ -1504,7 +1542,7 @@ class FocusTracker {
           return this._cachedViewport;
         }
       }
-    } catch {}
+    } catch (err) { noteDetectError(err); }
     // 3. Fallback: querySelector('html') (unit test mocks)
     try {
       const html = await this.rootDoc?.querySelector('html');
@@ -1515,7 +1553,7 @@ class FocusTracker {
           return this._cachedViewport;
         }
       }
-    } catch {}
+    } catch (err) { noteDetectError(err); }
     if (typeof globalThis.innerWidth === 'number' && globalThis.innerWidth > 0) {
       this._cachedViewport = { width: globalThis.innerWidth, height: globalThis.innerHeight || 768 };
       return this._cachedViewport;
@@ -1528,7 +1566,7 @@ class FocusTracker {
       try {
         const doc = await this.api.getRootDocument();
         if (doc) this.rootDoc = doc;
-      } catch {}
+      } catch (err) { noteDetectError(err); }
     }
     return await this._getViewportSize();
   }
@@ -1550,7 +1588,7 @@ class FocusTracker {
       if (view && view.width > 0 && view.height > 0) {
         this._cachedViewport = view;
       }
-    } catch {}
+    } catch (err) { noteDetectError(err); }
   }
 
   async start() {
@@ -1570,7 +1608,7 @@ class FocusTracker {
             this._handlePointerMove(e);
           });
           if (id) this.listenerIds.push({ type: moveEvt, id });
-        } catch {}
+        } catch (err) { noteDetectError(err); }
       }
 
       for (const endEvt of ['pointerup', 'touchend', 'mouseup', 'pointercancel', 'touchcancel']) {
@@ -1579,7 +1617,7 @@ class FocusTracker {
             this._handlePointerEnd();
           });
           if (id) this.listenerIds.push({ type: endEvt, id });
-        } catch {}
+        } catch (err) { noteDetectError(err); }
       }
 
       for (const evt of ['pointerup', 'click', 'keyup']) {
@@ -1589,7 +1627,7 @@ class FocusTracker {
             this.scheduleScan();
           });
           if (id) this.listenerIds.push({ type: evt, id });
-        } catch {}
+        } catch (err) { noteDetectError(err); }
       }
 
       if (this.showFloatingChip && !this._isDocked) {
@@ -1613,7 +1651,7 @@ class FocusTracker {
 
   async scanNow({ allowScreenFallback = false } = {}) {
     if (!this.rootDoc) return this.lastContext;
-    let ctx = await inspectFocusedElement(this.rootDoc);
+    let ctx = await inspectFocusedElement(this.rootDoc, { diagnostics: Boolean(this.diagnostics) });
     if (!ctx && allowScreenFallback) {
       ctx = await inspectVisibleScreen(this.rootDoc);
     }
@@ -1637,7 +1675,7 @@ class FocusTracker {
         const disp = String((await f.getStyle('display')) || '').trim().toLowerCase();
         if (disp && disp !== 'none') visible.add(i);
       }
-    } catch {}
+    } catch (err) { noteDetectError(err); }
     return visible;
   }
 
@@ -1652,7 +1690,7 @@ class FocusTracker {
         this._dockFrame = tagged;
         return tagged;
       }
-    } catch {}
+    } catch (err) { noteDetectError(err); }
 
     if (typeof this.rootDoc.querySelectorAll !== 'function') return null;
 
@@ -1678,7 +1716,7 @@ class FocusTracker {
         } else {
           otherVisible.push(f);
         }
-      } catch {}
+      } catch (err) { noteDetectError(err); }
     }
 
     const candidates = [...newlyVisible, ...otherVisible];
@@ -1697,13 +1735,13 @@ class FocusTracker {
           await cand.setStyle('width', `${testWidth}px`);
           await new Promise(r => setTimeout(r, 25));
           if (Math.abs(localWin.innerWidth - testWidth) <= 8) {
-            try { await cand.setAttribute(FRAME_ATTR, '1'); } catch {}
+            try { await cand.setAttribute(FRAME_ATTR, '1'); } catch (err) { noteDetectError(err); }
             this._dockFrame = cand;
             return cand;
           }
           await cand.setStyle('width', origStyleW || '100%');
         } catch {
-          try { await cand.setStyle('width', origStyleW || '100%'); } catch {}
+          try { await cand.setStyle('width', origStyleW || '100%'); } catch (err) { noteDetectError(err); }
         }
       }
       return null;
@@ -1713,7 +1751,7 @@ class FocusTracker {
     //    only accept when strictly 1 iframe transitioned from hidden -> visible on showContainer().
     if (newlyVisible.length === 1) {
       const only = newlyVisible[0];
-      try { await only.setAttribute(FRAME_ATTR, '1'); } catch {}
+      try { await only.setAttribute(FRAME_ATTR, '1'); } catch (err) { noteDetectError(err); }
       this._dockFrame = only;
       return only;
     }
@@ -1726,7 +1764,7 @@ class FocusTracker {
       await this._dockMain.setStyle('width', this._savedMainStyle.width || '');
       await this._dockMain.setStyle('maxWidth', this._savedMainStyle.maxWidth || '');
       await this._dockMain.setStyle('boxSizing', this._savedMainStyle.boxSizing || '');
-    } catch {}
+    } catch (err) { noteDetectError(err); }
     this._savedMainStyle = null;
     this._dockMain = null;
   }
@@ -1743,7 +1781,7 @@ class FocusTracker {
   } = {}) {
     if (!this.rootDoc) {
       if (typeof this.api?.getRootDocument === 'function') {
-        try { this.rootDoc = await this.api.getRootDocument(); } catch {}
+        try { this.rootDoc = await this.api.getRootDocument(); } catch (err) { noteDetectError(err); }
       }
     }
     if (!this.rootDoc) {
@@ -1796,7 +1834,7 @@ class FocusTracker {
           await main.setStyle('maxWidth', `calc(100% - ${dockW}px)`);
           this._dockMain = main;
         }
-      } catch {}
+      } catch (err) { noteDetectError(err); }
     } else {
       await this._restoreMainLayout();
     }
@@ -1828,7 +1866,7 @@ class FocusTracker {
         await this._dockFrame.setStyle('width', '100%');
         await this._dockFrame.setStyle('borderLeft', '');
         await this._dockFrame.setStyle('boxShadow', '');
-      } catch {}
+      } catch (err) { noteDetectError(err); }
     }
 
     const wasHiddenForDock = this._chipHiddenForDock;
@@ -1848,7 +1886,7 @@ class FocusTracker {
         pos,
         dragging,
       }));
-    } catch {}
+    } catch (err) { noteDetectError(err); }
   }
 
   /**
@@ -1990,7 +2028,7 @@ class FocusTracker {
           }
         }
       }
-    } catch {}
+    } catch (err) { noteDetectError(err); }
   }
 
   _handlePointerMove(e) {
@@ -2102,7 +2140,7 @@ class FocusTracker {
       try {
         const stale = await this.rootDoc.querySelector(`[${CHIP_ATTR}="1"]`);
         if (stale) await stale.remove();
-      } catch {}
+      } catch (err) { noteDetectError(err); }
 
       // Use <div> instead of <button> so grabbing/dragging never steals :focus from the active editor
       const chip = await this.rootDoc.createElement('div');
@@ -2123,7 +2161,7 @@ class FocusTracker {
             this._handleChipPointerDown(e);
           });
           if (downId) this.chipListenerIds.push({ type: downEvt, id: downId });
-        } catch {}
+        } catch (err) { noteDetectError(err); }
       }
 
       try {
@@ -2135,12 +2173,12 @@ class FocusTracker {
           this.onChipClick(this.lastContext);
         });
         if (clickId) this.chipListenerIds.push({ type: 'click', id: clickId });
-      } catch {}
+      } catch (err) { noteDetectError(err); }
 
       await body.appendChild(chip);
       this.chipEl = chip;
       await this._refreshChipMetrics();
-    } catch {}
+    } catch (err) { noteDetectError(err); }
   }
 
   async setChipVisible(visible) {
@@ -2160,7 +2198,7 @@ class FocusTracker {
       const text = ctx.labelText ? `⋮⋮ ✨ ${ctx.labelText}` : '⋮⋮ ✨ RisuHelper';
       await this.chipEl.setTextContent(text.slice(0, 36));
       await this._refreshChipMetrics();
-    } catch {}
+    } catch (err) { noteDetectError(err); }
   }
 
   async unmountFloatingChip() {
@@ -2174,10 +2212,10 @@ class FocusTracker {
       for (const entry of this.chipListenerIds) {
         try {
           await this.chipEl.removeEventListener(entry.type, entry.id);
-        } catch {}
+        } catch (err) { noteDetectError(err); }
       }
       await this.chipEl.remove();
-    } catch {}
+    } catch (err) { noteDetectError(err); }
     this.chipEl = null;
     this.chipListenerIds = [];
   }
@@ -2202,7 +2240,7 @@ class FocusTracker {
       for (const entry of this.listenerIds) {
         try {
           await this.rootDoc.removeEventListener(entry.type, entry.id);
-        } catch {}
+        } catch (err) { noteDetectError(err); }
       }
     }
     this.listenerIds = [];
@@ -2256,7 +2294,7 @@ async function syncModuleEditorDom(rootDoc, { targetKind, fieldKey, loreIndex, r
         break;
       }
     }
-  } catch {}
+  } catch (err) { noteDetectError(err); }
 
   if (!editH2) {
     return { ok: false, reason: '현재 화면에 모듈 수정 창이 열려 있지 않습니다.' };
@@ -2281,7 +2319,7 @@ async function syncModuleEditorDom(rootDoc, { targetKind, fieldKey, loreIndex, r
   if (targetKind === 'module_lua') {
     try {
       editorEl = await scopeRoot.querySelector('[contenteditable="true"], [contenteditable=""]');
-    } catch {}
+    } catch (err) { noteDetectError(err); }
   } else {
     const wantIdx = targetKind === 'module_lorebook' ? loreIndex : regexIndex;
     if (!Number.isInteger(wantIdx) || wantIdx < 0) {
@@ -2325,7 +2363,7 @@ async function syncModuleEditorDom(rootDoc, { targetKind, fieldKey, loreIndex, r
           }
         }
       }
-    } catch {}
+    } catch (err) { noteDetectError(err); }
   }
 
   if (!editorEl || typeof editorEl.setTextContent !== 'function') {
@@ -2338,7 +2376,7 @@ async function syncModuleEditorDom(rootDoc, { targetKind, fieldKey, loreIndex, r
   try {
     await editorEl.setTextContent(String(text ?? ''));
     if (typeof editorEl.focus === 'function') {
-      try { await editorEl.focus(); } catch {}
+      try { await editorEl.focus(); } catch (err) { noteDetectError(err); }
     }
     return {
       ok: true,
