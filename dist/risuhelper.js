@@ -1,21 +1,21 @@
 //@name risuhelper
 //@display-name RisuHelper
 //@api 3.0
-//@version 0.3.2
+//@version 0.3.3
 //@update-url https://raw.githubusercontent.com/magarindev-ctrl/Risuhelper/main/dist/risuhelper.js
 //@link https://github.com/magarindev-ctrl/Risuhelper RisuHelper GitHub
 
 /*
- * RisuHelper v0.3.2 — RisuAI Plugin API v3
+ * RisuHelper v0.3.3 — RisuAI Plugin API v3
  * License: GPL-3.0-only
  * https://github.com/magarindev-ctrl/Risuhelper
  */
 (() => {
   'use strict';
-  const __RISUHELPER_VERSION__ = "0.3.2";
+  const __RISUHELPER_VERSION__ = "0.3.3";
   const __modules = {
   "src/version.js"(__require, __exports) {
-    const VERSION = '0.3.2';
+    const VERSION = '0.3.3';
     const PLUGIN_NAME = 'risuhelper';
     const STORAGE_KEY = 'risuhelper_state_v1';
     const PRESET_STORAGE_KEY = 'risuhelper_preset_v1';
@@ -1509,6 +1509,196 @@
       return '';
     }
 
+    const MODULE_HEADING_KEYWORDS = ['모듈 수정', 'edit module', '모듈 생성', 'create module', '모듈', 'modules'];
+
+    function detectModuleTabKind(activeTabs) {
+      const tabText = Array.isArray(activeTabs) ? activeTabs.join(' | ') : String(activeTabs || '');
+      if (!tabText) return null;
+      if (matchAny(tabText, ['로어북', 'lorebook', 'lore book'])) return 'lorebook';
+      if (matchAny(tabText, ['정규식', 'regex'])) return 'regex';
+      if (matchAny(tabText, ['트리거', 'trigger'])) return 'trigger';
+      if (matchAny(tabText, ['추가 에셋', 'additional assets', 'assets'])) return 'assets';
+      if (matchAny(tabText, ['기본 정보', 'basic info'])) return 'basic';
+      return null;
+    }
+
+    /**
+     * Collects active tab button labels across both PocketRisu (`[role="tab"][aria-selected="true"]`)
+     * and upstream RisuAI (`button.bg-darkbutton` / `button.bg-selected`).
+     */
+    async function collectActiveTabs(scopeRoot) {
+      if (!scopeRoot || typeof scopeRoot.querySelectorAll !== 'function') return [];
+      const found = [];
+      const pushUnique = (txt) => {
+        const t = String(txt || '').replace(/\s+/g, ' ').trim();
+        if (t && t.length <= 36 && !found.includes(t)) found.push(t);
+      };
+      try {
+        const ariaTabs = await scopeRoot.querySelectorAll('[role="tab"][aria-selected="true"]');
+        const len = ariaTabs ? Math.min(await ariaTabs.length(), 6) : 0;
+        for (let i = 0; i < len; i++) {
+          const node = await ariaTabs.at(i);
+          if (node) pushUnique(await node.textContent());
+        }
+      } catch {}
+      if (found.length === 0) {
+        try {
+          const clsTabs = await scopeRoot.querySelectorAll('button.bg-darkbutton, button.bg-selected');
+          const len = clsTabs ? Math.min(await clsTabs.length(), 8) : 0;
+          for (let i = 0; i < len; i++) {
+            const node = await clsTabs.at(i);
+            if (node) pushUnique(await node.textContent());
+          }
+        } catch {}
+      }
+      return found;
+    }
+
+    /**
+     * Resolves the tightest ancestor of a module heading (`<h2>모듈 수정</h2>`) that contains
+     * ModuleMenu tabs or `[data-risu-idx]` items, preventing cross-talk with unrelated sidebars.
+     */
+    async function resolveModuleScopeRoot(h2Node, rootDoc) {
+      let cur = h2Node;
+      for (let hop = 0; hop < 3 && cur; hop++) {
+        let parent = null;
+        try { parent = await cur.getParent(); } catch {}
+        if (!parent) break;
+        if (typeof parent.querySelector === 'function') {
+          try {
+            const marker = await parent.querySelector('[role="tab"], button.bg-darkbutton, button.bg-selected, [data-risu-idx]');
+            if (marker) return parent;
+          } catch {}
+        }
+        cur = parent;
+      }
+      return rootDoc;
+    }
+
+    /**
+     * Collects bounded DOM hints from an open ModuleMenu screen so HostAdapter can
+     * deterministically identify which module in `db.modules` is open and which entry is expanded.
+     */
+    async function collectModuleDomHints(scopeRoot, { activeTabs = [], focusedLoreIdx = null, focusedTextPreview = '' } = {}) {
+      if (!scopeRoot) return null;
+      const tab = detectModuleTabKind(activeTabs);
+      const items = [];
+      let totalIdxCount = 0;
+      let openEditableIdx = null;
+      let openInputIdx = null;
+      let openTextPreview = '';
+      let luaTextPreview = '';
+      const assetNames = [];
+
+      // Scan [data-risu-idx] entries on Lorebook / Regex tabs (or when tab is unknown)
+      if ((tab === 'lorebook' || tab === 'regex' || tab === null) && typeof scopeRoot.querySelectorAll === 'function') {
+        try {
+          const idxNodes = await scopeRoot.querySelectorAll('[data-risu-idx]');
+          const rawLen = idxNodes ? await idxNodes.length() : 0;
+          totalIdxCount = rawLen;
+          const limit = Math.min(rawLen, 24);
+          for (let i = 0; i < limit; i++) {
+            const node = await idxNodes.at(i);
+            if (!node) continue;
+
+            // Hidden items inside closed folders render empty placeholder divs without `button.valuer`
+            let titleBtn = null;
+            if (typeof node.querySelector === 'function') {
+              try { titleBtn = await node.querySelector('button.valuer'); } catch {}
+            }
+            if (!titleBtn) continue;
+
+            let idx = null;
+            try {
+              const nodeOuter = await node.getOuterHTML();
+              const nodeAttrs = parseOpeningTagAttrs(nodeOuter);
+              const parsed = parseInt(nodeAttrs['data-risu-idx'], 10);
+              if (!Number.isNaN(parsed) && parsed >= 0) idx = parsed;
+            } catch {}
+            if (idx === null) continue;
+
+            let title = '';
+            try {
+              title = String((await titleBtn.textContent()) || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+            } catch {}
+            items.push({ idx, title });
+
+            // Detect expanded accordion entry; iterating in DOM order picks the innermost entry over outer folders
+            if (typeof node.querySelector === 'function') {
+              try {
+                const ce = await node.querySelector('[contenteditable="true"], [contenteditable=""]');
+                if (ce) {
+                  openEditableIdx = idx;
+                  try {
+                    const txt = String((await ce.innerText()) || '').slice(0, 600);
+                    if (txt.trim()) openTextPreview = txt;
+                  } catch {}
+                } else if (openEditableIdx === null) {
+                  const inp = await node.querySelector('textarea, input');
+                  if (inp) openInputIdx = idx;
+                }
+              } catch {}
+            }
+          }
+        } catch {}
+      }
+
+      // On Trigger tab (or fallback with no [data-risu-idx]), read visible Lua [contenteditable="true"]
+      if ((tab === 'trigger' || (tab === null && items.length === 0)) && typeof scopeRoot.querySelector === 'function') {
+        try {
+          const ce = await scopeRoot.querySelector('[contenteditable="true"], [contenteditable=""]');
+          if (ce) {
+            const txt = String((await ce.innerText()) || '').slice(0, 600);
+            if (txt.trim()) luaTextPreview = txt;
+          }
+        } catch {}
+      }
+
+      // On Additional Assets tab, read visible asset names from table cells
+      if (tab === 'assets' && typeof scopeRoot.querySelectorAll === 'function') {
+        try {
+          const tds = await scopeRoot.querySelectorAll('td');
+          const len = tds ? Math.min(await tds.length(), 16) : 0;
+          for (let i = 0; i < len; i++) {
+            const td = await tds.at(i);
+            if (!td) continue;
+            const txt = String((await td.textContent()) || '').trim();
+            if (txt && txt.length <= 120 && !assetNames.includes(txt)) {
+              assetNames.push(txt);
+            }
+          }
+        } catch {}
+      }
+
+      const openIdx = Number.isInteger(focusedLoreIdx)
+        ? focusedLoreIdx
+        : (openEditableIdx !== null ? openEditableIdx : openInputIdx);
+      const textPreview = String(focusedTextPreview || openTextPreview || luaTextPreview || '').slice(0, 600);
+
+      if (!tab && items.length === 0 && !textPreview && assetNames.length === 0) {
+        return null;
+      }
+
+      const fpParts = [
+        tab || '',
+        String(totalIdxCount),
+        items.slice(0, 6).map(it => `${it.idx}:${it.title}`).join(','),
+        openIdx ?? '',
+        textPreview.slice(0, 64).replace(/\s+/g, ' ').trim(),
+        assetNames.slice(0, 4).join(','),
+      ];
+
+      return {
+        tab,
+        totalIdxCount,
+        items,
+        openIdx,
+        textPreview,
+        assetNames,
+        fingerprint: fpParts.join('#'),
+      };
+    }
+
     /**
      * Pure classification logic: takes DOM snapshot signals gathered from SafeElement traversal
      * and resolves a structured FocusContext suitable for RisuHelper's host adapter & LLM.
@@ -1532,6 +1722,7 @@
         chatIndex = null,
         isChatMessageEdit = false,
         tableRowIndex = null,
+        moduleDomHints = null,
       } = signals || {};
 
       const headingText = headings.join(' | ');
@@ -1627,6 +1818,7 @@
       // 2. Module settings / edit screen
       const isModuleEdit = matchAny(headingText, ['모듈 수정', 'edit module', '모듈 생성', 'create module']);
       const isModuleScreen = isModuleEdit || matchAny(headingText, ['모듈', 'modules']) || normSettingId.startsWith('module.');
+      const modHintsExtra = isModuleScreen && moduleDomHints ? { moduleDomHints } : {};
 
       if (isModuleEdit) {
         warnings.push('모듈 편집 화면(tempModule)이 열려 있습니다. 플러그인에서 모듈을 저장한 뒤 하단 "모듈 수정" 버튼을 누르면 플러그인 변경이 덮어써질 수 있으니, 편집창을 닫고 다시 확인하세요.');
@@ -1648,7 +1840,8 @@
           loreScope: null,
           labelText: `${isModuleScreen ? '모듈' : '캐릭터'} Lua 트리거 스크립트`,
           placeholder,
-          liveTextPreview,
+          liveTextPreview: liveTextPreview || (isModuleScreen ? moduleDomHints?.textPreview || '' : ''),
+          ...modHintsExtra,
           warnings,
         };
       }
@@ -1670,7 +1863,8 @@
           regexIndex: regexIdx,
           labelText: `${isModuleScreen ? '모듈' : '캐릭터'} 정규식 스크립트${regexIdx !== null ? ` #${regexIdx + 1}` : ''}`,
           placeholder,
-          liveTextPreview,
+          liveTextPreview: liveTextPreview || (isModuleScreen ? moduleDomHints?.textPreview || '' : ''),
+          ...modHintsExtra,
           warnings,
         };
       }
@@ -1705,34 +1899,93 @@
           loreScope,
           labelText: `${scopeLabel} #${loreIdx + 1} · ${fieldLabelMap[fieldKey] || fieldKey}`,
           placeholder,
-          liveTextPreview,
+          liveTextPreview: liveTextPreview || (isModuleScreen ? moduleDomHints?.textPreview || '' : ''),
+          ...modHintsExtra,
           warnings,
         };
       }
 
-      // 6. Module screen non-lorebook fields (dedicated module_field target)
+      // 6. Module screen (active tab routing + dedicated module_field targets)
       if (isModuleScreen) {
-        let fieldKey = 'description';
-        if (
+        const isExplicitBgEmbed =
           normSettingId === 'module.backgroundembedding' ||
           matchAny(nearbyLabel, ['백그라운드 임베딩', 'background embedding', 'background html']) ||
-          matchAny(placeholder, ['백그라운드 임베딩', 'background embedding'])
-        ) {
-          fieldKey = 'backgroundEmbedding';
-        } else if (
+          matchAny(placeholder, ['백그라운드 임베딩', 'background embedding']);
+        const isExplicitToggle =
           normSettingId === 'module.custommoduletoggle' ||
-          matchAny(nearbyLabel, ['커스텀 토글', 'custom toggle', '토글', 'toggle'])
-        ) {
-          fieldKey = 'customModuleToggle';
-        } else if (
+          matchAny(nearbyLabel, ['커스텀 토글', 'custom toggle', '토글', 'toggle']);
+        const isExplicitNamespace =
           normSettingId === 'module.namespace' ||
-          matchAny(nearbyLabel, ['네임스페이스', 'namespace'])
-        ) {
-          fieldKey = 'namespace';
-        } else if (
+          matchAny(nearbyLabel, ['네임스페이스', 'namespace']);
+        const isExplicitName =
           normSettingId === 'module.name' ||
-          matchAny(nearbyLabel, ['이름', 'name'])
-        ) {
+          matchAny(nearbyLabel, ['이름', 'name']);
+        const isExplicitDesc =
+          normSettingId === 'module.description' ||
+          matchAny(nearbyLabel, ['설명', 'description']);
+        const hasExplicitModuleField =
+          isExplicitBgEmbed || isExplicitToggle || isExplicitNamespace || isExplicitName || isExplicitDesc;
+
+        if (!hasExplicitModuleField) {
+          const modTab = moduleDomHints?.tab || detectModuleTabKind(activeTabs);
+          if (modTab === 'lorebook') {
+            const openIdx = Number.isInteger(moduleDomHints?.openIdx) ? moduleDomHints.openIdx : null;
+            return {
+              detectedAt: Date.now(),
+              screen: 'module',
+              targetKind: 'module_lorebook',
+              fieldKey: 'content',
+              loreIndex: openIdx,
+              loreScope: 'module',
+              labelText: openIdx !== null ? `모듈 로어북 #${openIdx + 1} · 본문` : '모듈 로어북 목록',
+              placeholder,
+              liveTextPreview: liveTextPreview || moduleDomHints?.textPreview || '',
+              ...modHintsExtra,
+              warnings,
+            };
+          }
+          if (modTab === 'regex') {
+            const openIdx = Number.isInteger(moduleDomHints?.openIdx) ? moduleDomHints.openIdx : null;
+            return {
+              detectedAt: Date.now(),
+              screen: 'module',
+              targetKind: 'module_regex',
+              fieldKey: 'out',
+              loreIndex: null,
+              loreScope: null,
+              regexIndex: openIdx,
+              labelText: openIdx !== null ? `모듈 정규식 스크립트 #${openIdx + 1}` : '모듈 정규식 스크립트',
+              placeholder,
+              liveTextPreview: liveTextPreview || moduleDomHints?.textPreview || '',
+              ...modHintsExtra,
+              warnings,
+            };
+          }
+          if (modTab === 'trigger') {
+            return {
+              detectedAt: Date.now(),
+              screen: 'module',
+              targetKind: 'module_lua',
+              fieldKey: 'code',
+              loreIndex: null,
+              loreScope: null,
+              labelText: '모듈 Lua 트리거 스크립트',
+              placeholder,
+              liveTextPreview: liveTextPreview || moduleDomHints?.textPreview || '',
+              ...modHintsExtra,
+              warnings,
+            };
+          }
+        }
+
+        let fieldKey = 'description';
+        if (isExplicitBgEmbed) {
+          fieldKey = 'backgroundEmbedding';
+        } else if (isExplicitToggle) {
+          fieldKey = 'customModuleToggle';
+        } else if (isExplicitNamespace) {
+          fieldKey = 'namespace';
+        } else if (isExplicitName) {
           fieldKey = 'name';
         }
         return {
@@ -1745,6 +1998,7 @@
           labelText: MODULE_FIELD_META[fieldKey]?.label || `모듈 · ${nearbyLabel || fieldKey}`,
           placeholder,
           liveTextPreview,
+          ...modHintsExtra,
           warnings,
         };
       }
@@ -1946,6 +2200,8 @@
         let luaButtonActive = false;
         let hasRegexContainer = false;
         let hasTriggerContainer = false;
+        let moduleScopeCandidate = null;
+        let moduleH2Node = null;
         // Check the focused element itself first (DefaultChatScreen puts `text-input-area` directly on <textarea>)
         let isChatInput = isChatElementAttrs(attrs);
         let isChatMessageEdit = String(attrs.class || '').includes('message-edit-area');
@@ -2062,6 +2318,10 @@
               if (cName === 'h2' || cName === 'h3') {
                 const ht = String((await child.textContent()) || '').trim();
                 if (ht && !headings.includes(ht)) headings.push(ht);
+                if (!moduleScopeCandidate && matchAny(ht, MODULE_HEADING_KEYWORDS)) {
+                  moduleScopeCandidate = parent;
+                  moduleH2Node = child;
+                }
                 if (!foundCur) prevSiblingWasLuaBar = false;
               } else if (cName === 'span' || cName === 'label') {
                 const st = String((await child.textContent()) || '').trim();
@@ -2142,6 +2402,10 @@
               if (h2) {
                 const ht = String((await h2.textContent()) || '').trim();
                 if (ht && !headings.includes(ht)) headings.push(ht);
+                if (!moduleScopeCandidate && matchAny(ht, MODULE_HEADING_KEYWORDS)) {
+                  moduleScopeCandidate = parent;
+                  moduleH2Node = h2;
+                }
               }
             } catch {}
           }
@@ -2164,8 +2428,30 @@
               const node = await allH2.at(i);
               const txt = node ? String((await node.textContent()) || '').trim() : '';
               if (txt && !headings.includes(txt)) headings.push(txt);
+              if (!moduleH2Node && matchAny(txt, MODULE_HEADING_KEYWORDS)) {
+                moduleH2Node = node;
+              }
             }
           } catch {}
+        }
+
+        let moduleDomHints = null;
+        const isModuleFocusContext =
+          !isChatInput &&
+          !isChatMessageEdit &&
+          (matchAny(headings.join(' | '), MODULE_HEADING_KEYWORDS) ||
+            String(settingId || '').trim().toLowerCase().startsWith('module.'));
+        if (isModuleFocusContext) {
+          const scopeRoot = moduleScopeCandidate || (moduleH2Node ? await resolveModuleScopeRoot(moduleH2Node, rootDoc) : rootDoc);
+          const tabLabels = await collectActiveTabs(scopeRoot);
+          for (const t of tabLabels) {
+            if (!activeTabs.includes(t)) activeTabs.push(t);
+          }
+          moduleDomHints = await collectModuleDomHints(scopeRoot, {
+            activeTabs,
+            focusedLoreIdx: loreIdx,
+            focusedTextPreview: liveTextPreview,
+          });
         }
 
         return classifyDomSignals({
@@ -2186,6 +2472,7 @@
           chatIndex,
           isChatMessageEdit,
           tableRowIndex,
+          moduleDomHints,
         });
       } catch {
         return null;
@@ -2200,6 +2487,7 @@
       if (!rootDoc) return null;
       try {
         const headings = [];
+        let moduleH2Node = null;
         try {
           const allH2 = await rootDoc.querySelectorAll('h2');
           const count = allH2 ? Math.min(await allH2.length(), 6) : 0;
@@ -2207,6 +2495,9 @@
             const node = await allH2.at(i);
             const txt = node ? String((await node.textContent()) || '').trim() : '';
             if (txt && !headings.includes(txt)) headings.push(txt);
+            if (!moduleH2Node && matchAny(txt, MODULE_HEADING_KEYWORDS)) {
+              moduleH2Node = node;
+            }
           }
         } catch {}
 
@@ -2225,8 +2516,20 @@
           '로어북', 'lorebook',
         ];
         if (matchAny(headingText, modalHeadings)) {
-          const classified = classifyDomSignals({ headings });
-          if (classified.screen !== 'unknown') return classified;
+          if (matchAny(headingText, MODULE_HEADING_KEYWORDS)) {
+            const scopeRoot = moduleH2Node ? await resolveModuleScopeRoot(moduleH2Node, rootDoc) : rootDoc;
+            const activeTabs = await collectActiveTabs(scopeRoot);
+            const moduleDomHints = await collectModuleDomHints(scopeRoot, { activeTabs });
+            const classified = classifyDomSignals({ headings, activeTabs, moduleDomHints });
+            if (classified.screen !== 'unknown') return classified;
+          } else if (matchAny(headingText, ['로어북', 'lorebook'])) {
+            const activeTabs = await collectActiveTabs(rootDoc);
+            const classified = classifyDomSignals({ headings, activeTabs });
+            if (classified.screen !== 'unknown') return classified;
+          } else {
+            const classified = classifyDomSignals({ headings });
+            if (classified.screen !== 'unknown') return classified;
+          }
         }
 
         if (chatInputEl) {
@@ -3611,6 +3914,189 @@
       return msg.includes('not found') || msg.includes('not a function') || msg.includes('undefined');
     }
 
+    const GENERIC_ITEM_TITLES = new Set(['unnamed lore', 'unnamed folder', 'unnamed script', '']);
+
+    function normalizeMatchText(str) {
+      return String(str || '').replace(/\r\n/g, '\n').replace(/\s+/g, ' ').trim();
+    }
+
+    function expectedLoreDisplayTitle(entry) {
+      if (!entry || typeof entry !== 'object') return '';
+      if (entry.mode === 'folder') {
+        return String(entry.comment || '').trim() || 'Unnamed Folder';
+      }
+      return String(entry.comment || '').trim() || String(entry.key || '').trim() || 'Unnamed Lore';
+    }
+
+    function expectedRegexDisplayTitle(entry) {
+      if (!entry || typeof entry !== 'object') return '';
+      return String(entry.comment || '').trim() || 'Unnamed Script';
+    }
+
+    function scorePreviewMatch(candidateText, normPreview) {
+      if (!normPreview || normPreview.length < 4) return 0;
+      const normCandidate = normalizeMatchText(candidateText);
+      if (!normCandidate) return 0;
+      if (normCandidate === normPreview) return 1500;
+      if (normCandidate.startsWith(normPreview)) return 1000;
+      if (normCandidate.length >= 4 && normPreview.startsWith(normCandidate)) return 900;
+      if (normPreview.length >= 12 && normCandidate.includes(normPreview)) return 600;
+      return 0;
+    }
+
+    /**
+     * Resolves the index of the currently edited module in `db.modules`.
+     * Priority:
+     *  1. Explicit `target.moduleIndex` (manual user selection or pinned proposal)
+     *  2. DOM fingerprint matching via `target.moduleDomHints` (lorebook/regex titles, expanded text preview, assets)
+     *  3. Last matched module ID (`preferredModuleId`) when switching tabs inside the same module
+     *  4. Fallback to 0 (first installed module)
+     */
+    function resolveModuleIndex(modules, target, preferredModuleId = null) {
+      if (!Array.isArray(modules) || modules.length === 0) return { index: null, matchedBy: 'none' };
+
+      if (Number.isInteger(target?.moduleIndex) && target.moduleIndex >= 0 && target.moduleIndex < modules.length) {
+        return { index: target.moduleIndex, matchedBy: 'explicit' };
+      }
+
+      const hints = target?.moduleDomHints;
+      if (hints && typeof hints === 'object') {
+        const tab = hints.tab || (
+          target.targetKind === 'module_lorebook' ? 'lorebook' :
+          target.targetKind === 'module_regex' ? 'regex' :
+          target.targetKind === 'module_lua' ? 'trigger' : null
+        );
+        const items = Array.isArray(hints.items) ? hints.items : [];
+        const totalIdxCount = Number.isInteger(hints.totalIdxCount) ? hints.totalIdxCount : 0;
+        const rawPreview = String(hints.textPreview || target?.liveTextPreview || '');
+        const normPreview = normalizeMatchText(rawPreview).slice(0, 240);
+        const openIdx = Number.isInteger(target?.loreIndex)
+          ? target.loreIndex
+          : Number.isInteger(target?.regexIndex)
+            ? target.regexIndex
+            : (Number.isInteger(hints.openIdx) ? hints.openIdx : null);
+        const assetNames = Array.isArray(hints.assetNames) ? hints.assetNames : [];
+
+        let bestIdx = -1;
+        let bestScore = 0;
+
+        for (let i = 0; i < modules.length; i++) {
+          const m = modules[i];
+          if (!m || typeof m !== 'object') continue;
+          let score = 0;
+
+          if (tab === 'lorebook' || (tab === null && target.targetKind === 'module_lorebook')) {
+            const list = Array.isArray(m.lorebook) ? m.lorebook : [];
+            if (totalIdxCount > 0) {
+              if (list.length === 0) score -= 20;
+              else if (list.length === totalIdxCount) score += 10;
+            }
+            const allTitleSet = new Set(list.map(e => normalizeMatchText(expectedLoreDisplayTitle(e)).toLowerCase()));
+            for (const item of items) {
+              const normTitle = normalizeMatchText(item.title).toLowerCase();
+              const isGeneric = GENERIC_ITEM_TITLES.has(normTitle);
+              const atIdx = list[item.idx];
+              if (atIdx) {
+                const expected = normalizeMatchText(expectedLoreDisplayTitle(atIdx)).toLowerCase();
+                if (expected === normTitle) {
+                  score += isGeneric ? 2 : 30;
+                  continue;
+                }
+              }
+              if (!isGeneric && allTitleSet.has(normTitle)) {
+                score += 8;
+              }
+            }
+            if (normPreview.length >= 4) {
+              if (openIdx !== null && list[openIdx]) {
+                const openHit = scorePreviewMatch(list[openIdx].content, normPreview);
+                if (openHit > 0) score += openHit;
+              } else {
+                let maxHit = 0;
+                for (const e of list) {
+                  const hit = scorePreviewMatch(e?.content, normPreview);
+                  if (hit > maxHit) maxHit = hit;
+                }
+                score += maxHit;
+              }
+            }
+          } else if (tab === 'regex' || (tab === null && target.targetKind === 'module_regex')) {
+            const list = Array.isArray(m.regex) ? m.regex : [];
+            if (totalIdxCount > 0) {
+              if (list.length === 0) score -= 20;
+              else if (list.length === totalIdxCount) score += 10;
+            }
+            const allTitleSet = new Set(list.map(e => normalizeMatchText(expectedRegexDisplayTitle(e)).toLowerCase()));
+            for (const item of items) {
+              const normTitle = normalizeMatchText(item.title).toLowerCase();
+              const isGeneric = GENERIC_ITEM_TITLES.has(normTitle);
+              const atIdx = list[item.idx];
+              if (atIdx) {
+                const expected = normalizeMatchText(expectedRegexDisplayTitle(atIdx)).toLowerCase();
+                if (expected === normTitle) {
+                  score += isGeneric ? 2 : 30;
+                  continue;
+                }
+              }
+              if (!isGeneric && allTitleSet.has(normTitle)) {
+                score += 8;
+              }
+            }
+            if (normPreview.length >= 4) {
+              if (target.targetKind === 'module_field' && target.fieldKey === 'backgroundEmbedding') {
+                score += scorePreviewMatch(m.backgroundEmbedding, normPreview);
+              } else if (openIdx !== null && list[openIdx]) {
+                score += scorePreviewMatch(list[openIdx].out, normPreview);
+              } else {
+                const bgHit = scorePreviewMatch(m.backgroundEmbedding, normPreview);
+                let maxRegexHit = 0;
+                for (const e of list) {
+                  const hit = scorePreviewMatch(e?.out, normPreview);
+                  if (hit > maxRegexHit) maxRegexHit = hit;
+                }
+                score += Math.max(bgHit, maxRegexHit);
+              }
+            }
+          } else if (tab === 'trigger' || target.targetKind === 'module_lua') {
+            if (normPreview.length >= 4) {
+              const lua = extractLuaFromTriggers(m.trigger);
+              score += scorePreviewMatch(lua.code, normPreview);
+            }
+          } else if (tab === 'assets' && assetNames.length > 0) {
+            const modAssets = Array.isArray(m.assets) ? m.assets : [];
+            const assetSet = new Set(modAssets.map(a => String(a?.[0] || '').trim()));
+            for (const name of assetNames) {
+              if (assetSet.has(name)) score += 20;
+            }
+          } else if (target.targetKind === 'module_field' && normPreview.length >= 4) {
+            const fk = target.fieldKey || 'description';
+            score += scorePreviewMatch(m[fk], normPreview);
+          }
+
+          if (score > 0 && preferredModuleId && m.id === preferredModuleId) {
+            score += 1;
+          }
+          if (score > bestScore) {
+            bestScore = score;
+            bestIdx = i;
+          }
+        }
+
+        if (bestIdx !== -1 && bestScore > 0) {
+          return { index: bestIdx, matchedBy: 'dom_hints', score: bestScore };
+        }
+      }
+
+      if (preferredModuleId) {
+        const prefIdx = modules.findIndex(m => m && m.id === preferredModuleId);
+        if (prefIdx !== -1) {
+          return { index: prefIdx, matchedBy: 'preferred' };
+        }
+      }
+
+      return { index: 0, matchedBy: 'fallback' };
+    }
+
     /**
      * Cross-fork safe adapter for RisuAI Plugin API v3.
      * Works with kwaroran/Risuai, PocketRisu, RisuBard, HaejeokRisuai, RisuNest, and RisuAI-Hardened.
@@ -3621,6 +4107,20 @@
         this.undoStack = [];
         this.maxUndo = 20;
         this._probedFlavor = null;
+        this._lastMatchedModuleId = null;
+      }
+
+      _resolveWriteModuleIndex(modules, proposal, target, options = {}) {
+        if (Number.isInteger(proposal?.moduleIndex) && modules[proposal.moduleIndex]) {
+          return proposal.moduleIndex;
+        }
+        const pinnedId = options?.hostBinding?.moduleId || null;
+        if (pinnedId) {
+          const byId = modules.findIndex(m => m && m.id === pinnedId);
+          if (byId !== -1) return byId;
+        }
+        const res = resolveModuleIndex(modules, target, this._lastMatchedModuleId);
+        return res.index ?? 0;
       }
 
       /**
@@ -4149,9 +4649,13 @@
         ) {
           const { modules, enabledModules, permissionDenied } = await this.readModules();
           if (permissionDenied) return { ok: false, reason: DB_PERMISSION_ERROR, content: '' };
-          const modIdx = Number.isInteger(t.moduleIndex) ? t.moduleIndex : (modules.length > 0 ? 0 : null);
+          const resolvedMod = resolveModuleIndex(modules, t, this._lastMatchedModuleId);
+          const modIdx = resolvedMod.index;
           const mod = modIdx !== null ? modules[modIdx] : null;
           if (!mod) return { ok: true, target: t, label: '설치된 모듈 없음', content: '', modulesSummary: [] };
+          if (mod.id && (resolvedMod.matchedBy === 'explicit' || resolvedMod.matchedBy === 'dom_hints')) {
+            this._lastMatchedModuleId = mod.id;
+          }
 
           let content = '';
           let label = `모듈: ${mod.name}`;
@@ -4160,6 +4664,11 @@
           let hasOtherTriggers = false;
           let otherTriggerCount = 0;
           let resolvedFieldKey = t.fieldKey;
+          let resolvedLoreIdx = t.loreIndex;
+          let resolvedRegexIdx = t.regexIndex;
+          let loreCount;
+          let loreSummary;
+          let regexList;
 
           if (t.targetKind === 'module_field') {
             const fieldKey = t.fieldKey || 'backgroundEmbedding';
@@ -4178,31 +4687,53 @@
             label = `모듈 Lua (${mod.name})`;
           } else if (t.targetKind === 'module_regex') {
             const list = Array.isArray(mod.regex) ? mod.regex : [];
-            const rIdx = Number.isInteger(t.regexIndex) ? t.regexIndex : null;
-            entry = rIdx !== null && list[rIdx] ? list[rIdx] : null;
+            const rIdx = Number.isInteger(t.regexIndex) && list[t.regexIndex] ? t.regexIndex : null;
+            resolvedRegexIdx = rIdx;
+            entry = rIdx !== null ? list[rIdx] : null;
             content = entry ? JSON.stringify(entry, null, 2) : '';
             label = entry ? `모듈 정규식 (${mod.name} #${rIdx + 1})` : `모듈 정규식 (${mod.name}, ${list.length}개)`;
+            regexList = list.slice(0, 30);
           } else {
             const list = Array.isArray(mod.lorebook) ? mod.lorebook : [];
-            const lIdx = Number.isInteger(t.loreIndex) ? t.loreIndex : null;
-            entry = lIdx !== null && list[lIdx] ? list[lIdx] : null;
+            const lIdx = Number.isInteger(t.loreIndex) && list[t.loreIndex] ? t.loreIndex : null;
+            resolvedLoreIdx = lIdx;
+            entry = lIdx !== null ? list[lIdx] : null;
             const fieldKey = t.fieldKey || 'content';
             const fieldErr = validateAllowedFieldKey('module_lorebook', fieldKey);
             if (fieldErr) return { ok: false, reason: fieldErr, content: '' };
             resolvedFieldKey = fieldKey;
             content = entry ? String(entry[fieldKey] ?? '') : '';
-            label = entry ? `모듈 로어북 (${mod.name} #${lIdx + 1})` : `모듈 로어북 (${mod.name}, ${list.length}개)`;
+            const entryTitle = entry?.comment ? ` · ${entry.comment}` : '';
+            label = entry ? `모듈 로어북 (${mod.name} #${lIdx + 1}${entryTitle})` : `모듈 로어북 (${mod.name}, ${list.length}개)`;
+            loreCount = list.length;
+            loreSummary = list.slice(0, 40).map((e, i) => ({
+              index: i,
+              comment: e.comment || '',
+              key: e.key || '',
+              alwaysActive: Boolean(e.alwaysActive),
+              insertorder: e.insertorder ?? 100,
+              mode: e.mode || 'normal',
+            }));
           }
           return {
             ok: true,
-            target: { ...t, moduleIndex: modIdx, fieldKey: resolvedFieldKey },
+            target: {
+              ...t,
+              moduleIndex: modIdx,
+              fieldKey: resolvedFieldKey,
+              ...(t.targetKind === 'module_lorebook' ? { loreIndex: resolvedLoreIdx } : {}),
+              ...(t.targetKind === 'module_regex' ? { regexIndex: resolvedRegexIdx } : {}),
+            },
             hostBinding: { moduleIndex: modIdx, moduleId: mod.id || null },
+            moduleMatchedBy: resolvedMod.matchedBy,
             label,
             content,
             entry,
             isLua,
             hasOtherTriggers,
             otherTriggerCount,
+            ...(loreSummary !== undefined ? { loreCount, loreSummary } : {}),
+            ...(regexList !== undefined ? { regexList } : {}),
             module: mod,
             modulesSummary: modules.map((m, i) => ({
               index: i,
@@ -4363,6 +4894,7 @@
           const snap = await this.readTargetSnapshot({
             targetKind: scope,
             moduleIndex: proposal.moduleIndex ?? target.moduleIndex,
+            moduleDomHints: proposal.moduleIndex === undefined ? target.moduleDomHints : undefined,
           });
           if (!snap.ok) return { ok: false, error: snap.reason };
           const before = snap.content;
@@ -4407,6 +4939,7 @@
             targetKind,
             loreIndex,
             moduleIndex: proposal.moduleIndex ?? target.moduleIndex,
+            moduleDomHints: proposal.moduleIndex === undefined ? target.moduleDomHints : undefined,
             fieldKey,
           });
           if (!snap.ok) return { ok: false, error: snap.reason };
@@ -4504,6 +5037,7 @@
             targetKind,
             regexIndex: idx,
             moduleIndex: proposal.moduleIndex ?? target.moduleIndex,
+            moduleDomHints: proposal.moduleIndex === undefined ? target.moduleDomHints : undefined,
           });
           if (!snap.ok) return { ok: false, error: snap.reason };
           const existing = idx !== null ? snap.entry : null;
@@ -4533,6 +5067,7 @@
           const snap = await this.readTargetSnapshot({
             targetKind,
             moduleIndex: proposal.moduleIndex ?? target.moduleIndex,
+            moduleDomHints: proposal.moduleIndex === undefined ? target.moduleDomHints : undefined,
           });
           if (!snap.ok) return { ok: false, error: snap.reason };
           const nextEntry = normalizeLorebookEntry(proposal);
@@ -4873,12 +5408,7 @@
           assertAllowedFieldKey('module_field', fieldKey);
           const { modules, permissionDenied } = await this.readModules();
           if (permissionDenied) throw new Error(DB_PERMISSION_ERROR);
-          const pinnedId = options.hostBinding?.moduleId || null;
-          let modIdx = Number.isInteger(target.moduleIndex) ? target.moduleIndex : 0;
-          if (pinnedId) {
-            const byId = modules.findIndex(m => m.id === pinnedId);
-            if (byId !== -1) modIdx = byId;
-          }
+          const modIdx = this._resolveWriteModuleIndex(modules, proposal, target, options);
           if (!modules[modIdx]) throw new Error('수정할 모듈을 찾을 수 없습니다.');
           const moduleId = modules[modIdx].id;
           const moduleName = modules[modIdx].name || '무제';
@@ -4962,7 +5492,7 @@
         if (scope === 'module') {
           const { modules, permissionDenied } = await this.readModules();
           if (permissionDenied) throw new Error(DB_PERMISSION_ERROR);
-          const modIdx = Number.isInteger(proposal.moduleIndex) ? proposal.moduleIndex : (target.moduleIndex ?? 0);
+          const modIdx = this._resolveWriteModuleIndex(modules, proposal, target, options);
           if (!modules[modIdx]) throw new Error('대상 모듈을 찾을 수 없습니다.');
           const moduleId = modules[modIdx].id;
           const nextModules = clone(modules);
@@ -5064,7 +5594,7 @@
         if (scope === 'module') {
           const { modules, permissionDenied } = await this.readModules();
           if (permissionDenied) throw new Error(DB_PERMISSION_ERROR);
-          const modIdx = Number.isInteger(proposal.moduleIndex) ? proposal.moduleIndex : (target.moduleIndex ?? 0);
+          const modIdx = this._resolveWriteModuleIndex(modules, proposal, target, options);
           if (!modules[modIdx]?.lorebook?.[loreIndex]) throw new Error('대상 모듈 로어북 항목을 찾을 수 없습니다.');
           const moduleId = modules[modIdx].id;
           const prevEntry = clone(modules[modIdx].lorebook[loreIndex]);
@@ -5113,7 +5643,7 @@
         if (scope === 'module') {
           const { modules, permissionDenied } = await this.readModules();
           if (permissionDenied) throw new Error(DB_PERMISSION_ERROR);
-          const modIdx = Number.isInteger(proposal.moduleIndex) ? proposal.moduleIndex : (target.moduleIndex ?? 0);
+          const modIdx = this._resolveWriteModuleIndex(modules, proposal, target, options);
           if (!modules[modIdx]) throw new Error('대상 모듈을 찾을 수 없습니다.');
           const luaInfo = extractLuaFromTriggers(modules[modIdx].trigger);
           if (luaInfo.hasOtherTriggers && options.requireDestructiveConfirm && !options.destructiveConfirmed) {
@@ -5185,7 +5715,7 @@
         if (scope === 'module') {
           const { modules, permissionDenied } = await this.readModules();
           if (permissionDenied) throw new Error(DB_PERMISSION_ERROR);
-          const modIdx = Number.isInteger(proposal.moduleIndex) ? proposal.moduleIndex : (target.moduleIndex ?? 0);
+          const modIdx = this._resolveWriteModuleIndex(modules, proposal, target, options);
           if (!modules[modIdx]) throw new Error('대상 모듈을 찾을 수 없습니다.');
           const moduleId = modules[modIdx].id;
           const nextModules = clone(modules);
@@ -5442,6 +5972,7 @@
       __exports.buildLuaTriggers = buildLuaTriggers;
       __exports.normalizeLorebookEntry = normalizeLorebookEntry;
       __exports.normalizeRegexEntry = normalizeRegexEntry;
+      __exports.resolveModuleIndex = resolveModuleIndex;
       __exports.HostAdapter = HostAdapter;
 
   },
@@ -6099,6 +6630,9 @@
       }
       if (extraContext?.loreSummary) {
         extraBlocks.push(`[로어북 목록 요약]\n${JSON.stringify(extraContext.loreSummary, null, 2)}`);
+      }
+      if (extraContext?.moduleLoreSummary) {
+        extraBlocks.push(`[현재 모듈 로어북 목록 요약]\n${JSON.stringify(extraContext.moduleLoreSummary, null, 2)}`);
       }
       if (extraContext?.personasSummary) {
         extraBlocks.push(`[페르소나 목록 요약]\n${JSON.stringify(extraContext.personasSummary, null, 2)}`);
@@ -8998,6 +9532,7 @@
           ctx.greetingIndex ?? '',
           ctx.messageIndex ?? '',
           ctx.moduleIndex ?? '',
+          ctx.moduleDomHints?.fingerprint || '',
           ctx.labelText || '',
         ].join('|');
       }
@@ -9296,6 +9831,15 @@
               }
             }
           } catch {}
+        }
+
+        if (
+          this.settings.includeLoreSummary &&
+          this.activeSnapshot?.ok &&
+          this.activeSnapshot.target?.targetKind === 'module_lorebook' &&
+          Array.isArray(this.activeSnapshot.loreSummary)
+        ) {
+          extra.moduleLoreSummary = this.activeSnapshot.loreSummary.slice(0, 30);
         }
 
         if (ctx.targetKind === 'persona' || ctx.screen === 'persona') {
@@ -9878,11 +10422,15 @@
           (ctx.targetKind === 'module_field' || ctx.targetKind === 'module_lorebook' || ctx.targetKind === 'module_lua' || ctx.targetKind === 'module_regex') &&
           Array.isArray(this.activeSnapshot.modulesSummary)
         ) {
-          return h(doc, 'select', {
+          const selectedModIdx = ctx.moduleIndex ?? this.activeSnapshot.target?.moduleIndex ?? 0;
+          const modSel = h(doc, 'select', {
             class: 'rh-select',
             onchange: async (e) => {
               const base = this.manualTarget || { ...ctx };
               base.moduleIndex = Number(e.target.value);
+              if (ctx.targetKind === 'module_lorebook') base.loreIndex = null;
+              if (ctx.targetKind === 'module_regex') base.regexIndex = null;
+              delete base.moduleDomHints;
               this.manualTarget = base;
               await this.refreshContextSnapshot();
               this.render();
@@ -9891,10 +10439,38 @@
             ...this.activeSnapshot.modulesSummary.map(item =>
               h(doc, 'option', {
                 value: String(item.index),
-                selected: (ctx.moduleIndex ?? 0) === item.index,
+                selected: selectedModIdx === item.index,
               }, `${item.name || '(무제)'} (로어북 ${item.loreCount}개${item.enabled ? ', 활성' : ''})`)
             )
           );
+
+          if (ctx.targetKind === 'module_lorebook' && Array.isArray(this.activeSnapshot.loreSummary)) {
+            const selectedLoreIdx = ctx.loreIndex ?? this.activeSnapshot.target?.loreIndex ?? null;
+            const loreSel = h(doc, 'select', {
+              class: 'rh-select',
+              onchange: async (e) => {
+                const val = e.target.value;
+                const base = this.manualTarget || { ...ctx };
+                base.moduleIndex = selectedModIdx;
+                base.loreIndex = val === '' ? null : Number(val);
+                delete base.moduleDomHints;
+                this.manualTarget = base;
+                await this.refreshContextSnapshot();
+                this.render();
+              },
+            },
+              h(doc, 'option', { value: '', selected: selectedLoreIdx === null || selectedLoreIdx === undefined }, '모듈 로어북 항목 선택 (미선택 시 전체/신규 생성)'),
+              ...this.activeSnapshot.loreSummary.map(item =>
+                h(doc, 'option', {
+                  value: String(item.index),
+                  selected: selectedLoreIdx === item.index,
+                }, `#${item.index + 1} ${item.comment || '(무제)'}${item.key ? ` [${item.key.slice(0, 24)}]` : ''}`)
+              )
+            );
+            return [modSel, loreSel];
+          }
+
+          return modSel;
         }
         return null;
       }
@@ -10180,7 +10756,10 @@
         ];
 
         if (subPicker) {
-          contextBarChildren.push(h(doc, 'div', { class: 'rh-row' }, subPicker));
+          const rows = Array.isArray(subPicker) ? subPicker : [subPicker];
+          for (const pickerEl of rows) {
+            if (pickerEl) contextBarChildren.push(h(doc, 'div', { class: 'rh-row' }, pickerEl));
+          }
         }
 
         contextBarChildren.push(

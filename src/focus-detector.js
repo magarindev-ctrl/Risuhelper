@@ -151,6 +151,196 @@ async function extractLabelFromColWrapper(el, className) {
   return '';
 }
 
+const MODULE_HEADING_KEYWORDS = ['모듈 수정', 'edit module', '모듈 생성', 'create module', '모듈', 'modules'];
+
+function detectModuleTabKind(activeTabs) {
+  const tabText = Array.isArray(activeTabs) ? activeTabs.join(' | ') : String(activeTabs || '');
+  if (!tabText) return null;
+  if (matchAny(tabText, ['로어북', 'lorebook', 'lore book'])) return 'lorebook';
+  if (matchAny(tabText, ['정규식', 'regex'])) return 'regex';
+  if (matchAny(tabText, ['트리거', 'trigger'])) return 'trigger';
+  if (matchAny(tabText, ['추가 에셋', 'additional assets', 'assets'])) return 'assets';
+  if (matchAny(tabText, ['기본 정보', 'basic info'])) return 'basic';
+  return null;
+}
+
+/**
+ * Collects active tab button labels across both PocketRisu (`[role="tab"][aria-selected="true"]`)
+ * and upstream RisuAI (`button.bg-darkbutton` / `button.bg-selected`).
+ */
+async function collectActiveTabs(scopeRoot) {
+  if (!scopeRoot || typeof scopeRoot.querySelectorAll !== 'function') return [];
+  const found = [];
+  const pushUnique = (txt) => {
+    const t = String(txt || '').replace(/\s+/g, ' ').trim();
+    if (t && t.length <= 36 && !found.includes(t)) found.push(t);
+  };
+  try {
+    const ariaTabs = await scopeRoot.querySelectorAll('[role="tab"][aria-selected="true"]');
+    const len = ariaTabs ? Math.min(await ariaTabs.length(), 6) : 0;
+    for (let i = 0; i < len; i++) {
+      const node = await ariaTabs.at(i);
+      if (node) pushUnique(await node.textContent());
+    }
+  } catch {}
+  if (found.length === 0) {
+    try {
+      const clsTabs = await scopeRoot.querySelectorAll('button.bg-darkbutton, button.bg-selected');
+      const len = clsTabs ? Math.min(await clsTabs.length(), 8) : 0;
+      for (let i = 0; i < len; i++) {
+        const node = await clsTabs.at(i);
+        if (node) pushUnique(await node.textContent());
+      }
+    } catch {}
+  }
+  return found;
+}
+
+/**
+ * Resolves the tightest ancestor of a module heading (`<h2>모듈 수정</h2>`) that contains
+ * ModuleMenu tabs or `[data-risu-idx]` items, preventing cross-talk with unrelated sidebars.
+ */
+async function resolveModuleScopeRoot(h2Node, rootDoc) {
+  let cur = h2Node;
+  for (let hop = 0; hop < 3 && cur; hop++) {
+    let parent = null;
+    try { parent = await cur.getParent(); } catch {}
+    if (!parent) break;
+    if (typeof parent.querySelector === 'function') {
+      try {
+        const marker = await parent.querySelector('[role="tab"], button.bg-darkbutton, button.bg-selected, [data-risu-idx]');
+        if (marker) return parent;
+      } catch {}
+    }
+    cur = parent;
+  }
+  return rootDoc;
+}
+
+/**
+ * Collects bounded DOM hints from an open ModuleMenu screen so HostAdapter can
+ * deterministically identify which module in `db.modules` is open and which entry is expanded.
+ */
+async function collectModuleDomHints(scopeRoot, { activeTabs = [], focusedLoreIdx = null, focusedTextPreview = '' } = {}) {
+  if (!scopeRoot) return null;
+  const tab = detectModuleTabKind(activeTabs);
+  const items = [];
+  let totalIdxCount = 0;
+  let openEditableIdx = null;
+  let openInputIdx = null;
+  let openTextPreview = '';
+  let luaTextPreview = '';
+  const assetNames = [];
+
+  // Scan [data-risu-idx] entries on Lorebook / Regex tabs (or when tab is unknown)
+  if ((tab === 'lorebook' || tab === 'regex' || tab === null) && typeof scopeRoot.querySelectorAll === 'function') {
+    try {
+      const idxNodes = await scopeRoot.querySelectorAll('[data-risu-idx]');
+      const rawLen = idxNodes ? await idxNodes.length() : 0;
+      totalIdxCount = rawLen;
+      const limit = Math.min(rawLen, 24);
+      for (let i = 0; i < limit; i++) {
+        const node = await idxNodes.at(i);
+        if (!node) continue;
+
+        // Hidden items inside closed folders render empty placeholder divs without `button.valuer`
+        let titleBtn = null;
+        if (typeof node.querySelector === 'function') {
+          try { titleBtn = await node.querySelector('button.valuer'); } catch {}
+        }
+        if (!titleBtn) continue;
+
+        let idx = null;
+        try {
+          const nodeOuter = await node.getOuterHTML();
+          const nodeAttrs = parseOpeningTagAttrs(nodeOuter);
+          const parsed = parseInt(nodeAttrs['data-risu-idx'], 10);
+          if (!Number.isNaN(parsed) && parsed >= 0) idx = parsed;
+        } catch {}
+        if (idx === null) continue;
+
+        let title = '';
+        try {
+          title = String((await titleBtn.textContent()) || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+        } catch {}
+        items.push({ idx, title });
+
+        // Detect expanded accordion entry; iterating in DOM order picks the innermost entry over outer folders
+        if (typeof node.querySelector === 'function') {
+          try {
+            const ce = await node.querySelector('[contenteditable="true"], [contenteditable=""]');
+            if (ce) {
+              openEditableIdx = idx;
+              try {
+                const txt = String((await ce.innerText()) || '').slice(0, 600);
+                if (txt.trim()) openTextPreview = txt;
+              } catch {}
+            } else if (openEditableIdx === null) {
+              const inp = await node.querySelector('textarea, input');
+              if (inp) openInputIdx = idx;
+            }
+          } catch {}
+        }
+      }
+    } catch {}
+  }
+
+  // On Trigger tab (or fallback with no [data-risu-idx]), read visible Lua [contenteditable="true"]
+  if ((tab === 'trigger' || (tab === null && items.length === 0)) && typeof scopeRoot.querySelector === 'function') {
+    try {
+      const ce = await scopeRoot.querySelector('[contenteditable="true"], [contenteditable=""]');
+      if (ce) {
+        const txt = String((await ce.innerText()) || '').slice(0, 600);
+        if (txt.trim()) luaTextPreview = txt;
+      }
+    } catch {}
+  }
+
+  // On Additional Assets tab, read visible asset names from table cells
+  if (tab === 'assets' && typeof scopeRoot.querySelectorAll === 'function') {
+    try {
+      const tds = await scopeRoot.querySelectorAll('td');
+      const len = tds ? Math.min(await tds.length(), 16) : 0;
+      for (let i = 0; i < len; i++) {
+        const td = await tds.at(i);
+        if (!td) continue;
+        const txt = String((await td.textContent()) || '').trim();
+        if (txt && txt.length <= 120 && !assetNames.includes(txt)) {
+          assetNames.push(txt);
+        }
+      }
+    } catch {}
+  }
+
+  const openIdx = Number.isInteger(focusedLoreIdx)
+    ? focusedLoreIdx
+    : (openEditableIdx !== null ? openEditableIdx : openInputIdx);
+  const textPreview = String(focusedTextPreview || openTextPreview || luaTextPreview || '').slice(0, 600);
+
+  if (!tab && items.length === 0 && !textPreview && assetNames.length === 0) {
+    return null;
+  }
+
+  const fpParts = [
+    tab || '',
+    String(totalIdxCount),
+    items.slice(0, 6).map(it => `${it.idx}:${it.title}`).join(','),
+    openIdx ?? '',
+    textPreview.slice(0, 64).replace(/\s+/g, ' ').trim(),
+    assetNames.slice(0, 4).join(','),
+  ];
+
+  return {
+    tab,
+    totalIdxCount,
+    items,
+    openIdx,
+    textPreview,
+    assetNames,
+    fingerprint: fpParts.join('#'),
+  };
+}
+
 /**
  * Pure classification logic: takes DOM snapshot signals gathered from SafeElement traversal
  * and resolves a structured FocusContext suitable for RisuHelper's host adapter & LLM.
@@ -174,6 +364,7 @@ function classifyDomSignals(signals) {
     chatIndex = null,
     isChatMessageEdit = false,
     tableRowIndex = null,
+    moduleDomHints = null,
   } = signals || {};
 
   const headingText = headings.join(' | ');
@@ -269,6 +460,7 @@ function classifyDomSignals(signals) {
   // 2. Module settings / edit screen
   const isModuleEdit = matchAny(headingText, ['모듈 수정', 'edit module', '모듈 생성', 'create module']);
   const isModuleScreen = isModuleEdit || matchAny(headingText, ['모듈', 'modules']) || normSettingId.startsWith('module.');
+  const modHintsExtra = isModuleScreen && moduleDomHints ? { moduleDomHints } : {};
 
   if (isModuleEdit) {
     warnings.push('모듈 편집 화면(tempModule)이 열려 있습니다. 플러그인에서 모듈을 저장한 뒤 하단 "모듈 수정" 버튼을 누르면 플러그인 변경이 덮어써질 수 있으니, 편집창을 닫고 다시 확인하세요.');
@@ -290,7 +482,8 @@ function classifyDomSignals(signals) {
       loreScope: null,
       labelText: `${isModuleScreen ? '모듈' : '캐릭터'} Lua 트리거 스크립트`,
       placeholder,
-      liveTextPreview,
+      liveTextPreview: liveTextPreview || (isModuleScreen ? moduleDomHints?.textPreview || '' : ''),
+      ...modHintsExtra,
       warnings,
     };
   }
@@ -312,7 +505,8 @@ function classifyDomSignals(signals) {
       regexIndex: regexIdx,
       labelText: `${isModuleScreen ? '모듈' : '캐릭터'} 정규식 스크립트${regexIdx !== null ? ` #${regexIdx + 1}` : ''}`,
       placeholder,
-      liveTextPreview,
+      liveTextPreview: liveTextPreview || (isModuleScreen ? moduleDomHints?.textPreview || '' : ''),
+      ...modHintsExtra,
       warnings,
     };
   }
@@ -347,34 +541,93 @@ function classifyDomSignals(signals) {
       loreScope,
       labelText: `${scopeLabel} #${loreIdx + 1} · ${fieldLabelMap[fieldKey] || fieldKey}`,
       placeholder,
-      liveTextPreview,
+      liveTextPreview: liveTextPreview || (isModuleScreen ? moduleDomHints?.textPreview || '' : ''),
+      ...modHintsExtra,
       warnings,
     };
   }
 
-  // 6. Module screen non-lorebook fields (dedicated module_field target)
+  // 6. Module screen (active tab routing + dedicated module_field targets)
   if (isModuleScreen) {
-    let fieldKey = 'description';
-    if (
+    const isExplicitBgEmbed =
       normSettingId === 'module.backgroundembedding' ||
       matchAny(nearbyLabel, ['백그라운드 임베딩', 'background embedding', 'background html']) ||
-      matchAny(placeholder, ['백그라운드 임베딩', 'background embedding'])
-    ) {
-      fieldKey = 'backgroundEmbedding';
-    } else if (
+      matchAny(placeholder, ['백그라운드 임베딩', 'background embedding']);
+    const isExplicitToggle =
       normSettingId === 'module.custommoduletoggle' ||
-      matchAny(nearbyLabel, ['커스텀 토글', 'custom toggle', '토글', 'toggle'])
-    ) {
-      fieldKey = 'customModuleToggle';
-    } else if (
+      matchAny(nearbyLabel, ['커스텀 토글', 'custom toggle', '토글', 'toggle']);
+    const isExplicitNamespace =
       normSettingId === 'module.namespace' ||
-      matchAny(nearbyLabel, ['네임스페이스', 'namespace'])
-    ) {
-      fieldKey = 'namespace';
-    } else if (
+      matchAny(nearbyLabel, ['네임스페이스', 'namespace']);
+    const isExplicitName =
       normSettingId === 'module.name' ||
-      matchAny(nearbyLabel, ['이름', 'name'])
-    ) {
+      matchAny(nearbyLabel, ['이름', 'name']);
+    const isExplicitDesc =
+      normSettingId === 'module.description' ||
+      matchAny(nearbyLabel, ['설명', 'description']);
+    const hasExplicitModuleField =
+      isExplicitBgEmbed || isExplicitToggle || isExplicitNamespace || isExplicitName || isExplicitDesc;
+
+    if (!hasExplicitModuleField) {
+      const modTab = moduleDomHints?.tab || detectModuleTabKind(activeTabs);
+      if (modTab === 'lorebook') {
+        const openIdx = Number.isInteger(moduleDomHints?.openIdx) ? moduleDomHints.openIdx : null;
+        return {
+          detectedAt: Date.now(),
+          screen: 'module',
+          targetKind: 'module_lorebook',
+          fieldKey: 'content',
+          loreIndex: openIdx,
+          loreScope: 'module',
+          labelText: openIdx !== null ? `모듈 로어북 #${openIdx + 1} · 본문` : '모듈 로어북 목록',
+          placeholder,
+          liveTextPreview: liveTextPreview || moduleDomHints?.textPreview || '',
+          ...modHintsExtra,
+          warnings,
+        };
+      }
+      if (modTab === 'regex') {
+        const openIdx = Number.isInteger(moduleDomHints?.openIdx) ? moduleDomHints.openIdx : null;
+        return {
+          detectedAt: Date.now(),
+          screen: 'module',
+          targetKind: 'module_regex',
+          fieldKey: 'out',
+          loreIndex: null,
+          loreScope: null,
+          regexIndex: openIdx,
+          labelText: openIdx !== null ? `모듈 정규식 스크립트 #${openIdx + 1}` : '모듈 정규식 스크립트',
+          placeholder,
+          liveTextPreview: liveTextPreview || moduleDomHints?.textPreview || '',
+          ...modHintsExtra,
+          warnings,
+        };
+      }
+      if (modTab === 'trigger') {
+        return {
+          detectedAt: Date.now(),
+          screen: 'module',
+          targetKind: 'module_lua',
+          fieldKey: 'code',
+          loreIndex: null,
+          loreScope: null,
+          labelText: '모듈 Lua 트리거 스크립트',
+          placeholder,
+          liveTextPreview: liveTextPreview || moduleDomHints?.textPreview || '',
+          ...modHintsExtra,
+          warnings,
+        };
+      }
+    }
+
+    let fieldKey = 'description';
+    if (isExplicitBgEmbed) {
+      fieldKey = 'backgroundEmbedding';
+    } else if (isExplicitToggle) {
+      fieldKey = 'customModuleToggle';
+    } else if (isExplicitNamespace) {
+      fieldKey = 'namespace';
+    } else if (isExplicitName) {
       fieldKey = 'name';
     }
     return {
@@ -387,6 +640,7 @@ function classifyDomSignals(signals) {
       labelText: MODULE_FIELD_META[fieldKey]?.label || `모듈 · ${nearbyLabel || fieldKey}`,
       placeholder,
       liveTextPreview,
+      ...modHintsExtra,
       warnings,
     };
   }
@@ -588,6 +842,8 @@ async function inspectFocusedElement(rootDoc) {
     let luaButtonActive = false;
     let hasRegexContainer = false;
     let hasTriggerContainer = false;
+    let moduleScopeCandidate = null;
+    let moduleH2Node = null;
     // Check the focused element itself first (DefaultChatScreen puts `text-input-area` directly on <textarea>)
     let isChatInput = isChatElementAttrs(attrs);
     let isChatMessageEdit = String(attrs.class || '').includes('message-edit-area');
@@ -704,6 +960,10 @@ async function inspectFocusedElement(rootDoc) {
           if (cName === 'h2' || cName === 'h3') {
             const ht = String((await child.textContent()) || '').trim();
             if (ht && !headings.includes(ht)) headings.push(ht);
+            if (!moduleScopeCandidate && matchAny(ht, MODULE_HEADING_KEYWORDS)) {
+              moduleScopeCandidate = parent;
+              moduleH2Node = child;
+            }
             if (!foundCur) prevSiblingWasLuaBar = false;
           } else if (cName === 'span' || cName === 'label') {
             const st = String((await child.textContent()) || '').trim();
@@ -784,6 +1044,10 @@ async function inspectFocusedElement(rootDoc) {
           if (h2) {
             const ht = String((await h2.textContent()) || '').trim();
             if (ht && !headings.includes(ht)) headings.push(ht);
+            if (!moduleScopeCandidate && matchAny(ht, MODULE_HEADING_KEYWORDS)) {
+              moduleScopeCandidate = parent;
+              moduleH2Node = h2;
+            }
           }
         } catch {}
       }
@@ -806,8 +1070,30 @@ async function inspectFocusedElement(rootDoc) {
           const node = await allH2.at(i);
           const txt = node ? String((await node.textContent()) || '').trim() : '';
           if (txt && !headings.includes(txt)) headings.push(txt);
+          if (!moduleH2Node && matchAny(txt, MODULE_HEADING_KEYWORDS)) {
+            moduleH2Node = node;
+          }
         }
       } catch {}
+    }
+
+    let moduleDomHints = null;
+    const isModuleFocusContext =
+      !isChatInput &&
+      !isChatMessageEdit &&
+      (matchAny(headings.join(' | '), MODULE_HEADING_KEYWORDS) ||
+        String(settingId || '').trim().toLowerCase().startsWith('module.'));
+    if (isModuleFocusContext) {
+      const scopeRoot = moduleScopeCandidate || (moduleH2Node ? await resolveModuleScopeRoot(moduleH2Node, rootDoc) : rootDoc);
+      const tabLabels = await collectActiveTabs(scopeRoot);
+      for (const t of tabLabels) {
+        if (!activeTabs.includes(t)) activeTabs.push(t);
+      }
+      moduleDomHints = await collectModuleDomHints(scopeRoot, {
+        activeTabs,
+        focusedLoreIdx: loreIdx,
+        focusedTextPreview: liveTextPreview,
+      });
     }
 
     return classifyDomSignals({
@@ -828,6 +1114,7 @@ async function inspectFocusedElement(rootDoc) {
       chatIndex,
       isChatMessageEdit,
       tableRowIndex,
+      moduleDomHints,
     });
   } catch {
     return null;
@@ -842,6 +1129,7 @@ async function inspectVisibleScreen(rootDoc) {
   if (!rootDoc) return null;
   try {
     const headings = [];
+    let moduleH2Node = null;
     try {
       const allH2 = await rootDoc.querySelectorAll('h2');
       const count = allH2 ? Math.min(await allH2.length(), 6) : 0;
@@ -849,6 +1137,9 @@ async function inspectVisibleScreen(rootDoc) {
         const node = await allH2.at(i);
         const txt = node ? String((await node.textContent()) || '').trim() : '';
         if (txt && !headings.includes(txt)) headings.push(txt);
+        if (!moduleH2Node && matchAny(txt, MODULE_HEADING_KEYWORDS)) {
+          moduleH2Node = node;
+        }
       }
     } catch {}
 
@@ -867,8 +1158,20 @@ async function inspectVisibleScreen(rootDoc) {
       '로어북', 'lorebook',
     ];
     if (matchAny(headingText, modalHeadings)) {
-      const classified = classifyDomSignals({ headings });
-      if (classified.screen !== 'unknown') return classified;
+      if (matchAny(headingText, MODULE_HEADING_KEYWORDS)) {
+        const scopeRoot = moduleH2Node ? await resolveModuleScopeRoot(moduleH2Node, rootDoc) : rootDoc;
+        const activeTabs = await collectActiveTabs(scopeRoot);
+        const moduleDomHints = await collectModuleDomHints(scopeRoot, { activeTabs });
+        const classified = classifyDomSignals({ headings, activeTabs, moduleDomHints });
+        if (classified.screen !== 'unknown') return classified;
+      } else if (matchAny(headingText, ['로어북', 'lorebook'])) {
+        const activeTabs = await collectActiveTabs(rootDoc);
+        const classified = classifyDomSignals({ headings, activeTabs });
+        if (classified.screen !== 'unknown') return classified;
+      } else {
+        const classified = classifyDomSignals({ headings });
+        if (classified.screen !== 'unknown') return classified;
+      }
     }
 
     if (chatInputEl) {

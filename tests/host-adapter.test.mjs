@@ -654,5 +654,154 @@ test('HostAdapter supports Display guiHTML/customCSS, depthPrompt, alternateGree
   assert.equal(fmSnap.content, '추가 인사 2 (수정 전)');
 });
 
+test('HostAdapter auto-matches the open module via moduleDomHints instead of defaulting to db.modules[0], exposes loreSummary, and pins writes/undo to the right module', async () => {
+  const { resolveModuleIndex } = await import('../src/host-adapter.js');
 
+  const db = {
+    modules: [
+      {
+        id: 'mod-inlay',
+        name: '🆔인레이 모듈 마개조 V3.7.6',
+        description: 'AI챗고수가도리거야',
+        lorebook: Array.from({ length: 10 }, (_, i) => ({
+          comment: `인레이 항목 ${i + 1}`,
+          key: `inlay_${i}`,
+          content: `Inlay body ${i}`,
+          insertorder: 100,
+          alwaysActive: false,
+        })),
+        regex: [{ comment: 'Inlay Parser', in: 'a', out: 'b', type: 'editdisplay', flag: 'g', ableFlag: false }],
+        trigger: [],
+      },
+      {
+        id: 'mod-status',
+        name: '상태창 모듈',
+        description: '상태창 UI',
+        lorebook: [
+          { comment: 'Status Prompt', key: 'status', content: 'Render HUD', insertorder: 100, alwaysActive: true },
+        ],
+        regex: [],
+        trigger: [{ comment: '', type: 'manual', conditions: [], effect: [{ type: 'triggerlua', code: 'function onOutput() return 1 end' }] }],
+      },
+      {
+        id: 'mod-bg',
+        name: '배경 자동 변경 모듈',
+        description: '장소별 배경 자동 렌더링',
+        backgroundEmbedding: '<style>.bg-stage{background-size:cover;}</style>',
+        lorebook: [
+          { comment: 'ha0', key: '', content: 'init bg', insertorder: 100, alwaysActive: true },
+          {
+            comment: 'Global LoreBook Override',
+            key: '',
+            content: '- CRITICAL: This is a front-end rendering command.\nBackground List: airplane interior, airport, alley',
+            insertorder: 999,
+            alwaysActive: true,
+          },
+          { comment: 'Home', key: 'home', content: 'home scene', insertorder: 100, alwaysActive: false },
+        ],
+        regex: [
+          { comment: 'BG Tag Parser', in: '<bg>(.*?)</bg>', out: '<img src="$1">', type: 'editdisplay', flag: 'g', ableFlag: false },
+        ],
+        trigger: [],
+      },
+    ],
+    enabledModules: ['mod-inlay', 'mod-bg'],
+  };
 
+  const api = {
+    async getDatabase() { return JSON.parse(JSON.stringify(db)); },
+    async setDatabaseLite(patch) {
+      if (patch.modules) db.modules = JSON.parse(JSON.stringify(patch.modules));
+    },
+  };
+
+  const adapter = new HostAdapter(api);
+
+  // 1. Auto-detected module_lorebook with NO explicit moduleIndex resolves db.modules[2] (NOT modules[0]!)
+  const detectedCtx = {
+    screen: 'module',
+    targetKind: 'module_lorebook',
+    fieldKey: 'content',
+    loreIndex: 1,
+    loreScope: 'module',
+    moduleDomHints: {
+      tab: 'lorebook',
+      totalIdxCount: 3,
+      items: [
+        { idx: 0, title: 'ha0' },
+        { idx: 1, title: 'Global LoreBook Override' },
+        { idx: 2, title: 'Home' },
+      ],
+      openIdx: 1,
+      textPreview: '- CRITICAL: This is a front-end rendering command.\nBackground List: airplane interior',
+      fingerprint: 'lorebook#3#0:ha0,1:Global LoreBook Override,2:Home#1',
+    },
+  };
+
+  const snap = await adapter.readTargetSnapshot(detectedCtx);
+  assert.equal(snap.ok, true);
+  assert.equal(snap.target.moduleIndex, 2);
+  assert.equal(snap.moduleMatchedBy, 'dom_hints');
+  assert.equal(snap.hostBinding.moduleId, 'mod-bg');
+  assert.ok(snap.label.includes('배경 자동 변경 모듈'));
+  assert.ok(snap.label.includes('Global LoreBook Override'));
+  assert.ok(snap.content.startsWith('- CRITICAL: This is a front-end rendering command.'));
+  assert.equal(snap.loreCount, 3);
+  assert.equal(snap.loreSummary.length, 3);
+  assert.equal(snap.loreSummary[1].comment, 'Global LoreBook Override');
+
+  // 2. Switching to 기본 정보 tab (no DOM hints) remembers mod-bg via _lastMatchedModuleId
+  const basicSnap = await adapter.readTargetSnapshot({
+    screen: 'module',
+    targetKind: 'module_field',
+    fieldKey: 'description',
+  });
+  assert.equal(basicSnap.ok, true);
+  assert.equal(basicSnap.target.moduleIndex, 2);
+  assert.equal(basicSnap.moduleMatchedBy, 'preferred');
+  assert.equal(basicSnap.content, '장소별 배경 자동 렌더링');
+
+  // 3. Preview + Apply patch_text updates ONLY db.modules[2].lorebook[1] (never modules[0]) and Undo restores cleanly
+  const prev = await adapter.previewProposal(
+    { action: 'patch_text', edits: [{ before: 'alley', after: 'alley, rooftop' }] },
+    detectedCtx
+  );
+  assert.equal(prev.ok, true);
+  assert.equal(prev.target.moduleIndex, 2);
+  assert.equal(prev.hostBinding.moduleId, 'mod-bg');
+
+  const applied = await adapter.applyProposal(
+    { action: 'patch_text', edits: [{ before: 'alley', after: 'alley, rooftop' }] },
+    prev.target,
+    { hostBinding: prev.hostBinding }
+  );
+  assert.equal(applied.ok, true);
+  assert.ok(db.modules[2].lorebook[1].content.includes('alley, rooftop'));
+  assert.equal(db.modules[0].lorebook[1].content, 'Inlay body 1', 'modules[0] must remain completely untouched');
+
+  await adapter.undo(applied.undoId);
+  assert.equal(
+    db.modules[2].lorebook[1].content,
+    '- CRITICAL: This is a front-end rendering command.\nBackground List: airplane interior, airport, alley'
+  );
+
+  // 4. Title-only lorebook matching (before expanding any entry), regex-tab backgroundEmbedding matching, and Lua preview matching
+  const titleOnlyMatch = resolveModuleIndex(db.modules, {
+    targetKind: 'module_lorebook',
+    moduleDomHints: { tab: 'lorebook', totalIdxCount: 3, items: [{ idx: 0, title: 'ha0' }, { idx: 2, title: 'Home' }], openIdx: null, textPreview: '' },
+  });
+  assert.equal(titleOnlyMatch.index, 2);
+
+  const regexBgMatch = resolveModuleIndex(db.modules, {
+    targetKind: 'module_field',
+    fieldKey: 'backgroundEmbedding',
+    moduleDomHints: { tab: 'regex', totalIdxCount: 1, items: [{ idx: 0, title: 'BG Tag Parser' }], openIdx: null, textPreview: '' },
+  });
+  assert.equal(regexBgMatch.index, 2);
+
+  const luaMatch = resolveModuleIndex(db.modules, {
+    targetKind: 'module_lua',
+    moduleDomHints: { tab: 'trigger', totalIdxCount: 0, items: [], openIdx: null, textPreview: 'function onOutput() return 1 end' },
+  });
+  assert.equal(luaMatch.index, 1);
+});

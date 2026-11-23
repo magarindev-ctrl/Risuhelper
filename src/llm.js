@@ -438,6 +438,9 @@ function buildConversationMessages({ context, snapshot, extraContext, history, u
   if (extraContext?.loreSummary) {
     extraBlocks.push(`[로어북 목록 요약]\n${JSON.stringify(extraContext.loreSummary, null, 2)}`);
   }
+  if (extraContext?.moduleLoreSummary) {
+    extraBlocks.push(`[현재 모듈 로어북 목록 요약]\n${JSON.stringify(extraContext.moduleLoreSummary, null, 2)}`);
+  }
   if (extraContext?.personasSummary) {
     extraBlocks.push(`[페르소나 목록 요약]\n${JSON.stringify(extraContext.personasSummary, null, 2)}`);
   }

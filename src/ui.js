@@ -112,6 +112,7 @@ class RisuHelperApp {
       ctx.greetingIndex ?? '',
       ctx.messageIndex ?? '',
       ctx.moduleIndex ?? '',
+      ctx.moduleDomHints?.fingerprint || '',
       ctx.labelText || '',
     ].join('|');
   }
@@ -410,6 +411,15 @@ class RisuHelperApp {
           }
         }
       } catch {}
+    }
+
+    if (
+      this.settings.includeLoreSummary &&
+      this.activeSnapshot?.ok &&
+      this.activeSnapshot.target?.targetKind === 'module_lorebook' &&
+      Array.isArray(this.activeSnapshot.loreSummary)
+    ) {
+      extra.moduleLoreSummary = this.activeSnapshot.loreSummary.slice(0, 30);
     }
 
     if (ctx.targetKind === 'persona' || ctx.screen === 'persona') {
@@ -992,11 +1002,15 @@ class RisuHelperApp {
       (ctx.targetKind === 'module_field' || ctx.targetKind === 'module_lorebook' || ctx.targetKind === 'module_lua' || ctx.targetKind === 'module_regex') &&
       Array.isArray(this.activeSnapshot.modulesSummary)
     ) {
-      return h(doc, 'select', {
+      const selectedModIdx = ctx.moduleIndex ?? this.activeSnapshot.target?.moduleIndex ?? 0;
+      const modSel = h(doc, 'select', {
         class: 'rh-select',
         onchange: async (e) => {
           const base = this.manualTarget || { ...ctx };
           base.moduleIndex = Number(e.target.value);
+          if (ctx.targetKind === 'module_lorebook') base.loreIndex = null;
+          if (ctx.targetKind === 'module_regex') base.regexIndex = null;
+          delete base.moduleDomHints;
           this.manualTarget = base;
           await this.refreshContextSnapshot();
           this.render();
@@ -1005,10 +1019,38 @@ class RisuHelperApp {
         ...this.activeSnapshot.modulesSummary.map(item =>
           h(doc, 'option', {
             value: String(item.index),
-            selected: (ctx.moduleIndex ?? 0) === item.index,
+            selected: selectedModIdx === item.index,
           }, `${item.name || '(무제)'} (로어북 ${item.loreCount}개${item.enabled ? ', 활성' : ''})`)
         )
       );
+
+      if (ctx.targetKind === 'module_lorebook' && Array.isArray(this.activeSnapshot.loreSummary)) {
+        const selectedLoreIdx = ctx.loreIndex ?? this.activeSnapshot.target?.loreIndex ?? null;
+        const loreSel = h(doc, 'select', {
+          class: 'rh-select',
+          onchange: async (e) => {
+            const val = e.target.value;
+            const base = this.manualTarget || { ...ctx };
+            base.moduleIndex = selectedModIdx;
+            base.loreIndex = val === '' ? null : Number(val);
+            delete base.moduleDomHints;
+            this.manualTarget = base;
+            await this.refreshContextSnapshot();
+            this.render();
+          },
+        },
+          h(doc, 'option', { value: '', selected: selectedLoreIdx === null || selectedLoreIdx === undefined }, '모듈 로어북 항목 선택 (미선택 시 전체/신규 생성)'),
+          ...this.activeSnapshot.loreSummary.map(item =>
+            h(doc, 'option', {
+              value: String(item.index),
+              selected: selectedLoreIdx === item.index,
+            }, `#${item.index + 1} ${item.comment || '(무제)'}${item.key ? ` [${item.key.slice(0, 24)}]` : ''}`)
+          )
+        );
+        return [modSel, loreSel];
+      }
+
+      return modSel;
     }
     return null;
   }
@@ -1294,7 +1336,10 @@ class RisuHelperApp {
     ];
 
     if (subPicker) {
-      contextBarChildren.push(h(doc, 'div', { class: 'rh-row' }, subPicker));
+      const rows = Array.isArray(subPicker) ? subPicker : [subPicker];
+      for (const pickerEl of rows) {
+        if (pickerEl) contextBarChildren.push(h(doc, 'div', { class: 'rh-row' }, pickerEl));
+      }
     }
 
     contextBarChildren.push(

@@ -1138,7 +1138,279 @@ test('ModuleMenu fields resolve to module_field and Chat.svelte bubble editors r
   assert.equal(msgCtx.labelText, '채팅 메시지 #3 수정');
 });
 
+test('PocketRisu & upstream RisuAI ModuleMenu detects active tabs, expanded lorebooks without focus, nested folders, and collects moduleDomHints', async () => {
+  const { inspectVisibleScreen } = await import('../src/focus-detector.js');
 
+  function matchesSimpleSelector(node, part) {
+    const p = part.trim();
+    const attrs = parseOpeningTagAttrs(node._outerHtml);
+    const clsList = String(node._className || attrs.class || '').split(/\s+/).filter(Boolean);
+    if (p === 'h2' || p === 'textarea' || p === 'input' || p === 'td' || p === 'button') {
+      return node._tag === p;
+    }
+    if (p === '[role="tab"]') return attrs.role === 'tab';
+    if (p === '[role="tab"][aria-selected="true"]') return attrs.role === 'tab' && attrs['aria-selected'] === 'true';
+    if (p === 'button.bg-darkbutton') return node._tag === 'button' && clsList.includes('bg-darkbutton');
+    if (p === 'button.bg-selected') return node._tag === 'button' && clsList.includes('bg-selected');
+    if (p === '[data-risu-idx]') return attrs['data-risu-idx'] !== undefined;
+    if (p === 'button.valuer') return node._tag === 'button' && clsList.includes('valuer');
+    if (p === '[contenteditable="true"]') return attrs.contenteditable === 'true';
+    if (p === '[contenteditable=""]') return attrs.contenteditable === '';
+    if (p.includes(':focus')) return Boolean(node._focused);
+    return false;
+  }
 
+  function makeQueryNode({ tag, outerHtml = '', text = '', className = '', children = [], focused = false }) {
+    const resolvedOuter = outerHtml || `<${tag.toLowerCase()}${className ? ` class="${className}"` : ''}></${tag.toLowerCase()}>`;
+    const node = {
+      _tag: tag.toLowerCase(),
+      _outerHtml: resolvedOuter,
+      _className: className,
+      _parent: null,
+      _children: children,
+      _focused: focused,
+      async getOuterHTML() { return node._outerHtml; },
+      async nodeName() { return tag.toUpperCase(); },
+      async textContent() { return text; },
+      async innerText() { return text; },
+      async getClassName() { return node._className; },
+      async getParent() { return node._parent; },
+      async getChildren() {
+        return {
+          async length() { return node._children.length; },
+          async at(i) { return node._children[i] || null; },
+        };
+      },
+      async querySelectorAll(sel) {
+        const parts = sel.split(',').map(s => s.trim()).filter(Boolean);
+        const out = [];
+        const walk = (cur) => {
+          for (const c of cur._children) {
+            if (parts.some(p => matchesSimpleSelector(c, p))) out.push(c);
+            walk(c);
+          }
+        };
+        walk(node);
+        return {
+          async length() { return out.length; },
+          async at(i) { return out[i] || null; },
+        };
+      },
+      async querySelector(sel) {
+        const list = await node.querySelectorAll(sel);
+        return (await list.length()) > 0 ? await list.at(0) : null;
+      },
+    };
+    for (const c of children) c._parent = node;
+    return node;
+  }
 
+  // Build exact PocketRisu `모듈 수정 -> 로어북` DOM matching the bug report
+  const promptText = '- CRITICAL: This is a front-end rendering command.\nBackground List: airplane interior, airport, alley';
+  const promptEditor = makeQueryNode({
+    tag: 'div',
+    outerHtml: '<div class="w-full h-full" contenteditable="true" role="textbox"></div>',
+    text: promptText,
+  });
+  const promptWrap = makeQueryNode({
+    tag: 'div',
+    className: 'border border-darkborderc relative flex flex-col n-scroll rounded-md',
+    children: [makeQueryNode({ tag: 'div', className: 'relative flex-1', children: [promptEditor] })],
+  });
 
+  const loreItem0 = makeQueryNode({
+    tag: 'div',
+    outerHtml: '<div class="w-full flex flex-col" data-risu-idx="0" data-risu-idgroup="g1"></div>',
+    children: [
+      makeQueryNode({
+        tag: 'div',
+        className: 'flex items-center w-full p-1',
+        children: [
+          makeQueryNode({ tag: 'button', className: 'endflex valuer border-darkborderc', text: 'ha0' }),
+        ],
+      }),
+    ],
+  });
+
+  const loreItem1 = makeQueryNode({
+    tag: 'div',
+    outerHtml: '<div class="w-full flex flex-col" data-risu-idx="1" data-risu-idgroup="g1"></div>',
+    children: [
+      makeQueryNode({
+        tag: 'div',
+        className: 'flex items-center w-full p-1',
+        children: [
+          makeQueryNode({ tag: 'button', className: 'endflex valuer border-darkborderc', text: 'Global LoreBook Override' }),
+        ],
+      }),
+      makeQueryNode({
+        tag: 'div',
+        className: 'border-0 outline-hidden w-full mt-2 flex flex-col mb-2',
+        children: [
+          makeQueryNode({ tag: 'span', className: 'text-textcolor mt-6', text: '이름' }),
+          makeQueryNode({ tag: 'input', outerHtml: '<input type="text">' }),
+          makeQueryNode({ tag: 'span', className: 'text-textcolor mt-4', text: '배치 순서' }),
+          makeQueryNode({ tag: 'input', outerHtml: '<input type="number">' }),
+          makeQueryNode({ tag: 'span', className: 'text-textcolor mt-4', text: '프롬프트' }),
+          promptWrap,
+        ],
+      }),
+    ],
+  });
+
+  const loreItem2 = makeQueryNode({
+    tag: 'div',
+    outerHtml: '<div class="w-full flex flex-col" data-risu-idx="2" data-risu-idgroup="g1"></div>',
+    children: [
+      makeQueryNode({
+        tag: 'div',
+        className: 'flex items-center w-full p-1',
+        children: [
+          makeQueryNode({ tag: 'button', className: 'endflex valuer border-darkborderc', text: 'Home' }),
+        ],
+      }),
+    ],
+  });
+
+  // Hidden folder-child placeholder (renders empty div with data-risu-idx & no button.valuer)
+  const hiddenLorePlaceholder = makeQueryNode({
+    tag: 'div',
+    outerHtml: '<div data-risu-idx="3" style="display: none;"></div>',
+  });
+
+  const modulePage = makeQueryNode({
+    tag: 'div',
+    className: 'module-settings-page',
+    children: [
+      makeQueryNode({ tag: 'h2', text: '모듈 수정' }),
+      makeQueryNode({
+        tag: 'div',
+        className: 'setting-tabs',
+        children: [
+          makeQueryNode({ tag: 'button', outerHtml: '<button role="tab" aria-selected="false">기본 정보</button>', text: '기본 정보' }),
+          makeQueryNode({ tag: 'button', outerHtml: '<button role="tab" aria-selected="true">로어북</button>', text: '로어북' }),
+          makeQueryNode({ tag: 'button', outerHtml: '<button role="tab" aria-selected="false">정규식 스크립트</button>', text: '정규식 스크립트' }),
+          makeQueryNode({ tag: 'button', outerHtml: '<button role="tab" aria-selected="false">트리거 스크립트</button>', text: '트리거 스크립트' }),
+        ],
+      }),
+      makeQueryNode({
+        tag: 'div',
+        className: 'lorebook-list',
+        children: [loreItem0, loreItem1, loreItem2, hiddenLorePlaceholder],
+      }),
+    ],
+  });
+
+  const rootDoc = makeQueryNode({
+    tag: 'html',
+    children: [modulePage],
+  });
+
+  // 1. Without focus (docked mode after clicking tab / expanding accordion / clicking '커서 재감지')
+  const screenCtx = await inspectVisibleScreen(rootDoc);
+  assert.ok(screenCtx);
+  assert.equal(screenCtx.targetKind, 'module_lorebook');
+  assert.equal(screenCtx.loreIndex, 1);
+  assert.equal(screenCtx.fieldKey, 'content');
+  assert.equal(screenCtx.labelText, '모듈 로어북 #2 · 본문');
+  assert.ok(screenCtx.moduleDomHints);
+  assert.equal(screenCtx.moduleDomHints.tab, 'lorebook');
+  assert.equal(screenCtx.moduleDomHints.openIdx, 1);
+  assert.equal(screenCtx.moduleDomHints.totalIdxCount, 4);
+  assert.deepEqual(screenCtx.moduleDomHints.items, [
+    { idx: 0, title: 'ha0' },
+    { idx: 1, title: 'Global LoreBook Override' },
+    { idx: 2, title: 'Home' },
+  ]);
+  assert.ok(screenCtx.moduleDomHints.textPreview.startsWith('- CRITICAL: This is a front-end rendering command.'));
+
+  // 2. With focus inside the prompt contenteditable editor
+  promptEditor._focused = true;
+  const focusCtx = await inspectFocusedElement(rootDoc);
+  assert.ok(focusCtx);
+  assert.equal(focusCtx.targetKind, 'module_lorebook');
+  assert.equal(focusCtx.loreIndex, 1);
+  assert.equal(focusCtx.fieldKey, 'content');
+  assert.equal(focusCtx.moduleDomHints?.items.length, 3);
+  assert.equal(focusCtx.moduleDomHints?.items[1].title, 'Global LoreBook Override');
+  promptEditor._focused = false;
+
+  // 3. Upstream RisuAI regex tab (button.bg-darkbutton) + focused backgroundEmbedding keeps moduleDomHints
+  const bgTextarea = makeQueryNode({
+    tag: 'textarea',
+    outerHtml: '<textarea placeholder="백그라운드 임베딩"></textarea>',
+  });
+  const regexPage = makeQueryNode({
+    tag: 'div',
+    children: [
+      makeQueryNode({ tag: 'h2', text: '모듈 수정' }),
+      makeQueryNode({
+        tag: 'div',
+        children: [
+          makeQueryNode({ tag: 'button', className: 'p-2 flex-1 bg-darkbutton', text: '정규식 스크립트' }),
+        ],
+      }),
+      bgTextarea,
+      makeQueryNode({
+        tag: 'div',
+        outerHtml: '<div data-risu-idx="0"></div>',
+        children: [
+          makeQueryNode({ tag: 'button', className: 'endflex valuer', text: 'BG Tag Parser' }),
+        ],
+      }),
+    ],
+  });
+  const regexDoc = makeQueryNode({ tag: 'html', children: [regexPage] });
+
+  const regexScreenCtx = await inspectVisibleScreen(regexDoc);
+  assert.equal(regexScreenCtx.targetKind, 'module_regex');
+  assert.equal(regexScreenCtx.moduleDomHints?.tab, 'regex');
+  assert.deepEqual(regexScreenCtx.moduleDomHints?.items, [{ idx: 0, title: 'BG Tag Parser' }]);
+
+  bgTextarea._focused = true;
+  const bgFocusCtx = await inspectFocusedElement(regexDoc);
+  assert.equal(bgFocusCtx.targetKind, 'module_field');
+  assert.equal(bgFocusCtx.fieldKey, 'backgroundEmbedding');
+  assert.equal(bgFocusCtx.moduleDomHints?.tab, 'regex');
+  assert.deepEqual(bgFocusCtx.moduleDomHints?.items, [{ idx: 0, title: 'BG Tag Parser' }]);
+  bgTextarea._focused = false;
+
+  // 4. Nested open folder containing an open child lorebook picks innermost child idx (not folder idx)
+  const nestedChildEditor = makeQueryNode({
+    tag: 'div',
+    outerHtml: '<div contenteditable="true"></div>',
+    text: 'Child prompt body inside folder',
+  });
+  const folderDoc = makeQueryNode({
+    tag: 'html',
+    children: [
+      makeQueryNode({
+        tag: 'div',
+        children: [
+          makeQueryNode({ tag: 'h2', text: '모듈 수정' }),
+          makeQueryNode({ tag: 'button', outerHtml: '<button role="tab" aria-selected="true">로어북</button>', text: '로어북' }),
+          makeQueryNode({
+            tag: 'div',
+            outerHtml: '<div data-risu-idx="0"></div>',
+            children: [
+              makeQueryNode({ tag: 'button', className: 'endflex valuer', text: 'My Folder' }),
+              makeQueryNode({ tag: 'input', outerHtml: '<input type="text">' }),
+              makeQueryNode({
+                tag: 'div',
+                outerHtml: '<div data-risu-idx="2"></div>',
+                children: [
+                  makeQueryNode({ tag: 'button', className: 'endflex valuer', text: 'Nested Entry' }),
+                  nestedChildEditor,
+                ],
+              }),
+            ],
+          }),
+        ],
+      }),
+    ],
+  });
+  const folderCtx = await inspectVisibleScreen(folderDoc);
+  assert.equal(folderCtx.targetKind, 'module_lorebook');
+  assert.equal(folderCtx.loreIndex, 2);
+  assert.equal(folderCtx.moduleDomHints?.textPreview, 'Child prompt body inside folder');
+});

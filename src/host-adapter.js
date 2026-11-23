@@ -276,6 +276,189 @@ function isMissingMethodError(err) {
   return msg.includes('not found') || msg.includes('not a function') || msg.includes('undefined');
 }
 
+const GENERIC_ITEM_TITLES = new Set(['unnamed lore', 'unnamed folder', 'unnamed script', '']);
+
+function normalizeMatchText(str) {
+  return String(str || '').replace(/\r\n/g, '\n').replace(/\s+/g, ' ').trim();
+}
+
+function expectedLoreDisplayTitle(entry) {
+  if (!entry || typeof entry !== 'object') return '';
+  if (entry.mode === 'folder') {
+    return String(entry.comment || '').trim() || 'Unnamed Folder';
+  }
+  return String(entry.comment || '').trim() || String(entry.key || '').trim() || 'Unnamed Lore';
+}
+
+function expectedRegexDisplayTitle(entry) {
+  if (!entry || typeof entry !== 'object') return '';
+  return String(entry.comment || '').trim() || 'Unnamed Script';
+}
+
+function scorePreviewMatch(candidateText, normPreview) {
+  if (!normPreview || normPreview.length < 4) return 0;
+  const normCandidate = normalizeMatchText(candidateText);
+  if (!normCandidate) return 0;
+  if (normCandidate === normPreview) return 1500;
+  if (normCandidate.startsWith(normPreview)) return 1000;
+  if (normCandidate.length >= 4 && normPreview.startsWith(normCandidate)) return 900;
+  if (normPreview.length >= 12 && normCandidate.includes(normPreview)) return 600;
+  return 0;
+}
+
+/**
+ * Resolves the index of the currently edited module in `db.modules`.
+ * Priority:
+ *  1. Explicit `target.moduleIndex` (manual user selection or pinned proposal)
+ *  2. DOM fingerprint matching via `target.moduleDomHints` (lorebook/regex titles, expanded text preview, assets)
+ *  3. Last matched module ID (`preferredModuleId`) when switching tabs inside the same module
+ *  4. Fallback to 0 (first installed module)
+ */
+function resolveModuleIndex(modules, target, preferredModuleId = null) {
+  if (!Array.isArray(modules) || modules.length === 0) return { index: null, matchedBy: 'none' };
+
+  if (Number.isInteger(target?.moduleIndex) && target.moduleIndex >= 0 && target.moduleIndex < modules.length) {
+    return { index: target.moduleIndex, matchedBy: 'explicit' };
+  }
+
+  const hints = target?.moduleDomHints;
+  if (hints && typeof hints === 'object') {
+    const tab = hints.tab || (
+      target.targetKind === 'module_lorebook' ? 'lorebook' :
+      target.targetKind === 'module_regex' ? 'regex' :
+      target.targetKind === 'module_lua' ? 'trigger' : null
+    );
+    const items = Array.isArray(hints.items) ? hints.items : [];
+    const totalIdxCount = Number.isInteger(hints.totalIdxCount) ? hints.totalIdxCount : 0;
+    const rawPreview = String(hints.textPreview || target?.liveTextPreview || '');
+    const normPreview = normalizeMatchText(rawPreview).slice(0, 240);
+    const openIdx = Number.isInteger(target?.loreIndex)
+      ? target.loreIndex
+      : Number.isInteger(target?.regexIndex)
+        ? target.regexIndex
+        : (Number.isInteger(hints.openIdx) ? hints.openIdx : null);
+    const assetNames = Array.isArray(hints.assetNames) ? hints.assetNames : [];
+
+    let bestIdx = -1;
+    let bestScore = 0;
+
+    for (let i = 0; i < modules.length; i++) {
+      const m = modules[i];
+      if (!m || typeof m !== 'object') continue;
+      let score = 0;
+
+      if (tab === 'lorebook' || (tab === null && target.targetKind === 'module_lorebook')) {
+        const list = Array.isArray(m.lorebook) ? m.lorebook : [];
+        if (totalIdxCount > 0) {
+          if (list.length === 0) score -= 20;
+          else if (list.length === totalIdxCount) score += 10;
+        }
+        const allTitleSet = new Set(list.map(e => normalizeMatchText(expectedLoreDisplayTitle(e)).toLowerCase()));
+        for (const item of items) {
+          const normTitle = normalizeMatchText(item.title).toLowerCase();
+          const isGeneric = GENERIC_ITEM_TITLES.has(normTitle);
+          const atIdx = list[item.idx];
+          if (atIdx) {
+            const expected = normalizeMatchText(expectedLoreDisplayTitle(atIdx)).toLowerCase();
+            if (expected === normTitle) {
+              score += isGeneric ? 2 : 30;
+              continue;
+            }
+          }
+          if (!isGeneric && allTitleSet.has(normTitle)) {
+            score += 8;
+          }
+        }
+        if (normPreview.length >= 4) {
+          if (openIdx !== null && list[openIdx]) {
+            const openHit = scorePreviewMatch(list[openIdx].content, normPreview);
+            if (openHit > 0) score += openHit;
+          } else {
+            let maxHit = 0;
+            for (const e of list) {
+              const hit = scorePreviewMatch(e?.content, normPreview);
+              if (hit > maxHit) maxHit = hit;
+            }
+            score += maxHit;
+          }
+        }
+      } else if (tab === 'regex' || (tab === null && target.targetKind === 'module_regex')) {
+        const list = Array.isArray(m.regex) ? m.regex : [];
+        if (totalIdxCount > 0) {
+          if (list.length === 0) score -= 20;
+          else if (list.length === totalIdxCount) score += 10;
+        }
+        const allTitleSet = new Set(list.map(e => normalizeMatchText(expectedRegexDisplayTitle(e)).toLowerCase()));
+        for (const item of items) {
+          const normTitle = normalizeMatchText(item.title).toLowerCase();
+          const isGeneric = GENERIC_ITEM_TITLES.has(normTitle);
+          const atIdx = list[item.idx];
+          if (atIdx) {
+            const expected = normalizeMatchText(expectedRegexDisplayTitle(atIdx)).toLowerCase();
+            if (expected === normTitle) {
+              score += isGeneric ? 2 : 30;
+              continue;
+            }
+          }
+          if (!isGeneric && allTitleSet.has(normTitle)) {
+            score += 8;
+          }
+        }
+        if (normPreview.length >= 4) {
+          if (target.targetKind === 'module_field' && target.fieldKey === 'backgroundEmbedding') {
+            score += scorePreviewMatch(m.backgroundEmbedding, normPreview);
+          } else if (openIdx !== null && list[openIdx]) {
+            score += scorePreviewMatch(list[openIdx].out, normPreview);
+          } else {
+            const bgHit = scorePreviewMatch(m.backgroundEmbedding, normPreview);
+            let maxRegexHit = 0;
+            for (const e of list) {
+              const hit = scorePreviewMatch(e?.out, normPreview);
+              if (hit > maxRegexHit) maxRegexHit = hit;
+            }
+            score += Math.max(bgHit, maxRegexHit);
+          }
+        }
+      } else if (tab === 'trigger' || target.targetKind === 'module_lua') {
+        if (normPreview.length >= 4) {
+          const lua = extractLuaFromTriggers(m.trigger);
+          score += scorePreviewMatch(lua.code, normPreview);
+        }
+      } else if (tab === 'assets' && assetNames.length > 0) {
+        const modAssets = Array.isArray(m.assets) ? m.assets : [];
+        const assetSet = new Set(modAssets.map(a => String(a?.[0] || '').trim()));
+        for (const name of assetNames) {
+          if (assetSet.has(name)) score += 20;
+        }
+      } else if (target.targetKind === 'module_field' && normPreview.length >= 4) {
+        const fk = target.fieldKey || 'description';
+        score += scorePreviewMatch(m[fk], normPreview);
+      }
+
+      if (score > 0 && preferredModuleId && m.id === preferredModuleId) {
+        score += 1;
+      }
+      if (score > bestScore) {
+        bestScore = score;
+        bestIdx = i;
+      }
+    }
+
+    if (bestIdx !== -1 && bestScore > 0) {
+      return { index: bestIdx, matchedBy: 'dom_hints', score: bestScore };
+    }
+  }
+
+  if (preferredModuleId) {
+    const prefIdx = modules.findIndex(m => m && m.id === preferredModuleId);
+    if (prefIdx !== -1) {
+      return { index: prefIdx, matchedBy: 'preferred' };
+    }
+  }
+
+  return { index: 0, matchedBy: 'fallback' };
+}
+
 /**
  * Cross-fork safe adapter for RisuAI Plugin API v3.
  * Works with kwaroran/Risuai, PocketRisu, RisuBard, HaejeokRisuai, RisuNest, and RisuAI-Hardened.
@@ -286,6 +469,20 @@ class HostAdapter {
     this.undoStack = [];
     this.maxUndo = 20;
     this._probedFlavor = null;
+    this._lastMatchedModuleId = null;
+  }
+
+  _resolveWriteModuleIndex(modules, proposal, target, options = {}) {
+    if (Number.isInteger(proposal?.moduleIndex) && modules[proposal.moduleIndex]) {
+      return proposal.moduleIndex;
+    }
+    const pinnedId = options?.hostBinding?.moduleId || null;
+    if (pinnedId) {
+      const byId = modules.findIndex(m => m && m.id === pinnedId);
+      if (byId !== -1) return byId;
+    }
+    const res = resolveModuleIndex(modules, target, this._lastMatchedModuleId);
+    return res.index ?? 0;
   }
 
   /**
@@ -814,9 +1011,13 @@ class HostAdapter {
     ) {
       const { modules, enabledModules, permissionDenied } = await this.readModules();
       if (permissionDenied) return { ok: false, reason: DB_PERMISSION_ERROR, content: '' };
-      const modIdx = Number.isInteger(t.moduleIndex) ? t.moduleIndex : (modules.length > 0 ? 0 : null);
+      const resolvedMod = resolveModuleIndex(modules, t, this._lastMatchedModuleId);
+      const modIdx = resolvedMod.index;
       const mod = modIdx !== null ? modules[modIdx] : null;
       if (!mod) return { ok: true, target: t, label: '설치된 모듈 없음', content: '', modulesSummary: [] };
+      if (mod.id && (resolvedMod.matchedBy === 'explicit' || resolvedMod.matchedBy === 'dom_hints')) {
+        this._lastMatchedModuleId = mod.id;
+      }
 
       let content = '';
       let label = `모듈: ${mod.name}`;
@@ -825,6 +1026,11 @@ class HostAdapter {
       let hasOtherTriggers = false;
       let otherTriggerCount = 0;
       let resolvedFieldKey = t.fieldKey;
+      let resolvedLoreIdx = t.loreIndex;
+      let resolvedRegexIdx = t.regexIndex;
+      let loreCount;
+      let loreSummary;
+      let regexList;
 
       if (t.targetKind === 'module_field') {
         const fieldKey = t.fieldKey || 'backgroundEmbedding';
@@ -843,31 +1049,53 @@ class HostAdapter {
         label = `모듈 Lua (${mod.name})`;
       } else if (t.targetKind === 'module_regex') {
         const list = Array.isArray(mod.regex) ? mod.regex : [];
-        const rIdx = Number.isInteger(t.regexIndex) ? t.regexIndex : null;
-        entry = rIdx !== null && list[rIdx] ? list[rIdx] : null;
+        const rIdx = Number.isInteger(t.regexIndex) && list[t.regexIndex] ? t.regexIndex : null;
+        resolvedRegexIdx = rIdx;
+        entry = rIdx !== null ? list[rIdx] : null;
         content = entry ? JSON.stringify(entry, null, 2) : '';
         label = entry ? `모듈 정규식 (${mod.name} #${rIdx + 1})` : `모듈 정규식 (${mod.name}, ${list.length}개)`;
+        regexList = list.slice(0, 30);
       } else {
         const list = Array.isArray(mod.lorebook) ? mod.lorebook : [];
-        const lIdx = Number.isInteger(t.loreIndex) ? t.loreIndex : null;
-        entry = lIdx !== null && list[lIdx] ? list[lIdx] : null;
+        const lIdx = Number.isInteger(t.loreIndex) && list[t.loreIndex] ? t.loreIndex : null;
+        resolvedLoreIdx = lIdx;
+        entry = lIdx !== null ? list[lIdx] : null;
         const fieldKey = t.fieldKey || 'content';
         const fieldErr = validateAllowedFieldKey('module_lorebook', fieldKey);
         if (fieldErr) return { ok: false, reason: fieldErr, content: '' };
         resolvedFieldKey = fieldKey;
         content = entry ? String(entry[fieldKey] ?? '') : '';
-        label = entry ? `모듈 로어북 (${mod.name} #${lIdx + 1})` : `모듈 로어북 (${mod.name}, ${list.length}개)`;
+        const entryTitle = entry?.comment ? ` · ${entry.comment}` : '';
+        label = entry ? `모듈 로어북 (${mod.name} #${lIdx + 1}${entryTitle})` : `모듈 로어북 (${mod.name}, ${list.length}개)`;
+        loreCount = list.length;
+        loreSummary = list.slice(0, 40).map((e, i) => ({
+          index: i,
+          comment: e.comment || '',
+          key: e.key || '',
+          alwaysActive: Boolean(e.alwaysActive),
+          insertorder: e.insertorder ?? 100,
+          mode: e.mode || 'normal',
+        }));
       }
       return {
         ok: true,
-        target: { ...t, moduleIndex: modIdx, fieldKey: resolvedFieldKey },
+        target: {
+          ...t,
+          moduleIndex: modIdx,
+          fieldKey: resolvedFieldKey,
+          ...(t.targetKind === 'module_lorebook' ? { loreIndex: resolvedLoreIdx } : {}),
+          ...(t.targetKind === 'module_regex' ? { regexIndex: resolvedRegexIdx } : {}),
+        },
         hostBinding: { moduleIndex: modIdx, moduleId: mod.id || null },
+        moduleMatchedBy: resolvedMod.matchedBy,
         label,
         content,
         entry,
         isLua,
         hasOtherTriggers,
         otherTriggerCount,
+        ...(loreSummary !== undefined ? { loreCount, loreSummary } : {}),
+        ...(regexList !== undefined ? { regexList } : {}),
         module: mod,
         modulesSummary: modules.map((m, i) => ({
           index: i,
@@ -1028,6 +1256,7 @@ class HostAdapter {
       const snap = await this.readTargetSnapshot({
         targetKind: scope,
         moduleIndex: proposal.moduleIndex ?? target.moduleIndex,
+        moduleDomHints: proposal.moduleIndex === undefined ? target.moduleDomHints : undefined,
       });
       if (!snap.ok) return { ok: false, error: snap.reason };
       const before = snap.content;
@@ -1072,6 +1301,7 @@ class HostAdapter {
         targetKind,
         loreIndex,
         moduleIndex: proposal.moduleIndex ?? target.moduleIndex,
+        moduleDomHints: proposal.moduleIndex === undefined ? target.moduleDomHints : undefined,
         fieldKey,
       });
       if (!snap.ok) return { ok: false, error: snap.reason };
@@ -1169,6 +1399,7 @@ class HostAdapter {
         targetKind,
         regexIndex: idx,
         moduleIndex: proposal.moduleIndex ?? target.moduleIndex,
+        moduleDomHints: proposal.moduleIndex === undefined ? target.moduleDomHints : undefined,
       });
       if (!snap.ok) return { ok: false, error: snap.reason };
       const existing = idx !== null ? snap.entry : null;
@@ -1198,6 +1429,7 @@ class HostAdapter {
       const snap = await this.readTargetSnapshot({
         targetKind,
         moduleIndex: proposal.moduleIndex ?? target.moduleIndex,
+        moduleDomHints: proposal.moduleIndex === undefined ? target.moduleDomHints : undefined,
       });
       if (!snap.ok) return { ok: false, error: snap.reason };
       const nextEntry = normalizeLorebookEntry(proposal);
@@ -1538,12 +1770,7 @@ class HostAdapter {
       assertAllowedFieldKey('module_field', fieldKey);
       const { modules, permissionDenied } = await this.readModules();
       if (permissionDenied) throw new Error(DB_PERMISSION_ERROR);
-      const pinnedId = options.hostBinding?.moduleId || null;
-      let modIdx = Number.isInteger(target.moduleIndex) ? target.moduleIndex : 0;
-      if (pinnedId) {
-        const byId = modules.findIndex(m => m.id === pinnedId);
-        if (byId !== -1) modIdx = byId;
-      }
+      const modIdx = this._resolveWriteModuleIndex(modules, proposal, target, options);
       if (!modules[modIdx]) throw new Error('수정할 모듈을 찾을 수 없습니다.');
       const moduleId = modules[modIdx].id;
       const moduleName = modules[modIdx].name || '무제';
@@ -1627,7 +1854,7 @@ class HostAdapter {
     if (scope === 'module') {
       const { modules, permissionDenied } = await this.readModules();
       if (permissionDenied) throw new Error(DB_PERMISSION_ERROR);
-      const modIdx = Number.isInteger(proposal.moduleIndex) ? proposal.moduleIndex : (target.moduleIndex ?? 0);
+      const modIdx = this._resolveWriteModuleIndex(modules, proposal, target, options);
       if (!modules[modIdx]) throw new Error('대상 모듈을 찾을 수 없습니다.');
       const moduleId = modules[modIdx].id;
       const nextModules = clone(modules);
@@ -1729,7 +1956,7 @@ class HostAdapter {
     if (scope === 'module') {
       const { modules, permissionDenied } = await this.readModules();
       if (permissionDenied) throw new Error(DB_PERMISSION_ERROR);
-      const modIdx = Number.isInteger(proposal.moduleIndex) ? proposal.moduleIndex : (target.moduleIndex ?? 0);
+      const modIdx = this._resolveWriteModuleIndex(modules, proposal, target, options);
       if (!modules[modIdx]?.lorebook?.[loreIndex]) throw new Error('대상 모듈 로어북 항목을 찾을 수 없습니다.');
       const moduleId = modules[modIdx].id;
       const prevEntry = clone(modules[modIdx].lorebook[loreIndex]);
@@ -1778,7 +2005,7 @@ class HostAdapter {
     if (scope === 'module') {
       const { modules, permissionDenied } = await this.readModules();
       if (permissionDenied) throw new Error(DB_PERMISSION_ERROR);
-      const modIdx = Number.isInteger(proposal.moduleIndex) ? proposal.moduleIndex : (target.moduleIndex ?? 0);
+      const modIdx = this._resolveWriteModuleIndex(modules, proposal, target, options);
       if (!modules[modIdx]) throw new Error('대상 모듈을 찾을 수 없습니다.');
       const luaInfo = extractLuaFromTriggers(modules[modIdx].trigger);
       if (luaInfo.hasOtherTriggers && options.requireDestructiveConfirm && !options.destructiveConfirmed) {
@@ -1850,7 +2077,7 @@ class HostAdapter {
     if (scope === 'module') {
       const { modules, permissionDenied } = await this.readModules();
       if (permissionDenied) throw new Error(DB_PERMISSION_ERROR);
-      const modIdx = Number.isInteger(proposal.moduleIndex) ? proposal.moduleIndex : (target.moduleIndex ?? 0);
+      const modIdx = this._resolveWriteModuleIndex(modules, proposal, target, options);
       if (!modules[modIdx]) throw new Error('대상 모듈을 찾을 수 없습니다.');
       const moduleId = modules[modIdx].id;
       const nextModules = clone(modules);
@@ -2103,4 +2330,4 @@ class HostAdapter {
   }
 }
 
-export { extractLuaFromTriggers, buildLuaTriggers, normalizeLorebookEntry, normalizeRegexEntry, HostAdapter };
+export { extractLuaFromTriggers, buildLuaTriggers, normalizeLorebookEntry, normalizeRegexEntry, resolveModuleIndex, HostAdapter };

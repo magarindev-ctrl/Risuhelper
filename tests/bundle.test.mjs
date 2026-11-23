@@ -715,5 +715,181 @@ test('dist/risuhelper.js renders LLM Markdown replies as rich editor cards with 
   assert.ok(doc.querySelector('.rh-md'), 'switching back restores rich Markdown view');
 });
 
+test('dist/risuhelper.js auto-identifies the open module lorebook in UI dropdowns (module + entry) and shows its real prompt content', async () => {
+  const code = fs.readFileSync(BUNDLE_PATH, 'utf8');
+  const doc = createMockDocument();
+  const registeredButtons = [];
 
+  const promptBody = '- CRITICAL: This is a front-end rendering command.\nBackground List: airplane interior, airport';
 
+  const makeSafeEl = (tag, outerHtml, text = '', children = [], className = '') => {
+    const el = {
+      _tag: tag.toLowerCase(),
+      _outerHtml: outerHtml,
+      _text: text,
+      _children: children,
+      _className: className,
+      _parent: null,
+      async getOuterHTML() { return outerHtml; },
+      async nodeName() { return tag.toUpperCase(); },
+      async textContent() { return text; },
+      async innerText() { return text; },
+      async getClassName() { return className; },
+      async getParent() { return el._parent; },
+      async getChildren() {
+        return { async length() { return children.length; }, async at(i) { return children[i] || null; } };
+      },
+      async querySelectorAll(sel) {
+        const parts = sel.split(',').map(s => s.trim());
+        const hits = [];
+        const walk = (n) => {
+          for (const c of n._children) {
+            const match = parts.some(p => {
+              if (p === 'h2') return c._tag === 'h2';
+              if (p === '[role="tab"][aria-selected="true"]') return c._outerHtml.includes('role="tab"') && c._outerHtml.includes('aria-selected="true"');
+              if (p === '[role="tab"]') return c._outerHtml.includes('role="tab"');
+              if (p === '[data-risu-idx]') return c._outerHtml.includes('data-risu-idx=');
+              if (p === 'button.valuer') return c._tag === 'button' && c._className.includes('valuer');
+              if (p === '[contenteditable="true"]') return c._outerHtml.includes('contenteditable="true"');
+              return false;
+            });
+            if (match) hits.push(c);
+            walk(c);
+          }
+        };
+        walk(el);
+        return { async length() { return hits.length; }, async at(i) { return hits[i] || null; } };
+      },
+      async querySelector(sel) {
+        const res = await el.querySelectorAll(sel);
+        return (await res.length()) > 0 ? await res.at(0) : null;
+      },
+    };
+    for (const c of children) c._parent = el;
+    return el;
+  };
+
+  const modPage = makeSafeEl('div', '<div class="module-page"></div>', '', [
+    makeSafeEl('h2', '<h2>모듈 수정</h2>', '모듈 수정'),
+    makeSafeEl('button', '<button role="tab" aria-selected="true">로어북</button>', '로어북'),
+    makeSafeEl('div', '<div data-risu-idx="0"></div>', '', [
+      makeSafeEl('button', '<button class="endflex valuer">ha0</button>', 'ha0', [], 'endflex valuer'),
+    ]),
+    makeSafeEl('div', '<div data-risu-idx="1"></div>', '', [
+      makeSafeEl('button', '<button class="endflex valuer">Global LoreBook Override</button>', 'Global LoreBook Override', [], 'endflex valuer'),
+      makeSafeEl('div', '<div contenteditable="true"></div>', promptBody),
+    ]),
+    makeSafeEl('div', '<div data-risu-idx="2"></div>', '', [
+      makeSafeEl('button', '<button class="endflex valuer">Home</button>', 'Home', [], 'endflex valuer'),
+    ]),
+  ]);
+
+  const rootDoc = {
+    async querySelector(sel) {
+      if (sel === 'title') return { async textContent() { return 'PocketRisu'; } };
+      if (sel === 'body') return { async appendChild() {} };
+      if (sel.includes(':focus')) return null;
+      return await modPage.querySelector(sel);
+    },
+    async querySelectorAll(sel) {
+      return await modPage.querySelectorAll(sel);
+    },
+    async createElement() {
+      return {
+        async setAttribute() {},
+        async setStyleAttribute() {},
+        async setTextContent() {},
+        async addEventListener() { return 'c1'; },
+        async removeEventListener() {},
+        async remove() {},
+      };
+    },
+    async addEventListener() { return 'l1'; },
+    async removeEventListener() {},
+  };
+
+  const mockRisuai = {
+    pluginStorage: { async getItem() { return null; }, async setItem() {} },
+    async getColorScheme() { return { scheme: { type: 'dark' } }; },
+    async registerButton(meta, cb) { registeredButtons.push({ meta, cb }); return { id: meta.id }; },
+    async registerSetting(_n, _cb, _i, _t, id) { return { id }; },
+    async unregisterUIPart() {},
+    async onUnload() {},
+    async showContainer() {},
+    async hideContainer() {},
+    async getCharacter() { return { name: '테스트봇', desc: '', globalLore: [], customscript: [], triggerscript: [], chats: [{}] }; },
+    async getCurrentCharacterIndex() { return 0; },
+    async getCurrentChatIndex() { return 0; },
+    async getRootDocument() { return rootDoc; },
+    async getDatabase() {
+      return {
+        modules: [
+          {
+            id: 'mod-0',
+            name: '인레이 모듈 V3',
+            description: 'AI챗고수가도리거야',
+            lorebook: [{ comment: '인레이 1', key: 'a', content: 'inlay text' }],
+          },
+          {
+            id: 'mod-1',
+            name: '배경 자동 변경 모듈',
+            description: '배경 모듈 설명',
+            lorebook: [
+              { comment: 'ha0', key: '', content: 'init' },
+              { comment: 'Global LoreBook Override', key: '', content: promptBody },
+              { comment: 'Home', key: 'home', content: 'home text' },
+            ],
+          },
+        ],
+        enabledModules: ['mod-0', 'mod-1'],
+      };
+    },
+  };
+
+  const sandbox = {
+    window: { risuai: mockRisuai, Risuai: mockRisuai },
+    risuai: mockRisuai,
+    Risuai: mockRisuai,
+    document: doc,
+    console,
+    setTimeout,
+    clearTimeout,
+    TextEncoder,
+    TextDecoder,
+    atob,
+    btoa,
+    URL,
+    Blob,
+    crypto,
+  };
+  sandbox.globalThis = sandbox;
+  vm.runInNewContext(code, sandbox, { filename: 'risuhelper.js' });
+  await new Promise(r => setTimeout(r, 40));
+
+  await registeredButtons[0].cb();
+  await new Promise(r => setTimeout(r, 30));
+
+  const selects = [];
+  const walk = (n) => {
+    if (n.tagName === 'SELECT') selects.push(n);
+    for (const c of n.children || []) walk(c);
+  };
+  walk(doc.body);
+
+  // Target select + Module select + Module Lorebook entry select = 3 selects in context bar
+  assert.equal(selects.length, 3, 'should render target select, module select, and module lorebook entry select');
+  const autoOpt = selects[0].children.find(o => o.value === 'auto');
+  assert.match(autoOpt.textContent, /모듈 로어북 #2/);
+
+  const selectedModOpt = selects[1].children.find(o => o.selected);
+  assert.equal(selectedModOpt.value, '1');
+  assert.match(selectedModOpt.textContent, /배경 자동 변경 모듈/);
+
+  const selectedLoreOpt = selects[2].children.find(o => o.selected);
+  assert.equal(selectedLoreOpt.value, '1');
+  assert.match(selectedLoreOpt.textContent, /Global LoreBook Override/);
+
+  // Preview displays the real module lorebook prompt, NOT modules[0].description
+  assert.match(doc.body.textContent, /CRITICAL: This is a front-end rendering command/);
+  assert.doesNotMatch(doc.body.textContent, /AI챗고수가도리거야/);
+});
