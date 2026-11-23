@@ -1,6 +1,6 @@
 # RisuHelper 아키텍처 및 RisuAI 포크 호환성 분석
 
-> 버전: `0.4.4` · 라이선스: `GPL-3.0-only` · 외부 런타임 의존성: 0개
+> 버전: `0.4.5` · 라이선스: `GPL-3.0-only` · 외부 런타임 의존성: 0개
 
 ---
 
@@ -81,6 +81,8 @@ User Input + Detected/Manual Target
   - 기존 V1/V2 트리거가 있는 상태에서 Lua로 전환할 때는 삭제·대체 경고와 명시적 확인 체크박스를 요구합니다.
 - **되돌리기 기록(Undo Journal)**: 모든 쓰기는 `_commitCharacter` / `_commitChat` / `_commitDb`를 거치며, 이전 상태를 쓴 상태로 바꾸는 연산 목록(`src/undo-journal.js`의 `diffValues`)을 기록합니다. 기록은 순수 JSON이라 `pluginStorage`에 저장되어 새로고침 뒤에도 복원됩니다. 복원(`revertOps`)은 호스트가 아직 RisuHelper가 쓴 값을 갖고 있는 연산만 되돌리고, 이후 사용자가 고친 값은 충돌로 보고합니다. 목록 항목은 `id`/`chatId`가 있으면 그것으로, 없으면 인덱스와 식별 속성(`comment`, `key`, `name`)으로 다시 찾으므로 순서가 바뀌어도 동작합니다. 여러 제안은 `runGroup`으로 한 단위가 됩니다.
 - **범위 공통 쓰기 경로**: 캐릭터·채팅·모듈 세 범위는 `_openScope`가 복제본(`root`)과 `commit(label)`을 돌려주는 하나의 경로를 씁니다. 로어북 생성·수정·폴더 정리·복구, Lua, 정규식, 단일 텍스트 필드 쓰기가 범위별 분기 없이 구현됩니다.
+- **자유대화(Free Talk)**: `classifyDomSignals`는 편집 가능한 입력칸에 커서가 있고(`signals.tag`) 그 칸이 하나의 구체적인 위치로 매핑될 때만(`isWritableTarget`) 필드 컨텍스트를 돌려줍니다. 그 외에는 모두 `toFreeTalk`로 `targetKind: 'general'`, `freeTalk: true`가 되며, 화면에서 읽은 정보(`screen`, `screenHint`, `loreScope`, `moduleDomHints`, 경고)는 힌트로만 남습니다. `FocusTracker.scanNow`는 커서가 다른 입력으로 옮겨가면 즉시, 커서가 사라지면 `freeTalkGraceMs`(5초) 뒤에 자유대화로 전환합니다. 패널을 여는 클릭이 커서를 빼앗기 때문에 유예가 필요하며, `onPanelOpen`이 유예 중인 필드를 확정합니다. 도킹 상태(`panelMode === 'docked'`)에서는 유예 없이 전환하고, 오버레이가 호스트를 덮고 있는 동안은 대상을 바꾸지 않습니다.
+- **대상 없는 필드 수정(`update_field`)**: 허용된 캐릭터 텍스트 필드와 작가의 노트(`authorNote`)를 현재 대상과 무관하게 고칩니다. `src/fields.js`의 `planFieldContext`가 요청에 언급된 필드만 전문으로 보내고(`mentionedFields`), 전문으로 보낸 필드 목록(`fieldsShownFull`)을 고정 대상에 남깁니다. 목록에 없는 필드의 전체 덮어쓰기는 어댑터가 거부합니다.
 - **첫 메시지 전용 동작**: `patch_text`/`replace_text`는 현재 대상 한 곳만 고칠 수 있고 대상 변경은 프롬프트 인젝션 방지를 위해 차단되므로, 대상과 무관하게 쓸 수 있는 `update_greeting`(번호 -1 = `firstMessage`, n = `alternateGreetings[n]`, RisuAI의 `chat.fmIndex`와 같은 규칙)과 `create_greeting`(배열 끝에 추가)을 둡니다. `src/greetings.js`의 `planGreetingContext`가 요청마다 어떤 첫 메시지를 전문으로 보낼지 정하고 그 번호 목록(`greetingsShownFull`)을 제안의 고정 대상에 남기며, 목록에 없는 번호의 전체 덮어쓰기는 어댑터가 거부합니다. `char_alt_greeting` 대상은 번호가 없거나 범위를 벗어나면 1번으로 떨어지지 않고 "항목 미선택"으로 남습니다. 목록이 비어 있을 때 그 대상에 온 `replace_text`만은 덮어쓸 항목이 없어 뜻이 하나뿐이므로 첫 항목 추가로 처리합니다. `create_greeting`은 선택적으로 현재 채팅의 `fmIndex`를 새 번호로 바꾸며, 이 변경은 같은 되돌리기 기록에 붙습니다. 그룹 채팅(`type === 'group'`)은 공통 참조 검증에서 거부합니다.
 - **참조 검증(`_findReferenceError`)**: 제안이 이름으로 지정한 인덱스·ID는 미리보기와 적용 양쪽에서 같은 함수로 검사합니다. 존재하지 않으면 다른 항목으로 넘기거나 그대로 저장하지 않고 오류로 끝냅니다. 스키마에 없는 속성은 `findUnknownProposalKeys`로 찾아 카드에 표시합니다.
 - **감지 진단**: 감지기는 호스트마다 지원이 다른 `SafeElement` 호출의 오류를 의도적으로 삼키지만, 진단을 켜면 삼킨 오류와 최종 신호를 `ctx.diagnostics`에 남겨 패널에서 볼 수 있습니다.

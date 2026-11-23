@@ -1546,3 +1546,75 @@ test('a text overwrite sent from the chat screen is refused with a pointer to th
   assert.equal(preview.ok, false);
   assert.match(preview.error, /create_greeting/);
 });
+
+// --- Free talk: character fields and the author note without selecting them as the target ---
+
+const FREE_TALK = { screen: 'chat', targetKind: 'general', fieldKey: null, freeTalk: true, fieldsShownFull: ['desc', 'systemPrompt', 'authorNote'] };
+
+test('update_field patches a character field from free talk and can be undone', async () => {
+  const { state, adapter } = createMockHost();
+  const proposal = { action: 'update_field', field: 'desc', edits: [{ before: '별을 연구한다.', after: '별과 달을 연구한다.' }] };
+  const preview = await adapter.previewProposal(proposal, FREE_TALK);
+  assert.equal(preview.ok, true, preview.error);
+  assert.match(preview.label, /설명/);
+  const res = await adapter.applyProposal(proposal, preview.target, { hostBinding: preview.hostBinding });
+  assert.equal(state.character.desc, '차분한 마도사.\n별과 달을 연구한다.');
+  await adapter.undo(res.undoId);
+  assert.equal(state.character.desc, '차분한 마도사.\n별을 연구한다.');
+});
+
+test('update_field writes the author note of the current chat', async () => {
+  const { state, adapter } = createMockHost();
+  state.character.chats[0].note = '기존 노트';
+  const proposal = { action: 'update_field', field: 'authorNote', content: '새 작가의 노트' };
+  const preview = await adapter.previewProposal(proposal, FREE_TALK);
+  assert.equal(preview.ok, true, preview.error);
+  assert.match(preview.label, /작가의 노트/);
+  await adapter.applyProposal(proposal, preview.target, { hostBinding: preview.hostBinding });
+  assert.equal(state.character.chats[0].note, '새 작가의 노트');
+  assert.equal(state.character.desc, '차분한 마도사.\n별을 연구한다.');
+});
+
+test('update_field refuses a whole-text overwrite of a field the model only saw a preview of', async () => {
+  const { state, adapter } = createMockHost();
+  state.character.desc = 'HEAD ' + 'x'.repeat(1000) + ' TAIL_MUST_SURVIVE';
+  const previewOnly = { ...FREE_TALK, fieldsShownFull: ['systemPrompt'] };
+
+  const overwrite = await adapter.previewProposal({ action: 'update_field', field: 'desc', content: 'short' }, previewOnly);
+  assert.equal(overwrite.ok, false);
+  assert.match(overwrite.error, /전문/);
+  await assert.rejects(() => adapter.applyProposal({ action: 'update_field', field: 'desc', content: 'short' }, previewOnly, {}), /전문/);
+  assert.ok(state.character.desc.endsWith('TAIL_MUST_SURVIVE'));
+
+  const patch = { action: 'update_field', field: 'desc', edits: [{ before: 'HEAD', after: 'HELLO' }] };
+  const patchPreview = await adapter.previewProposal(patch, previewOnly);
+  assert.equal(patchPreview.ok, true, patchPreview.error);
+
+  const emptyField = await adapter.previewProposal({ action: 'update_field', field: 'scenario', content: '새 시나리오' }, previewOnly);
+  assert.equal(emptyField.ok, true, 'an empty field has nothing to lose');
+});
+
+test('update_field rejects fields outside the allowed list and character fields of a group chat', async () => {
+  const { state, adapter } = createMockHost();
+  for (const field of ['chats', 'globalLore', '__proto__', 'nope']) {
+    const preview = await adapter.previewProposal({ action: 'update_field', field, content: 'x' }, FREE_TALK);
+    assert.equal(preview.ok, false, field);
+    await assert.rejects(() => adapter.applyProposal({ action: 'update_field', field, content: 'x' }, FREE_TALK, {}));
+  }
+  assert.ok(Array.isArray(state.character.chats));
+
+  state.character.type = 'group';
+  const groupDesc = await adapter.previewProposal({ action: 'update_field', field: 'desc', content: 'x' }, FREE_TALK);
+  assert.equal(groupDesc.ok, false);
+  assert.match(groupDesc.error, /그룹/);
+  const groupNote = await adapter.previewProposal({ action: 'update_field', field: 'authorNote', content: 'x' }, FREE_TALK);
+  assert.equal(groupNote.ok, true, 'the author note belongs to the chat and exists for group chats too');
+});
+
+test('a text overwrite without a target names the free-talk actions in its refusal', async () => {
+  const { adapter } = createMockHost();
+  const preview = await adapter.previewProposal({ action: 'replace_text', content: 'x' }, FREE_TALK);
+  assert.equal(preview.ok, false);
+  assert.match(preview.error, /update_field/);
+  assert.match(preview.label, /자유대화/);
+});

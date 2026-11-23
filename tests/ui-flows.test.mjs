@@ -241,3 +241,27 @@ test('the new-greeting card offers to use it in the current chat right away', as
   assert.deepEqual(state.character.alternateGreetings, ['기존', '새로 만든 인사']);
   assert.equal(state.character.chats[0].fmIndex, 1);
 });
+
+test('free talk: asking about the description sends its full text and the edit applies without choosing a target', async () => {
+  const state = { character: freshCharacter() };
+  state.character.desc = '첫 줄. ' + '나'.repeat(800) + ' 설명-끝표식';
+  const prompts = [];
+  const reply = '고칩니다.\n' + proposalBlock({ action: 'update_field', title: '설명 수정', field: 'desc', edits: [{ before: '설명-끝표식', after: '설명 끝!' }] });
+  const ui = await bootBundle({ state, runLLMModel: async ({ messages }) => { prompts.push(messages[0].content); return reply; } });
+
+  assert.match(ui.bodyText(), /자유대화/, 'with nothing selected the panel says free talk');
+  await ui.send('캐릭터 설명 끝부분을 고쳐줘');
+  assert.ok(prompts[0].includes('설명-끝표식'), 'the mentioned field must reach the model in full');
+  await ui.click('적용');
+  assert.ok(state.character.desc.endsWith('설명 끝!'));
+});
+
+test('free talk: an unrelated request does not ship the long description to the model', async () => {
+  const state = { character: freshCharacter() };
+  state.character.desc = '첫 줄. ' + '나'.repeat(800) + ' 설명-끝표식';
+  const prompts = [];
+  const ui = await bootBundle({ state, runLLMModel: async ({ messages }) => { prompts.push(messages[0].content); return '네.'; } });
+  await ui.send('로어북이 뭔지 알려줘');
+  assert.ok(!prompts[0].includes('설명-끝표식'));
+  assert.ok(prompts[0].includes('첫 줄.'), 'a short preview is still included');
+});

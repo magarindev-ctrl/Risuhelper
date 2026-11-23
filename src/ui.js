@@ -9,6 +9,7 @@ import { newPresetState, validatePresetState, assembleRisuHelperMessages } from 
 import { renderPresetPanel } from './preset-ui.js';
 import { renderMarkdown } from './markdown.js';
 import { planGreetingContext, wantsGreetingText } from './greetings.js';
+import { planFieldContext } from './fields.js';
 
 const DEFAULT_SETTINGS = {
   modelMode: 'model',
@@ -51,6 +52,7 @@ const ACTION_LABELS = {
   create_persona: '새 페르소나 생성',
   update_persona: '페르소나 수정',
   update_config: '설정 변경',
+  update_field: '캐릭터 필드 수정',
   update_greeting: '첫 메시지 수정',
   create_greeting: '추가 첫 메시지 생성',
 };
@@ -99,6 +101,7 @@ class RisuHelperApp {
 
     this.isOpen = false;
     this.isDocked = false;
+    this.syncPanelMode();
     this.settingsOpen = false;
     this.presetPanelOpen = false;
     this.presetState = newPresetState();
@@ -464,7 +467,9 @@ class RisuHelperApp {
       fieldKey: null,
       loreIndex: null,
       loreScope: null,
-      labelText: '일반 / 수동 선택',
+      freeTalk: true,
+      labelText: '자유대화',
+      screenHint: '',
       warnings: [],
     };
   }
@@ -476,8 +481,10 @@ class RisuHelperApp {
     if (wantDock && !this.tracker.enabled) {
       await this.tracker.start().catch(() => false);
     }
-    if (this.tracker.enabled && (!this.detectedContext || this.detectedContext.screen === 'unknown')) {
-      await this.tracker.scanNow({ allowScreenFallback: true });
+    if (this.tracker.enabled) {
+      // Opening the panel confirms a field that just lost the cursor to this very click;
+      // with nothing selected it refreshes the free-talk screen hint.
+      await this.tracker.onPanelOpen(wantDock ? 'docked' : 'overlay');
     }
     this._lastLiveFocusSig = this._focusSignature(this.detectedContext);
 
@@ -493,10 +500,12 @@ class RisuHelperApp {
         localWin: this.doc.defaultView,
       });
       this.isDocked = Boolean(dockRes.ok);
+      this.syncPanelMode();
     } else {
       if (this.isDocked) {
         await this.tracker.releaseDock({ restoreChip: false });
         this.isDocked = false;
+        this.syncPanelMode();
       }
       if (typeof this.api.showContainer === 'function') {
         await this.api.showContainer('fullscreen');
@@ -507,11 +516,19 @@ class RisuHelperApp {
     this.render();
   }
 
+  /** Tells the tracker whether the host is covered (overlay), usable beside us (docked) or alone. */
+  syncPanelMode() {
+    if (!this.tracker) return;
+    this.tracker.panelMode = !this.isOpen ? 'closed' : (this.isDocked ? 'docked' : 'overlay');
+  }
+
   async close() {
     this.isOpen = false;
+    this.tracker.onPanelClose();
     if (this.isDocked) {
       await this.tracker.releaseDock({ restoreChip: true });
       this.isDocked = false;
+      this.syncPanelMode();
     }
     if (typeof this.api.hideContainer === 'function') {
       await this.api.hideContainer();
@@ -539,9 +556,11 @@ class RisuHelperApp {
       });
       if (res.ok) {
         this.isDocked = true;
+        this.syncPanelMode();
         this.showToast('오른쪽 도킹 모드 활성 · RisuAI 입력칸을 클릭하면 실시간 반영됩니다.');
       } else {
         this.isDocked = false;
+        this.syncPanelMode();
         this.settings.dockMode = false;
         await this.saveSettings();
         this.showToast(res.reason || '도킹 모드로 전환할 수 없습니다.');
@@ -549,6 +568,7 @@ class RisuHelperApp {
     } else {
       await this.tracker.releaseDock({ restoreChip: false });
       this.isDocked = false;
+      this.syncPanelMode();
       this.showToast('일반 오버레이 모드로 전환했습니다.');
     }
     this.render();
@@ -570,6 +590,41 @@ class RisuHelperApp {
     } catch (err) {
       this.activeSnapshot = { ok: false, reason: err.message, content: '' };
     }
+    this.moduleHintSnapshot = await this._readModuleHintSnapshot(ctx);
+  }
+
+  /**
+   * In free talk the expanded item of an open module editor is not a target, but the stale
+   * tempModule warning still has to work: read what the DB holds for that item so it can be
+   * compared with what the editor shows.
+   */
+  async _readModuleHintSnapshot(ctx) {
+    const hints = ctx?.freeTalk ? ctx.moduleDomHints : null;
+    if (!hints) return null;
+    const openIdx = Number.isInteger(hints.openIdx) ? hints.openIdx : null;
+    let hintTarget = null;
+    if (hints.tab === 'lorebook' && openIdx !== null) {
+      hintTarget = { targetKind: 'module_lorebook', loreScope: 'module', loreIndex: openIdx, fieldKey: 'content' };
+    } else if (hints.tab === 'regex' && openIdx !== null) {
+      hintTarget = { targetKind: 'module_regex', regexIndex: openIdx };
+    } else if (hints.tab === 'trigger') {
+      hintTarget = { targetKind: 'module_lua', fieldKey: 'code' };
+    }
+    if (!hintTarget) return null;
+    try {
+      const snap = await this.adapter.readTargetSnapshot({ ...hintTarget, screen: 'module', moduleDomHints: hints });
+      return snap.ok && !snap.moduleUncertain ? snap : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** The module item to compare against the open editor: the selected target, or the free-talk hint. */
+  _moduleSyncSnapshot() {
+    if (this.activeSnapshot?.ok && !this.activeSnapshot.moduleUncertain && this._isModuleDomFillable(this.activeSnapshot.target)) {
+      return this.activeSnapshot;
+    }
+    return this.moduleHintSnapshot || null;
   }
 
   showToast(message) {
@@ -601,9 +656,17 @@ class RisuHelperApp {
             extra.greetingsShownFull = plan.shownFull;
           }
           if (this.settings.includeCharSummary) {
+            // Character text fields + author note: previews, and the full text of whichever
+            // field the request mentions (src/fields.js).
+            let noteChat = null;
+            try {
+              noteChat = (await this.adapter.readActiveChat()).chat;
+            } catch {}
+            const fieldPlan = planFieldContext(char, noteChat, { userInput });
+            if (fieldPlan.fields.length > 0) extra.fields = fieldPlan.fields;
+            extra.fieldsShownFull = fieldPlan.shownFull;
             extra.charSummary = {
               name: char.name || '',
-              descPreview: String(char.desc || '').slice(0, 500),
               globalLoreCount: char.globalLore?.length ?? 0,
               regexCount: char.customscript?.length ?? 0,
               hasLua: char.triggerscript?.[0]?.effect?.[0]?.type === 'triggerlua',
@@ -641,6 +704,46 @@ class RisuHelperApp {
       extra.moduleLoreSummary = this.activeSnapshot.loreSummary;
       if (this.activeSnapshot.foldersSummary?.length > 0) {
         extra.moduleFoldersSummary = this.activeSnapshot.foldersSummary;
+      }
+    }
+
+    // Free talk hints: what the screen shows is context for the model, not a target.
+    if (ctx.freeTalk && this.settings.includeLoreSummary) {
+      // The chat tab of the lorebook is open: list the chat lorebook too.
+      if (ctx.loreScope === 'chat' && !extra.chatLoreSummary) {
+        try {
+          const snap = await this.adapter.readTargetSnapshot({ targetKind: 'chat_lorebook', loreScope: 'chat' });
+          if (snap.ok && Array.isArray(snap.loreSummary)) {
+            extra.chatLoreSummary = snap.loreSummary;
+            if (snap.foldersSummary?.length > 0) extra.chatFoldersSummary = snap.foldersSummary;
+          }
+        } catch {}
+      }
+      // A module editor is open: say which module it is and list its lorebook, plus the entry
+      // that is expanded, so a module-scoped proposal can name moduleIndex / loreIndex itself.
+      if (ctx.moduleDomHints && !extra.moduleLoreSummary) {
+        try {
+          const openIdx = Number.isInteger(ctx.moduleDomHints.openIdx) ? ctx.moduleDomHints.openIdx : null;
+          const snap = await this.adapter.readTargetSnapshot({
+            targetKind: 'module_lorebook',
+            loreScope: 'module',
+            moduleDomHints: ctx.moduleDomHints,
+            ...(ctx.moduleDomHints.tab === 'lorebook' && openIdx !== null ? { loreIndex: openIdx } : {}),
+          });
+          if (snap.ok && !snap.moduleUncertain && snap.module) {
+            if (Array.isArray(snap.loreSummary)) extra.moduleLoreSummary = snap.loreSummary;
+            if (snap.foldersSummary?.length > 0) extra.moduleFoldersSummary = snap.foldersSummary;
+            extra.openModule = {
+              moduleIndex: snap.target?.moduleIndex ?? null,
+              name: snap.module.name || '',
+              ...(snap.entry && Number.isInteger(snap.target?.loreIndex) ? {
+                expandedLoreIndex: snap.target.loreIndex,
+                expandedLoreTitle: snap.entry.comment || '',
+                expandedLoreContent: String(snap.entry.content ?? '').slice(0, this.settings.maxContentChars),
+              } : {}),
+            };
+          }
+        } catch {}
       }
     }
 
@@ -706,6 +809,7 @@ class RisuHelperApp {
       maxHistoryTurns: this.settings.maxHistoryTurns,
     });
     assembled.greetingsShownFull = extraContext.greetingsShownFull || [];
+    assembled.fieldsShownFull = extraContext.fieldsShownFull || [];
     return assembled;
   }
 
@@ -798,6 +902,7 @@ class RisuHelperApp {
       const pinnedCtx = JSON.parse(JSON.stringify(ctx));
       // Which first messages the model saw in full for this request (guards whole-text overwrites).
       pinnedCtx.greetingsShownFull = assembled.greetingsShownFull || [];
+      pinnedCtx.fieldsShownFull = assembled.fieldsShownFull || [];
       assistantMsg.proposals = [];
       for (const prop of parsed.proposals) {
         const preview = await this.adapter.previewProposal(prop, pinnedCtx);
@@ -853,17 +958,21 @@ class RisuHelperApp {
   }
 
   _hasModuleDomMismatch() {
-    if (!this.tracker?.enabled || !this.activeSnapshot?.ok || this.activeSnapshot.moduleUncertain) return false;
-    const snapTarget = this.activeSnapshot.target;
+    if (!this.tracker?.enabled) return false;
+    const syncSnap = this._moduleSyncSnapshot();
+    if (!syncSnap) return false;
+    const snapTarget = syncSnap.target;
     if (!this._isModuleDomFillable(snapTarget)) return false;
     if (!this.detectedContext || this.detectedContext.screen !== 'module') return false;
-    if (this.detectedContext.targetKind !== snapTarget.targetKind) return false;
-    if (snapTarget.targetKind === 'module_lorebook' && this.detectedContext.loreIndex !== snapTarget.loreIndex) return false;
-    if (snapTarget.targetKind === 'module_regex' && this.detectedContext.regexIndex !== snapTarget.regexIndex) return false;
+    if (!this.detectedContext.freeTalk) {
+      if (this.detectedContext.targetKind !== snapTarget.targetKind) return false;
+      if (snapTarget.targetKind === 'module_lorebook' && this.detectedContext.loreIndex !== snapTarget.loreIndex) return false;
+      if (snapTarget.targetKind === 'module_regex' && this.detectedContext.regexIndex !== snapTarget.regexIndex) return false;
+    }
 
     const norm = (s) => String(s || '').replace(/\r\n/g, '\n').trim();
     const livePreview = norm(this.detectedContext.liveTextPreview || this.detectedContext.moduleDomHints?.textPreview || '');
-    const dbContent = norm(this.activeSnapshot.content || '');
+    const dbContent = norm(syncSnap.content || '');
     if (!livePreview && !dbContent) return false;
     const dbPrefix = dbContent.slice(0, Math.min(dbContent.length, 600)).trim();
     const livePrefix = livePreview.slice(0, Math.min(livePreview.length, 600)).trim();
@@ -1056,7 +1165,7 @@ class RisuHelperApp {
 
   buildTargetPickerOptions() {
     const opts = [
-      { value: 'auto', label: this.detectedContext ? `📍 자동 감지: ${this.detectedContext.labelText}` : '📍 자동 감지 (미감지 · 일반)' },
+      { value: 'auto', label: `📍 자동감지: ${this.detectedContext ? this.detectedContext.labelText : '자유대화'}` },
       { value: 'char_field:desc', label: '캐릭터 · 설명 (Description)' },
       { value: 'char_field:additionalText', label: '캐릭터 · 추가 디스크립션' },
       { value: 'char_field:firstMessage', label: '캐릭터 · 첫 메시지 (First Message)' },
@@ -1086,7 +1195,7 @@ class RisuHelperApp {
       { value: 'config:', label: 'RisuAI 설정 / 컨피그 진단' },
       { value: 'config:customCSS', label: '설정 · 커스텀 CSS (customCSS)' },
       { value: 'config:guiHTML', label: '설정 · 채팅 HTML (guiHTML)' },
-      { value: 'general:', label: '일반 질문 / 사용법 안내' },
+      { value: 'general:', label: '자유대화 (대상 지정 없음)' },
     ];
     return opts;
   }
@@ -1653,7 +1762,7 @@ class RisuHelperApp {
                 this.settings.showDetectDiagnostics = Boolean(e.target.checked);
                 this.tracker.diagnostics = this.settings.showDetectDiagnostics;
                 await this.saveSettings();
-                if (this.tracker.enabled) await this.tracker.scanNow({ allowScreenFallback: true });
+                if (this.tracker.enabled) await this.tracker.scanNow({ force: true });
                 this.render();
               },
             }),
@@ -1845,7 +1954,7 @@ class RisuHelperApp {
           class: 'rh-btn',
           onclick: async () => {
             if (!this.tracker.enabled) await this.tracker.start();
-            await this.tracker.scanNow({ allowScreenFallback: true });
+            await this.tracker.scanNow({ force: true });
             this.manualTarget = null;
             await this.refreshContextSnapshot();
             this.showToast(this.detectedContext ? `감지됨: ${this.detectedContext.labelText}` : '현재 포커스된 입력칸이 없습니다.');
@@ -1889,6 +1998,14 @@ class RisuHelperApp {
         )
       )
     );
+
+    if (ctx.freeTalk) {
+      contextBarChildren.push(
+        h(doc, 'div', { style: 'font-size:11.5px;color:var(--rh-muted);' },
+          '자유대화 — 입력칸을 선택하지 않은 상태입니다. 무엇을 고칠지 말로 요청하면 됩니다. 특정 칸만 다루려면 그 칸을 클릭하거나 위에서 대상을 고르세요.' +
+          (ctx.screenHint ? ` (화면 힌트: ${ctx.screenHint})` : ''))
+      );
+    }
 
     if (ctx.warnings?.length) {
       for (const w of ctx.warnings) {
@@ -1967,10 +2084,11 @@ class RisuHelperApp {
             h(doc, 'button', {
               class: 'rh-btn',
               onclick: async () => {
+                const syncSnap = this._moduleSyncSnapshot();
                 const syncRes = await this.syncOpenModuleEditor(
-                  this.activeSnapshot.target,
-                  this.activeSnapshot.content,
-                  { moduleId: this.activeSnapshot.hostBinding?.moduleId || null }
+                  syncSnap.target,
+                  syncSnap.content,
+                  { moduleId: syncSnap.hostBinding?.moduleId || null }
                 );
                 this.showToast(syncRes.ok ? syncRes.message : syncRes.reason);
                 this.render();

@@ -1,21 +1,21 @@
 //@name risuhelper
 //@display-name RisuHelper
 //@api 3.0
-//@version 0.4.4
+//@version 0.4.5
 //@update-url https://raw.githubusercontent.com/magarindev-ctrl/Risuhelper/main/dist/risuhelper.js
 //@link https://github.com/magarindev-ctrl/Risuhelper RisuHelper GitHub
 
 /*
- * RisuHelper v0.4.4 — RisuAI Plugin API v3
+ * RisuHelper v0.4.5 — RisuAI Plugin API v3
  * License: GPL-3.0-only
  * https://github.com/magarindev-ctrl/Risuhelper
  */
 (() => {
   'use strict';
-  const __RISUHELPER_VERSION__ = "0.4.4";
+  const __RISUHELPER_VERSION__ = "0.4.5";
   const __modules = {
   "src/version.js"(__require, __exports) {
-const VERSION = '0.4.4';
+const VERSION = '0.4.5';
 const PLUGIN_NAME = 'risuhelper';
 const STORAGE_KEY = 'risuhelper_state_v1';
 const PRESET_STORAGE_KEY = 'risuhelper_preset_v1';
@@ -1781,7 +1781,84 @@ async function collectModuleDomHints(scopeRoot, { activeTabs = [], focusedLoreId
  * Pure classification logic: takes DOM snapshot signals gathered from SafeElement traversal
  * and resolves a structured FocusContext suitable for RisuHelper's host adapter & LLM.
  */
+const FREE_TALK_LABEL = '자유대화';
+
+/**
+ * True when a context names one concrete, editable place. Only these count as "the user has
+ * selected an input"; everything else is free talk.
+ */
+function isWritableTarget(ctx) {
+  if (!ctx || ctx.freeTalk) return false;
+  switch (ctx.targetKind) {
+    case 'char_field':
+    case 'module_field':
+    case 'persona':
+    case 'config':
+      return Boolean(ctx.fieldKey);
+    case 'chat_note':
+    case 'char_lua':
+    case 'module_lua':
+      return true;
+    case 'char_lorebook':
+    case 'chat_lorebook':
+    case 'module_lorebook':
+      return Number.isInteger(ctx.loreIndex);
+    case 'char_regex':
+    case 'module_regex':
+      // A cursor inside a regex script editor is a selection even where the host gives no index.
+      return true;
+    case 'char_alt_greeting':
+      return Number.isInteger(ctx.greetingIndex);
+    case 'chat_message':
+      return Number.isInteger(ctx.messageIndex);
+    default:
+      return false;
+  }
+}
+
+/**
+ * Turns "nothing concrete is selected" into the free-talk context. What the detector saw of the
+ * screen is kept as a hint for the model (`screen`, `screenHint`, `loreScope`, module hints and
+ * warnings) but never as a target: nothing can be written through it without an explicit action.
+ */
+function toFreeTalk(ctx) {
+  const base = ctx || {};
+  const rawLabel = String(base.labelText || '');
+  const screenHint = base.screen === 'chat'
+    ? '채팅 화면'
+    : (rawLabel && rawLabel !== FREE_TALK_LABEL && !rawLabel.startsWith(SCREEN_LABELS.unknown) ? rawLabel : '');
+  const out = {
+    detectedAt: Date.now(),
+    screen: base.screen || 'unknown',
+    targetKind: 'general',
+    fieldKey: null,
+    loreIndex: null,
+    loreScope: base.loreScope ?? null,
+    freeTalk: true,
+    labelText: FREE_TALK_LABEL,
+    screenHint,
+    placeholder: base.placeholder || '',
+    liveTextPreview: '',
+    warnings: Array.isArray(base.warnings) ? base.warnings : [],
+  };
+  if (base.moduleDomHints) out.moduleDomHints = base.moduleDomHints;
+  if (base.diagnostics) out.diagnostics = base.diagnostics;
+  return out;
+}
+
+/**
+ * Classifies DOM signals. A field is returned only when an editable input really has the
+ * cursor (`signals.tag` is the focused element) and it maps to one concrete place; signals
+ * gathered without a focused input describe the screen and always yield free talk.
+ */
 function classifyDomSignals(signals) {
+  const raw = classifyDomSignalsRaw(signals);
+  const hasFocusedInput = signals?.focused ?? Boolean(signals?.tag);
+  if (hasFocusedInput && isWritableTarget(raw)) return raw;
+  return toFreeTalk(raw);
+}
+
+function classifyDomSignalsRaw(signals) {
   const {
     tag = '',
     placeholder = '',
@@ -2742,18 +2819,7 @@ async function inspectVisibleScreen(rootDoc) {
     }
 
     if (chatInputEl) {
-      return {
-        detectedAt: Date.now(),
-        screen: 'chat',
-        targetKind: 'general',
-        fieldKey: null,
-        loreIndex: null,
-        loreScope: null,
-        labelText: '채팅 입력 화면',
-        placeholder: '',
-        liveTextPreview: '',
-        warnings: [],
-      };
+      return toFreeTalk({ screen: 'chat' });
     }
 
     if (headings.length > 0) {
@@ -2867,7 +2933,9 @@ class FocusTracker {
     this.chipListenerIds = [];
     this.lastContext = null;
     this.enabled = false;
-    this.liveScreenFallback = false;
+    this.panelMode = 'closed';
+    this.freeTalkGraceMs = 5000;
+    this._pendingFreeTalk = null;
     this._scanPending = false;
     this._drag = null;
     this._dragHandled = false;
@@ -3012,22 +3080,95 @@ class FocusTracker {
     this._scanPending = true;
     setTimeout(async () => {
       this._scanPending = false;
-      await this.scanNow({ allowScreenFallback: Boolean(this.liveScreenFallback) });
+      await this.scanNow();
     }, 45);
   }
 
-  async scanNow({ allowScreenFallback = false } = {}) {
-    if (!this.rootDoc) return this.lastContext;
-    let ctx = await inspectFocusedElement(this.rootDoc, { diagnostics: Boolean(this.diagnostics) });
-    if (!ctx && allowScreenFallback) {
-      ctx = await inspectVisibleScreen(this.rootDoc);
+  _commitContext(ctx) {
+    this._cancelPendingFreeTalk();
+    this.lastContext = ctx;
+    this.onChange(ctx);
+    return this.updateChipLabel(ctx);
+  }
+
+  _cancelPendingFreeTalk() {
+    if (this._pendingFreeTalk) {
+      clearTimeout(this._pendingFreeTalk);
+      this._pendingFreeTalk = null;
     }
-    if (ctx) {
-      this.lastContext = ctx;
-      this.onChange(ctx);
-      await this.updateChipLabel(ctx);
+  }
+
+  async _freeTalkContext(nonEditableFocus = null) {
+    if (nonEditableFocus) return nonEditableFocus;
+    const screen = await inspectVisibleScreen(this.rootDoc);
+    return screen || toFreeTalk(null);
+  }
+
+  /**
+   * Re-reads where the cursor is.
+   *  - Cursor in an editable field that maps to one concrete place -> that field.
+   *  - Cursor in some other input (chat box, search box, unknown field) -> free talk, at once.
+   *  - No cursor anywhere: the field is NOT dropped immediately, because clicking the button that
+   *    opens RisuHelper is exactly what takes the cursor out of the field. It is kept for
+   *    `freeTalkGraceMs`; if the panel opens in that time it stays (onPanelOpen), otherwise the
+   *    target falls back to free talk so a field left behind does not stay selected.
+   *    While the panel is docked the host stays usable, so clicking away switches immediately;
+   *    while the overlay covers the host nothing there can change the target.
+   * `force` (the "re-detect" button) skips the grace period.
+   */
+  async scanNow({ force = false } = {}) {
+    if (!this.rootDoc) return this.lastContext;
+    const focused = await inspectFocusedElement(this.rootDoc, { diagnostics: Boolean(this.diagnostics) });
+
+    if (focused && !focused.freeTalk) {
+      await this._commitContext(focused);
+      return this.lastContext;
+    }
+    if (focused) {
+      await this._commitContext(await this._freeTalkContext(focused));
+      return this.lastContext;
+    }
+
+    const holdingField = Boolean(this.lastContext && !this.lastContext.freeTalk);
+    if (!holdingField || force || this.panelMode === 'docked') {
+      await this._commitContext(await this._freeTalkContext());
+      return this.lastContext;
+    }
+    if (this.panelMode === 'overlay') {
+      return this.lastContext;
+    }
+    if (!this._pendingFreeTalk) {
+      this._pendingFreeTalk = setTimeout(async () => {
+        this._pendingFreeTalk = null;
+        if (!this.rootDoc || this.panelMode !== 'closed') return;
+        try {
+          const stillFocused = await inspectFocusedElement(this.rootDoc, { diagnostics: Boolean(this.diagnostics) });
+          if (stillFocused && !stillFocused.freeTalk) {
+            await this._commitContext(stillFocused);
+          } else {
+            await this._commitContext(await this._freeTalkContext(stillFocused));
+          }
+        } catch (err) { noteDetectError(err); }
+      }, this.freeTalkGraceMs);
     }
     return this.lastContext;
+  }
+
+  /**
+   * The panel was opened ('overlay' or 'docked'). A field that lost the cursor moments ago is
+   * confirmed as the target; if nothing is selected, the screen hint is refreshed.
+   */
+  async onPanelOpen(mode = 'overlay') {
+    this._cancelPendingFreeTalk();
+    this.panelMode = mode === 'docked' ? 'docked' : 'overlay';
+    if (this.rootDoc && (!this.lastContext || this.lastContext.freeTalk)) {
+      await this.scanNow({ force: true });
+    }
+    return this.lastContext;
+  }
+
+  onPanelClose() {
+    this.panelMode = 'closed';
   }
 
   async snapshotVisibleIframes() {
@@ -3215,7 +3356,6 @@ class FocusTracker {
 
     this._isDocked = true;
     this._dockWidth = dockW;
-    this.liveScreenFallback = true;
     return { ok: true, width: dockW, viewWidth: view.width };
   }
 
@@ -3223,7 +3363,6 @@ class FocusTracker {
    * Restores host <main> layout and our plugin iframe back to standard fullscreen geometry.
    */
   async releaseDock({ restoreChip = true } = {}) {
-    this.liveScreenFallback = false;
     await this._restoreMainLayout();
 
     if (this._dockFrame && typeof this._dockFrame.setStyle === 'function') {
@@ -3596,6 +3735,7 @@ class FocusTracker {
 
   async stop() {
     this.enabled = false;
+    this._cancelPendingFreeTalk();
     clearTimeout(this._longPressTimer);
     this._drag = null;
     this._dragHandled = false;
@@ -3758,6 +3898,9 @@ async function syncModuleEditorDom(rootDoc, { targetKind, fieldKey, loreIndex, r
   __exports.classifyDomSignals = classifyDomSignals;
   __exports.inspectFocusedElement = inspectFocusedElement;
   __exports.inspectVisibleScreen = inspectVisibleScreen;
+  __exports.isWritableTarget = isWritableTarget;
+  __exports.toFreeTalk = toFreeTalk;
+  __exports.FREE_TALK_LABEL = FREE_TALK_LABEL;
   __exports.syncModuleEditorDom = syncModuleEditorDom;
   __exports.normalizeChipPos = normalizeChipPos;
   __exports.MIN_DOCK_VIEWPORT_PX = MIN_DOCK_VIEWPORT_PX;
@@ -4306,10 +4449,117 @@ function revertOps(current, ops) {
   __exports.matchesWritten = matchesWritten;
 
   },
+  "src/fields.js"(__require, __exports) {
+// Character text fields (and the chat's author note) that can be edited without selecting them
+// as the target, plus the plan for how much of each is shown to the model.
+//
+// Sending every field in full on every request would be wasteful, so the default is a short
+// preview per field; a field is sent in full only when the request itself talks about it. The
+// plan records which fields were sent in full: a field the model only saw a preview of must not
+// be overwritten wholesale.
+
+const { CHAR_FIELD_META, ALLOWED_CHAR_FIELDS } = __require("src/version.js");
+
+const AUTHOR_NOTE_FIELD = 'authorNote';
+const FREE_EDIT_FIELDS = [...ALLOWED_CHAR_FIELDS, AUTHOR_NOTE_FIELD];
+const FIELD_PREVIEW_CHARS = 160;
+const FIELD_CONTEXT_BUDGET = 24000;
+
+// What a request has to say for a field to count as "mentioned". "설명해줘" (explain) must not be
+// read as the description field, hence the negative lookahead.
+const FIELD_KEYWORDS = {
+  desc: /(?<!추가\s?)설명(?!\s*해|\s*좀\s*해|\s*부탁)|디스크립션|(?<!additional\s)description|\bdesc\b/i,
+  additionalText: /추가\s*(디스크립션|설명)|additional\s*(description|text)/i,
+  firstMessage: /첫\s*(메시지|메세지|인사|대사)|first\s*message/i,
+  creatorNotes: /제작자\s*(코멘트|노트)|creator'?s?\s*(comment|note)/i,
+  systemPrompt: /시스템\s*프롬프트|system\s*prompt/i,
+  replaceGlobalNote: /글로벌\s*노트|global\s*note/i,
+  postHistoryInstructions: /히스토리\s*이후|post[\s-]*history/i,
+  exampleMessage: /예시\s*(대화|메시지)|example\s*(message|dialog)/i,
+  personality: /성격|personality/i,
+  scenario: /시나리오|scenario/i,
+  defaultVariables: /기본\s*변수|default\s*variables?/i,
+  translatorNote: /번역가|translator/i,
+  customModuleToggle: /커스텀\s*토글|custom\s*toggles?/i,
+  depthPrompt: /깊이\s*프롬프트|depth\s*prompt/i,
+  backgroundHTML: /백그라운드\s*(임베딩|html)|background\s*(embedding|html)/i,
+  virtualscript: /캐릭터\s*(js|스크립트)|character\s*js|charjs/i,
+  nickname: /닉네임|nickname/i,
+  name: /캐릭터\s*이름|character\s*name/i,
+  [AUTHOR_NOTE_FIELD]: /작가의?\s*노트|작노|author'?s?\s*note/i,
+};
+
+function fieldLabel(field) {
+  if (field === AUTHOR_NOTE_FIELD) return '작가의 노트 (현재 채팅)';
+  return CHAR_FIELD_META[field]?.label || field;
+}
+
+function mentionedFields(userInput) {
+  const text = String(userInput ?? '');
+  if (!text) return [];
+  return FREE_EDIT_FIELDS.filter(field => FIELD_KEYWORDS[field]?.test(text));
+}
+
+function readField(char, chat, field) {
+  if (field === AUTHOR_NOTE_FIELD) return String(chat?.note ?? '');
+  if (field === 'depthPrompt') return String(char?.depth_prompt?.prompt ?? '');
+  return String(char?.[field] ?? '');
+}
+
+/**
+ * @returns {{
+ *   fields: Array<{ field: string, label: string, length: number, text: string, truncated: boolean }>,
+ *   shownFull: string[],
+ * }}
+ */
+function planFieldContext(char, chat, { userInput = '', budget = FIELD_CONTEXT_BUDGET } = {}) {
+  const wanted = new Set(mentionedFields(userInput));
+  let remaining = Math.max(0, Number(budget) || 0);
+
+  const entries = FREE_EDIT_FIELDS
+    .filter(field => field !== 'firstMessage') // first messages have their own list (src/greetings.js)
+    .map(field => ({ field, full: readField(char, chat, field) }))
+    .filter(entry => entry.full.length > 0);
+
+  // Mentioned fields get the budget first, in list order.
+  const showFull = new Set();
+  for (const entry of [...entries].sort((a, b) => wanted.has(b.field) - wanted.has(a.field))) {
+    if (entry.full.length <= FIELD_PREVIEW_CHARS) {
+      showFull.add(entry.field);
+    } else if (wanted.has(entry.field) && entry.full.length <= remaining) {
+      showFull.add(entry.field);
+      remaining -= entry.full.length;
+    }
+  }
+
+  const fields = entries.map(entry => {
+    const isFull = showFull.has(entry.field);
+    return {
+      field: entry.field,
+      label: fieldLabel(entry.field),
+      length: entry.full.length,
+      text: isFull ? entry.full : entry.full.slice(0, FIELD_PREVIEW_CHARS),
+      truncated: !isFull,
+    };
+  });
+
+  return { fields, shownFull: fields.filter(f => !f.truncated).map(f => f.field) };
+}
+
+  __exports.planFieldContext = planFieldContext;
+  __exports.mentionedFields = mentionedFields;
+  __exports.fieldLabel = fieldLabel;
+  __exports.FREE_EDIT_FIELDS = FREE_EDIT_FIELDS;
+  __exports.AUTHOR_NOTE_FIELD = AUTHOR_NOTE_FIELD;
+  __exports.FIELD_PREVIEW_CHARS = FIELD_PREVIEW_CHARS;
+  __exports.FIELD_CONTEXT_BUDGET = FIELD_CONTEXT_BUDGET;
+
+  },
   "src/host-adapter.js"(__require, __exports) {
 const { ALLOWED_CONFIG_KEYS, CONFIG_KEY_TYPES, CHAR_FIELD_META, MODULE_FIELD_META, CONFIG_FIELD_META, DEFAULT_MAX_CONTENT_CHARS, ALLOWED_CHAR_FIELDS, ALLOWED_MODULE_FIELDS, ALLOWED_LORE_TEXT_FIELDS, ALLOWED_PERSONA_TEXT_FIELDS } = __require("src/version.js");
 const { applyTextEdits } = __require("src/text-edits.js");
 const { diffValues, revertOps } = __require("src/undo-journal.js");
+const { FREE_EDIT_FIELDS, AUTHOR_NOTE_FIELD, fieldLabel } = __require("src/fields.js");
 
 const BAD_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 const DB_PERMISSION_ERROR =
@@ -5954,7 +6204,7 @@ class HostAdapter {
             ok: true,
             target: t,
             hostBinding: { charIndex, ...getCharIdentity(char) },
-            label: `채팅 화면 (${char.name || '이름 없음'})`,
+            label: `자유대화 · 채팅 화면 (${char.name || '이름 없음'})`,
             content: '',
             charName: char.name || '',
             ...(orphanedCharLore.length > 0 ? {
@@ -5966,10 +6216,10 @@ class HostAdapter {
           };
         }
       } catch {}
-      return { ok: true, target: t, label: '채팅 입력 화면', content: '' };
+      return { ok: true, target: t, label: '자유대화 · 채팅 화면', content: '' };
     }
 
-    return { ok: true, target: t, label: '일반 대화 / 질문', content: '' };
+    return { ok: true, target: t, label: t.screenHint ? `자유대화 · ${t.screenHint}` : '자유대화', content: '' };
   }
 
   // ---------------------------------------------------------------------------------------------
@@ -6308,6 +6558,19 @@ class HostAdapter {
       }
     }
 
+    if (proposal.action === 'update_field') {
+      if (typeof proposal.field !== 'string' || !FREE_EDIT_FIELDS.includes(proposal.field)) {
+        return `수정할 수 없는 필드입니다: ${String(proposal.field)}. (가능: ${FREE_EDIT_FIELDS.join(', ')})`;
+      }
+      if (proposal.field !== AUTHOR_NOTE_FIELD) {
+        const { char } = await this.readActiveCharacter();
+        if (!char) return '선택된 캐릭터가 없습니다.';
+        if (char.type === 'group') {
+          return '그룹 채팅에는 캐릭터 필드가 없어 update_field로 수정할 수 없습니다. (작가의 노트는 가능)';
+        }
+      }
+    }
+
     if (proposal.action === 'update_greeting' || proposal.action === 'create_greeting') {
       const { char } = await this.readActiveCharacter();
       if (!char) return '선택된 캐릭터가 없습니다.';
@@ -6389,7 +6652,7 @@ class HostAdapter {
         return {
           ok: false,
           error: `현재 대상(${kind || '없음'})에는 직접 텍스트 적용을 지원하지 않습니다. 상단에서 편집할 대상을 선택해 주세요. ` +
-            '첫 메시지를 고치거나 새로 추가하려는 것이라면 대상 선택 없이 update_greeting / create_greeting 제안을 쓰면 됩니다(자동 재요청).',
+            '자유대화에서는 전용 동작을 쓰면 대상 선택 없이 됩니다: 캐릭터 필드·작가의 노트는 update_field, 첫 메시지는 update_greeting / create_greeting (자동 재요청).',
           label: snap.label,
           target: snap.target,
         };
@@ -6757,6 +7020,31 @@ class HostAdapter {
       };
     }
 
+    if (proposal.action === 'update_field') {
+      const fTarget = this._fieldTarget(proposal.field);
+      const snap = await this.readTargetSnapshot(fTarget);
+      if (!snap.ok) return { ok: false, error: snap.reason };
+      const before = String(snap.content ?? '');
+      const guardError = this._fieldOverwriteError(proposal, target, before);
+      if (guardError) return { ok: false, error: guardError, before, label: snap.label };
+      try {
+        const after = Array.isArray(proposal.edits) && proposal.edits.length > 0
+          ? applyTextEdits(before, proposal.edits, snap.label)
+          : String(proposal.content ?? '');
+        return {
+          ok: true,
+          before,
+          after,
+          label: snap.label,
+          target: { ...snap.target, fieldsShownFull: target.fieldsShownFull, greetingsShownFull: target.greetingsShownFull },
+          hostBinding: snap.hostBinding,
+          warning: proposal.field === 'firstMessage' ? await this._greetingScopeNotice(-1) : null,
+        };
+      } catch (err) {
+        return { ok: false, error: err.message, before, label: snap.label };
+      }
+    }
+
     if (proposal.action === 'update_greeting') {
       const gTarget = this._greetingTarget(proposal);
       const snap = await this.readTargetSnapshot(gTarget);
@@ -6853,6 +7141,8 @@ class HostAdapter {
         return await this._applyUpdatePersona(proposal, target, options);
       case 'update_config':
         return await this._applyUpdateConfig(proposal);
+      case 'update_field':
+        return await this._applyUpdateField(proposal, target, options);
       case 'update_greeting':
         return await this._applyUpdateGreeting(proposal, target, options);
       case 'create_greeting':
@@ -6964,7 +7254,7 @@ class HostAdapter {
         holder: root,
         key: fieldKey,
         label: `캐릭터 ${fieldKey}`,
-        summary: `캐릭터 ${CHAR_FIELD_META[fieldKey]?.label || fieldKey}에 적용했습니다.`,
+        summary: `${String(CHAR_FIELD_META[fieldKey]?.label || fieldKey).replace(/^(?!캐릭터)/, '캐릭터 ')}에 적용했습니다.`,
       }));
     }
 
@@ -7039,6 +7329,46 @@ class HostAdapter {
     }
 
     throw new Error(`현재 대상(${kind || '없음'})에는 직접 텍스트 적용을 지원하지 않습니다. 상단에서 대상을 선택해 주세요.`);
+  }
+
+  /** Where a free-talk field lives: the author note is on the chat, everything else on the character. */
+  _fieldTarget(field) {
+    return field === AUTHOR_NOTE_FIELD
+      ? { targetKind: 'chat_note', fieldKey: 'note' }
+      : { targetKind: 'char_field', fieldKey: field };
+  }
+
+  /**
+   * A whole-text replacement is only safe when the model was shown the whole field
+   * (`target.fieldsShownFull`, see src/fields.js). Partial edits are exact-match and always safe.
+   */
+  _fieldOverwriteError(proposal, target, before) {
+    const isOverwrite = !(Array.isArray(proposal.edits) && proposal.edits.length > 0);
+    if (!isOverwrite || before.length === 0) return null;
+    const shownFields = Array.isArray(target?.fieldsShownFull) ? target.fieldsShownFull : [];
+    const shownGreetings = Array.isArray(target?.greetingsShownFull) ? target.greetingsShownFull : [];
+    const wasShown = proposal.field === 'firstMessage'
+      ? shownGreetings.includes(-1) || shownFields.includes('firstMessage')
+      : shownFields.includes(proposal.field);
+    if (!wasShown) {
+      return `"${fieldLabel(proposal.field)}"은(는) 전문이 모델에 전달되지 않은 상태(앞부분 미리보기만 전달)라, 뒷부분 유실을 막기 위해 전체 덮어쓰기를 차단했습니다. ` +
+        '보이는 구간의 부분 편집(edits)을 쓰거나, 요청에 그 필드 이름을 넣어 다시 요청하거나, 해당 입력칸을 클릭한 뒤 요청해 주세요.';
+    }
+    return this._checkTruncationGuard(before, '필드 전체 덮어쓰기');
+  }
+
+  async _applyUpdateField(proposal, target, options = {}) {
+    const fTarget = this._fieldTarget(proposal.field);
+    const snap = await this.readTargetSnapshot(fTarget);
+    if (!snap.ok) throw new Error(snap.reason);
+    const guardError = this._fieldOverwriteError(proposal, target, String(snap.content ?? ''));
+    if (guardError) throw new Error(guardError);
+    const hasEdits = Array.isArray(proposal.edits) && proposal.edits.length > 0;
+    return await this._applyTextTarget(
+      hasEdits ? { action: 'patch_text', edits: proposal.edits } : { action: 'replace_text', content: proposal.content },
+      fTarget,
+      options
+    );
   }
 
   /** Where a greeting lives: index -1 is the default first message, n >= 0 an alternate greeting. */
@@ -7693,6 +8023,7 @@ function getQuickPromptsForContext(context) {
 
   },
   "src/llm.js"(__require, __exports) {
+const { FREE_EDIT_FIELDS } = __require("src/fields.js");
 const { buildKnowledgeForContext } = __require("src/knowledge.js");
 const { ALLOWED_CONFIG_KEYS, DEFAULT_MAX_CONTENT_CHARS, ALLOWED_CHAR_FIELDS, ALLOWED_LORE_TEXT_FIELDS, ALLOWED_PERSONA_TEXT_FIELDS } = __require("src/version.js");
 
@@ -7823,6 +8154,7 @@ const VALID_ACTIONS = new Set([
   'update_config',
   'update_greeting',
   'create_greeting',
+  'update_field',
 ]);
 
 /**
@@ -8035,6 +8367,7 @@ const PROPOSAL_KEYS_BY_ACTION = {
   update_config: ['changes'],
   update_greeting: ['greetingIndex', 'edits', 'content'],
   create_greeting: ['content', 'useInCurrentChat'],
+  update_field: ['field', 'edits', 'content'],
 };
 
 function findUnknownProposalKeys(item) {
@@ -8165,6 +8498,21 @@ function validateProposal(item) {
       return 'update_greeting에는 edits 배열 또는 content 문자열이 필요합니다.';
     }
   }
+  if (item.action === 'update_field') {
+    if (typeof item.field !== 'string' || !FREE_EDIT_FIELDS.includes(item.field)) {
+      return `update_field의 field는 다음 중 하나여야 합니다: ${FREE_EDIT_FIELDS.join(', ')}`;
+    }
+    const hasEdits = Array.isArray(item.edits) && item.edits.length > 0;
+    if (hasEdits) {
+      for (const e of item.edits) {
+        if (!e || typeof e.before !== 'string' || !e.before || typeof e.after !== 'string') {
+          return 'edits 항목은 비어 있지 않은 문자열 before와 문자열 after가 필요합니다.';
+        }
+      }
+    } else if (typeof item.content !== 'string') {
+      return 'update_field에는 edits 배열 또는 content 문자열이 필요합니다.';
+    }
+  }
   if (item.action === 'create_greeting') {
     if (typeof item.content !== 'string' || !item.content.trim()) {
       return 'create_greeting에는 비어 있지 않은 content 문자열이 필요합니다.';
@@ -8199,6 +8547,13 @@ function buildConversationMessages({ context, snapshot, extraContext, history, u
   if (extraContext?.charSummary) {
     extraBlocks.push(`[현재 캐릭터 요약]\n${JSON.stringify(extraContext.charSummary, null, 2)}`);
   }
+  if (extraContext?.fields?.length) {
+    extraBlocks.push(
+      '[캐릭터 필드 목록] update_field의 field 값과 현재 내용. truncated: true 인 항목은 앞부분만 보이는 상태이므로 ' +
+      'content 전체 교체를 제안하지 말고 보이는 구간의 edits만 제안하세요(전문이 필요하면 사용자에게 그 필드를 언급해 다시 요청하라고 안내).\n' +
+      JSON.stringify(extraContext.fields, null, 2)
+    );
+  }
   if (extraContext?.greetings?.greetings?.length) {
     extraBlocks.push(
       '[첫 메시지 목록] index -1 = 기본 첫 메시지(firstMessage), 0 이상 = 추가 첫 메시지(alternateGreetings) 번호. ' +
@@ -8227,6 +8582,16 @@ function buildConversationMessages({ context, snapshot, extraContext, history, u
   if (extraContext?.personasSummary) {
     extraBlocks.push(`[페르소나 목록 요약]\n${JSON.stringify(extraContext.personasSummary, null, 2)}`);
   }
+  if (extraContext?.openModule) {
+    const om = extraContext.openModule;
+    extraBlocks.push(
+      `[열려 있는 모듈 편집 화면 (참고용 힌트)] 모듈 "${om.name}" (moduleIndex: ${om.moduleIndex}). ` +
+      '이 모듈의 로어북을 고치거나 추가하려면 scope를 "module"로, moduleIndex를 이 값으로 지정하세요.' +
+      (Number.isInteger(om.expandedLoreIndex)
+        ? `\n현재 펼쳐져 있는 항목: loreIndex ${om.expandedLoreIndex} "${om.expandedLoreTitle}". 본문 원문:\n\`\`\`\n${om.expandedLoreContent}\n\`\`\``
+        : '')
+    );
+  }
   if (extraContext?.configSummary) {
     extraBlocks.push(`[현재 허용 RisuAI 설정값]\n${JSON.stringify(extraContext.configSummary, null, 2)}`);
   }
@@ -8235,8 +8600,15 @@ function buildConversationMessages({ context, snapshot, extraContext, history, u
     ? `\n⚠️ [원문 잘림 경고] 현재 원문(${currentText.length.toLocaleString()}자)은 앞 ${contentLimit.toLocaleString()}자만 제공되었습니다. 뒷부분 유실을 막기 위해 replace_text 및 전체 code 덮어쓰기는 차단됩니다. 반드시 patch_text 또는 edits로 보이는 구간만 부분 편집하세요.`
     : '';
 
-  const screenNote = context?.screen === 'chat'
-    ? '\n- 안내: 사용자는 현재 채팅 화면(대화 입력창)에 있습니다. 특정 편집 필드를 열지 않았더라도 아래 [현재 캐릭터 요약]/[첫 메시지 목록]/[로어북 목록 요약] 등을 바탕으로 질문에 답하거나, 첫 메시지 수정·추가(update_greeting / create_greeting), 새 로어북·페르소나·정규식·Lua 생성 및 설정 변경을 바로 제안할 수 있습니다.'
+  // Free talk: no input is selected, so nothing is "the current target". The model works through
+  // explicit actions; what the screen looks like is passed on as a hint only.
+  const isFreeTalk = Boolean(context?.freeTalk) || (snapshot?.target?.targetKind || context?.targetKind || 'general') === 'general';
+  const screenHintText = context?.screenHint || (context?.screen === 'chat' ? '채팅 화면' : '');
+  const screenNote = isFreeTalk
+    ? '\n- 모드: 자유대화 — 사용자가 특정 입력칸을 선택하지 않았습니다. 현재 대상이 없으므로 patch_text / replace_text는 쓸 수 없고, ' +
+      '아래 요약들을 바탕으로 질문에 답하거나 전용 동작(update_field, update_greeting / create_greeting, create_lorebook / update_lorebook / organize_lorebook, upsert_regex, update_lua, create_persona / update_persona, update_config)으로 바로 제안하세요. ' +
+      '채팅 말풍선과 모듈 기본 필드는 전용 동작이 없으니, 해당 칸을 클릭하거나 상단에서 대상을 고른 뒤 요청하라고 안내하세요.' +
+      (screenHintText ? `\n- 화면 힌트(참고용, 편집 대상 아님): ${screenHintText}` : '')
     : '';
 
   const systemPrompt = `당신은 RisuAI(및 PocketRisu, RisuBard, 해적리스, RisuNest 등 포크) 안에 내장된 소통형 어시스턴트 "RisuHelper"입니다.
@@ -8268,6 +8640,7 @@ ${extraBlocks.join('\n\n')}
 4. 주의: \`patch_text\`/\`replace_text\`에서 \`target\`을 임의로 바꿔 다른 필드를 지정하지 마세요.
 5. 로어북 폴더를 새로 만들어 로어북을 옮기거나 기존 폴더에 여러 로어북을 담을 때는 절대 \`update_lorebook\`을 여러 개로 쪼개거나 \`\\uf000folder:...\` 키를 임의로 지어내지 말고, 반드시 **단일 \`organize_lorebook\` 블록 하나**로 제안하세요.
 6. 첫 메시지(기본·추가)를 고치거나 새로 추가할 때는 현재 대상이 무엇이든 \`update_greeting\` / \`create_greeting\`을 사용하세요. "추가 첫 메시지를 새로 만들어 달라"는 요청에 기존 항목을 \`replace_text\`로 덮어쓰지 마세요.
+7. 캐릭터 설명·시스템 프롬프트 등 캐릭터 필드나 작가의 노트를 고칠 때, 그 필드가 현재 대상이 아니면 \`update_field\`를 사용하세요. 그 필드가 현재 대상이면 \`patch_text\` / \`replace_text\`도 됩니다.
 
 지원 action 스키마 (표준 JSON):
 - 부분 편집: {"action":"patch_text","title":"설명","edits":[{"before":"원문 구간","after":"수정 구간"}]}
@@ -8280,6 +8653,7 @@ ${extraBlocks.join('\n\n')}
 - 새 페르소나 생성: {"action":"create_persona","title":"설명","name":"이름","note":"메모","personaPrompt":"설명","bindToCurrentChat":true}
 - 기존 페르소나 수정: {"action":"update_persona","title":"설명","personaIndex":0,"name":"이름","note":"메모","personaPrompt":"설명","bindToCurrentChat":false}
 - 허용 설정 변경: {"action":"update_config","title":"설명","changes":{"temperature":80,"maxResponse":2000}}
+- 캐릭터 필드·작가의 노트 수정: {"action":"update_field","title":"설명","field":"desc","edits":[{"before":"...","after":"..."}]} (field는 [캐릭터 필드 목록]의 값. 작가의 노트는 "authorNote". 전체 교체는 edits 대신 "content":"새 전체 텍스트")
 - 첫 메시지 수정: {"action":"update_greeting","title":"설명","greetingIndex":-1,"edits":[{"before":"...","after":"..."}]} (greetingIndex -1 = 기본 첫 메시지, 0 이상 = 추가 첫 메시지 번호. 전체 교체는 edits 대신 "content":"새 전체 텍스트")
 - 추가 첫 메시지 새로 만들기: {"action":"create_greeting","title":"설명","content":"새 추가 첫 메시지 전체 텍스트","useInCurrentChat":false} (기존 항목은 바뀌지 않고 맨 뒤에 추가됨. 사용자가 지금 채팅에서 바로 쓰길 원하면 useInCurrentChat을 true로)
 
@@ -11101,6 +11475,7 @@ const { newPresetState, validatePresetState, assembleRisuHelperMessages } = __re
 const { renderPresetPanel } = __require("src/preset-ui.js");
 const { renderMarkdown } = __require("src/markdown.js");
 const { planGreetingContext, wantsGreetingText } = __require("src/greetings.js");
+const { planFieldContext } = __require("src/fields.js");
 
 const DEFAULT_SETTINGS = {
   modelMode: 'model',
@@ -11143,6 +11518,7 @@ const ACTION_LABELS = {
   create_persona: '새 페르소나 생성',
   update_persona: '페르소나 수정',
   update_config: '설정 변경',
+  update_field: '캐릭터 필드 수정',
   update_greeting: '첫 메시지 수정',
   create_greeting: '추가 첫 메시지 생성',
 };
@@ -11191,6 +11567,7 @@ class RisuHelperApp {
 
     this.isOpen = false;
     this.isDocked = false;
+    this.syncPanelMode();
     this.settingsOpen = false;
     this.presetPanelOpen = false;
     this.presetState = newPresetState();
@@ -11556,7 +11933,9 @@ class RisuHelperApp {
       fieldKey: null,
       loreIndex: null,
       loreScope: null,
-      labelText: '일반 / 수동 선택',
+      freeTalk: true,
+      labelText: '자유대화',
+      screenHint: '',
       warnings: [],
     };
   }
@@ -11568,8 +11947,10 @@ class RisuHelperApp {
     if (wantDock && !this.tracker.enabled) {
       await this.tracker.start().catch(() => false);
     }
-    if (this.tracker.enabled && (!this.detectedContext || this.detectedContext.screen === 'unknown')) {
-      await this.tracker.scanNow({ allowScreenFallback: true });
+    if (this.tracker.enabled) {
+      // Opening the panel confirms a field that just lost the cursor to this very click;
+      // with nothing selected it refreshes the free-talk screen hint.
+      await this.tracker.onPanelOpen(wantDock ? 'docked' : 'overlay');
     }
     this._lastLiveFocusSig = this._focusSignature(this.detectedContext);
 
@@ -11585,10 +11966,12 @@ class RisuHelperApp {
         localWin: this.doc.defaultView,
       });
       this.isDocked = Boolean(dockRes.ok);
+      this.syncPanelMode();
     } else {
       if (this.isDocked) {
         await this.tracker.releaseDock({ restoreChip: false });
         this.isDocked = false;
+        this.syncPanelMode();
       }
       if (typeof this.api.showContainer === 'function') {
         await this.api.showContainer('fullscreen');
@@ -11599,11 +11982,19 @@ class RisuHelperApp {
     this.render();
   }
 
+  /** Tells the tracker whether the host is covered (overlay), usable beside us (docked) or alone. */
+  syncPanelMode() {
+    if (!this.tracker) return;
+    this.tracker.panelMode = !this.isOpen ? 'closed' : (this.isDocked ? 'docked' : 'overlay');
+  }
+
   async close() {
     this.isOpen = false;
+    this.tracker.onPanelClose();
     if (this.isDocked) {
       await this.tracker.releaseDock({ restoreChip: true });
       this.isDocked = false;
+      this.syncPanelMode();
     }
     if (typeof this.api.hideContainer === 'function') {
       await this.api.hideContainer();
@@ -11631,9 +12022,11 @@ class RisuHelperApp {
       });
       if (res.ok) {
         this.isDocked = true;
+        this.syncPanelMode();
         this.showToast('오른쪽 도킹 모드 활성 · RisuAI 입력칸을 클릭하면 실시간 반영됩니다.');
       } else {
         this.isDocked = false;
+        this.syncPanelMode();
         this.settings.dockMode = false;
         await this.saveSettings();
         this.showToast(res.reason || '도킹 모드로 전환할 수 없습니다.');
@@ -11641,6 +12034,7 @@ class RisuHelperApp {
     } else {
       await this.tracker.releaseDock({ restoreChip: false });
       this.isDocked = false;
+      this.syncPanelMode();
       this.showToast('일반 오버레이 모드로 전환했습니다.');
     }
     this.render();
@@ -11662,6 +12056,41 @@ class RisuHelperApp {
     } catch (err) {
       this.activeSnapshot = { ok: false, reason: err.message, content: '' };
     }
+    this.moduleHintSnapshot = await this._readModuleHintSnapshot(ctx);
+  }
+
+  /**
+   * In free talk the expanded item of an open module editor is not a target, but the stale
+   * tempModule warning still has to work: read what the DB holds for that item so it can be
+   * compared with what the editor shows.
+   */
+  async _readModuleHintSnapshot(ctx) {
+    const hints = ctx?.freeTalk ? ctx.moduleDomHints : null;
+    if (!hints) return null;
+    const openIdx = Number.isInteger(hints.openIdx) ? hints.openIdx : null;
+    let hintTarget = null;
+    if (hints.tab === 'lorebook' && openIdx !== null) {
+      hintTarget = { targetKind: 'module_lorebook', loreScope: 'module', loreIndex: openIdx, fieldKey: 'content' };
+    } else if (hints.tab === 'regex' && openIdx !== null) {
+      hintTarget = { targetKind: 'module_regex', regexIndex: openIdx };
+    } else if (hints.tab === 'trigger') {
+      hintTarget = { targetKind: 'module_lua', fieldKey: 'code' };
+    }
+    if (!hintTarget) return null;
+    try {
+      const snap = await this.adapter.readTargetSnapshot({ ...hintTarget, screen: 'module', moduleDomHints: hints });
+      return snap.ok && !snap.moduleUncertain ? snap : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** The module item to compare against the open editor: the selected target, or the free-talk hint. */
+  _moduleSyncSnapshot() {
+    if (this.activeSnapshot?.ok && !this.activeSnapshot.moduleUncertain && this._isModuleDomFillable(this.activeSnapshot.target)) {
+      return this.activeSnapshot;
+    }
+    return this.moduleHintSnapshot || null;
   }
 
   showToast(message) {
@@ -11693,9 +12122,17 @@ class RisuHelperApp {
             extra.greetingsShownFull = plan.shownFull;
           }
           if (this.settings.includeCharSummary) {
+            // Character text fields + author note: previews, and the full text of whichever
+            // field the request mentions (src/fields.js).
+            let noteChat = null;
+            try {
+              noteChat = (await this.adapter.readActiveChat()).chat;
+            } catch {}
+            const fieldPlan = planFieldContext(char, noteChat, { userInput });
+            if (fieldPlan.fields.length > 0) extra.fields = fieldPlan.fields;
+            extra.fieldsShownFull = fieldPlan.shownFull;
             extra.charSummary = {
               name: char.name || '',
-              descPreview: String(char.desc || '').slice(0, 500),
               globalLoreCount: char.globalLore?.length ?? 0,
               regexCount: char.customscript?.length ?? 0,
               hasLua: char.triggerscript?.[0]?.effect?.[0]?.type === 'triggerlua',
@@ -11733,6 +12170,46 @@ class RisuHelperApp {
       extra.moduleLoreSummary = this.activeSnapshot.loreSummary;
       if (this.activeSnapshot.foldersSummary?.length > 0) {
         extra.moduleFoldersSummary = this.activeSnapshot.foldersSummary;
+      }
+    }
+
+    // Free talk hints: what the screen shows is context for the model, not a target.
+    if (ctx.freeTalk && this.settings.includeLoreSummary) {
+      // The chat tab of the lorebook is open: list the chat lorebook too.
+      if (ctx.loreScope === 'chat' && !extra.chatLoreSummary) {
+        try {
+          const snap = await this.adapter.readTargetSnapshot({ targetKind: 'chat_lorebook', loreScope: 'chat' });
+          if (snap.ok && Array.isArray(snap.loreSummary)) {
+            extra.chatLoreSummary = snap.loreSummary;
+            if (snap.foldersSummary?.length > 0) extra.chatFoldersSummary = snap.foldersSummary;
+          }
+        } catch {}
+      }
+      // A module editor is open: say which module it is and list its lorebook, plus the entry
+      // that is expanded, so a module-scoped proposal can name moduleIndex / loreIndex itself.
+      if (ctx.moduleDomHints && !extra.moduleLoreSummary) {
+        try {
+          const openIdx = Number.isInteger(ctx.moduleDomHints.openIdx) ? ctx.moduleDomHints.openIdx : null;
+          const snap = await this.adapter.readTargetSnapshot({
+            targetKind: 'module_lorebook',
+            loreScope: 'module',
+            moduleDomHints: ctx.moduleDomHints,
+            ...(ctx.moduleDomHints.tab === 'lorebook' && openIdx !== null ? { loreIndex: openIdx } : {}),
+          });
+          if (snap.ok && !snap.moduleUncertain && snap.module) {
+            if (Array.isArray(snap.loreSummary)) extra.moduleLoreSummary = snap.loreSummary;
+            if (snap.foldersSummary?.length > 0) extra.moduleFoldersSummary = snap.foldersSummary;
+            extra.openModule = {
+              moduleIndex: snap.target?.moduleIndex ?? null,
+              name: snap.module.name || '',
+              ...(snap.entry && Number.isInteger(snap.target?.loreIndex) ? {
+                expandedLoreIndex: snap.target.loreIndex,
+                expandedLoreTitle: snap.entry.comment || '',
+                expandedLoreContent: String(snap.entry.content ?? '').slice(0, this.settings.maxContentChars),
+              } : {}),
+            };
+          }
+        } catch {}
       }
     }
 
@@ -11798,6 +12275,7 @@ class RisuHelperApp {
       maxHistoryTurns: this.settings.maxHistoryTurns,
     });
     assembled.greetingsShownFull = extraContext.greetingsShownFull || [];
+    assembled.fieldsShownFull = extraContext.fieldsShownFull || [];
     return assembled;
   }
 
@@ -11890,6 +12368,7 @@ class RisuHelperApp {
       const pinnedCtx = JSON.parse(JSON.stringify(ctx));
       // Which first messages the model saw in full for this request (guards whole-text overwrites).
       pinnedCtx.greetingsShownFull = assembled.greetingsShownFull || [];
+      pinnedCtx.fieldsShownFull = assembled.fieldsShownFull || [];
       assistantMsg.proposals = [];
       for (const prop of parsed.proposals) {
         const preview = await this.adapter.previewProposal(prop, pinnedCtx);
@@ -11945,17 +12424,21 @@ class RisuHelperApp {
   }
 
   _hasModuleDomMismatch() {
-    if (!this.tracker?.enabled || !this.activeSnapshot?.ok || this.activeSnapshot.moduleUncertain) return false;
-    const snapTarget = this.activeSnapshot.target;
+    if (!this.tracker?.enabled) return false;
+    const syncSnap = this._moduleSyncSnapshot();
+    if (!syncSnap) return false;
+    const snapTarget = syncSnap.target;
     if (!this._isModuleDomFillable(snapTarget)) return false;
     if (!this.detectedContext || this.detectedContext.screen !== 'module') return false;
-    if (this.detectedContext.targetKind !== snapTarget.targetKind) return false;
-    if (snapTarget.targetKind === 'module_lorebook' && this.detectedContext.loreIndex !== snapTarget.loreIndex) return false;
-    if (snapTarget.targetKind === 'module_regex' && this.detectedContext.regexIndex !== snapTarget.regexIndex) return false;
+    if (!this.detectedContext.freeTalk) {
+      if (this.detectedContext.targetKind !== snapTarget.targetKind) return false;
+      if (snapTarget.targetKind === 'module_lorebook' && this.detectedContext.loreIndex !== snapTarget.loreIndex) return false;
+      if (snapTarget.targetKind === 'module_regex' && this.detectedContext.regexIndex !== snapTarget.regexIndex) return false;
+    }
 
     const norm = (s) => String(s || '').replace(/\r\n/g, '\n').trim();
     const livePreview = norm(this.detectedContext.liveTextPreview || this.detectedContext.moduleDomHints?.textPreview || '');
-    const dbContent = norm(this.activeSnapshot.content || '');
+    const dbContent = norm(syncSnap.content || '');
     if (!livePreview && !dbContent) return false;
     const dbPrefix = dbContent.slice(0, Math.min(dbContent.length, 600)).trim();
     const livePrefix = livePreview.slice(0, Math.min(livePreview.length, 600)).trim();
@@ -12148,7 +12631,7 @@ class RisuHelperApp {
 
   buildTargetPickerOptions() {
     const opts = [
-      { value: 'auto', label: this.detectedContext ? `📍 자동 감지: ${this.detectedContext.labelText}` : '📍 자동 감지 (미감지 · 일반)' },
+      { value: 'auto', label: `📍 자동감지: ${this.detectedContext ? this.detectedContext.labelText : '자유대화'}` },
       { value: 'char_field:desc', label: '캐릭터 · 설명 (Description)' },
       { value: 'char_field:additionalText', label: '캐릭터 · 추가 디스크립션' },
       { value: 'char_field:firstMessage', label: '캐릭터 · 첫 메시지 (First Message)' },
@@ -12178,7 +12661,7 @@ class RisuHelperApp {
       { value: 'config:', label: 'RisuAI 설정 / 컨피그 진단' },
       { value: 'config:customCSS', label: '설정 · 커스텀 CSS (customCSS)' },
       { value: 'config:guiHTML', label: '설정 · 채팅 HTML (guiHTML)' },
-      { value: 'general:', label: '일반 질문 / 사용법 안내' },
+      { value: 'general:', label: '자유대화 (대상 지정 없음)' },
     ];
     return opts;
   }
@@ -12745,7 +13228,7 @@ class RisuHelperApp {
                 this.settings.showDetectDiagnostics = Boolean(e.target.checked);
                 this.tracker.diagnostics = this.settings.showDetectDiagnostics;
                 await this.saveSettings();
-                if (this.tracker.enabled) await this.tracker.scanNow({ allowScreenFallback: true });
+                if (this.tracker.enabled) await this.tracker.scanNow({ force: true });
                 this.render();
               },
             }),
@@ -12937,7 +13420,7 @@ class RisuHelperApp {
           class: 'rh-btn',
           onclick: async () => {
             if (!this.tracker.enabled) await this.tracker.start();
-            await this.tracker.scanNow({ allowScreenFallback: true });
+            await this.tracker.scanNow({ force: true });
             this.manualTarget = null;
             await this.refreshContextSnapshot();
             this.showToast(this.detectedContext ? `감지됨: ${this.detectedContext.labelText}` : '현재 포커스된 입력칸이 없습니다.');
@@ -12981,6 +13464,14 @@ class RisuHelperApp {
         )
       )
     );
+
+    if (ctx.freeTalk) {
+      contextBarChildren.push(
+        h(doc, 'div', { style: 'font-size:11.5px;color:var(--rh-muted);' },
+          '자유대화 — 입력칸을 선택하지 않은 상태입니다. 무엇을 고칠지 말로 요청하면 됩니다. 특정 칸만 다루려면 그 칸을 클릭하거나 위에서 대상을 고르세요.' +
+          (ctx.screenHint ? ` (화면 힌트: ${ctx.screenHint})` : ''))
+      );
+    }
 
     if (ctx.warnings?.length) {
       for (const w of ctx.warnings) {
@@ -13059,10 +13550,11 @@ class RisuHelperApp {
             h(doc, 'button', {
               class: 'rh-btn',
               onclick: async () => {
+                const syncSnap = this._moduleSyncSnapshot();
                 const syncRes = await this.syncOpenModuleEditor(
-                  this.activeSnapshot.target,
-                  this.activeSnapshot.content,
-                  { moduleId: this.activeSnapshot.hostBinding?.moduleId || null }
+                  syncSnap.target,
+                  syncSnap.content,
+                  { moduleId: syncSnap.hostBinding?.moduleId || null }
                 );
                 this.showToast(syncRes.ok ? syncRes.message : syncRes.reason);
                 this.render();

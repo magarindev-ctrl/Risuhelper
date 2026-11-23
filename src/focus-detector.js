@@ -417,7 +417,84 @@ async function collectModuleDomHints(scopeRoot, { activeTabs = [], focusedLoreId
  * Pure classification logic: takes DOM snapshot signals gathered from SafeElement traversal
  * and resolves a structured FocusContext suitable for RisuHelper's host adapter & LLM.
  */
+const FREE_TALK_LABEL = '자유대화';
+
+/**
+ * True when a context names one concrete, editable place. Only these count as "the user has
+ * selected an input"; everything else is free talk.
+ */
+function isWritableTarget(ctx) {
+  if (!ctx || ctx.freeTalk) return false;
+  switch (ctx.targetKind) {
+    case 'char_field':
+    case 'module_field':
+    case 'persona':
+    case 'config':
+      return Boolean(ctx.fieldKey);
+    case 'chat_note':
+    case 'char_lua':
+    case 'module_lua':
+      return true;
+    case 'char_lorebook':
+    case 'chat_lorebook':
+    case 'module_lorebook':
+      return Number.isInteger(ctx.loreIndex);
+    case 'char_regex':
+    case 'module_regex':
+      // A cursor inside a regex script editor is a selection even where the host gives no index.
+      return true;
+    case 'char_alt_greeting':
+      return Number.isInteger(ctx.greetingIndex);
+    case 'chat_message':
+      return Number.isInteger(ctx.messageIndex);
+    default:
+      return false;
+  }
+}
+
+/**
+ * Turns "nothing concrete is selected" into the free-talk context. What the detector saw of the
+ * screen is kept as a hint for the model (`screen`, `screenHint`, `loreScope`, module hints and
+ * warnings) but never as a target: nothing can be written through it without an explicit action.
+ */
+function toFreeTalk(ctx) {
+  const base = ctx || {};
+  const rawLabel = String(base.labelText || '');
+  const screenHint = base.screen === 'chat'
+    ? '채팅 화면'
+    : (rawLabel && rawLabel !== FREE_TALK_LABEL && !rawLabel.startsWith(SCREEN_LABELS.unknown) ? rawLabel : '');
+  const out = {
+    detectedAt: Date.now(),
+    screen: base.screen || 'unknown',
+    targetKind: 'general',
+    fieldKey: null,
+    loreIndex: null,
+    loreScope: base.loreScope ?? null,
+    freeTalk: true,
+    labelText: FREE_TALK_LABEL,
+    screenHint,
+    placeholder: base.placeholder || '',
+    liveTextPreview: '',
+    warnings: Array.isArray(base.warnings) ? base.warnings : [],
+  };
+  if (base.moduleDomHints) out.moduleDomHints = base.moduleDomHints;
+  if (base.diagnostics) out.diagnostics = base.diagnostics;
+  return out;
+}
+
+/**
+ * Classifies DOM signals. A field is returned only when an editable input really has the
+ * cursor (`signals.tag` is the focused element) and it maps to one concrete place; signals
+ * gathered without a focused input describe the screen and always yield free talk.
+ */
 function classifyDomSignals(signals) {
+  const raw = classifyDomSignalsRaw(signals);
+  const hasFocusedInput = signals?.focused ?? Boolean(signals?.tag);
+  if (hasFocusedInput && isWritableTarget(raw)) return raw;
+  return toFreeTalk(raw);
+}
+
+function classifyDomSignalsRaw(signals) {
   const {
     tag = '',
     placeholder = '',
@@ -1378,18 +1455,7 @@ async function inspectVisibleScreen(rootDoc) {
     }
 
     if (chatInputEl) {
-      return {
-        detectedAt: Date.now(),
-        screen: 'chat',
-        targetKind: 'general',
-        fieldKey: null,
-        loreIndex: null,
-        loreScope: null,
-        labelText: '채팅 입력 화면',
-        placeholder: '',
-        liveTextPreview: '',
-        warnings: [],
-      };
+      return toFreeTalk({ screen: 'chat' });
     }
 
     if (headings.length > 0) {
@@ -1503,7 +1569,9 @@ class FocusTracker {
     this.chipListenerIds = [];
     this.lastContext = null;
     this.enabled = false;
-    this.liveScreenFallback = false;
+    this.panelMode = 'closed';
+    this.freeTalkGraceMs = 5000;
+    this._pendingFreeTalk = null;
     this._scanPending = false;
     this._drag = null;
     this._dragHandled = false;
@@ -1648,22 +1716,95 @@ class FocusTracker {
     this._scanPending = true;
     setTimeout(async () => {
       this._scanPending = false;
-      await this.scanNow({ allowScreenFallback: Boolean(this.liveScreenFallback) });
+      await this.scanNow();
     }, 45);
   }
 
-  async scanNow({ allowScreenFallback = false } = {}) {
-    if (!this.rootDoc) return this.lastContext;
-    let ctx = await inspectFocusedElement(this.rootDoc, { diagnostics: Boolean(this.diagnostics) });
-    if (!ctx && allowScreenFallback) {
-      ctx = await inspectVisibleScreen(this.rootDoc);
+  _commitContext(ctx) {
+    this._cancelPendingFreeTalk();
+    this.lastContext = ctx;
+    this.onChange(ctx);
+    return this.updateChipLabel(ctx);
+  }
+
+  _cancelPendingFreeTalk() {
+    if (this._pendingFreeTalk) {
+      clearTimeout(this._pendingFreeTalk);
+      this._pendingFreeTalk = null;
     }
-    if (ctx) {
-      this.lastContext = ctx;
-      this.onChange(ctx);
-      await this.updateChipLabel(ctx);
+  }
+
+  async _freeTalkContext(nonEditableFocus = null) {
+    if (nonEditableFocus) return nonEditableFocus;
+    const screen = await inspectVisibleScreen(this.rootDoc);
+    return screen || toFreeTalk(null);
+  }
+
+  /**
+   * Re-reads where the cursor is.
+   *  - Cursor in an editable field that maps to one concrete place -> that field.
+   *  - Cursor in some other input (chat box, search box, unknown field) -> free talk, at once.
+   *  - No cursor anywhere: the field is NOT dropped immediately, because clicking the button that
+   *    opens RisuHelper is exactly what takes the cursor out of the field. It is kept for
+   *    `freeTalkGraceMs`; if the panel opens in that time it stays (onPanelOpen), otherwise the
+   *    target falls back to free talk so a field left behind does not stay selected.
+   *    While the panel is docked the host stays usable, so clicking away switches immediately;
+   *    while the overlay covers the host nothing there can change the target.
+   * `force` (the "re-detect" button) skips the grace period.
+   */
+  async scanNow({ force = false } = {}) {
+    if (!this.rootDoc) return this.lastContext;
+    const focused = await inspectFocusedElement(this.rootDoc, { diagnostics: Boolean(this.diagnostics) });
+
+    if (focused && !focused.freeTalk) {
+      await this._commitContext(focused);
+      return this.lastContext;
+    }
+    if (focused) {
+      await this._commitContext(await this._freeTalkContext(focused));
+      return this.lastContext;
+    }
+
+    const holdingField = Boolean(this.lastContext && !this.lastContext.freeTalk);
+    if (!holdingField || force || this.panelMode === 'docked') {
+      await this._commitContext(await this._freeTalkContext());
+      return this.lastContext;
+    }
+    if (this.panelMode === 'overlay') {
+      return this.lastContext;
+    }
+    if (!this._pendingFreeTalk) {
+      this._pendingFreeTalk = setTimeout(async () => {
+        this._pendingFreeTalk = null;
+        if (!this.rootDoc || this.panelMode !== 'closed') return;
+        try {
+          const stillFocused = await inspectFocusedElement(this.rootDoc, { diagnostics: Boolean(this.diagnostics) });
+          if (stillFocused && !stillFocused.freeTalk) {
+            await this._commitContext(stillFocused);
+          } else {
+            await this._commitContext(await this._freeTalkContext(stillFocused));
+          }
+        } catch (err) { noteDetectError(err); }
+      }, this.freeTalkGraceMs);
     }
     return this.lastContext;
+  }
+
+  /**
+   * The panel was opened ('overlay' or 'docked'). A field that lost the cursor moments ago is
+   * confirmed as the target; if nothing is selected, the screen hint is refreshed.
+   */
+  async onPanelOpen(mode = 'overlay') {
+    this._cancelPendingFreeTalk();
+    this.panelMode = mode === 'docked' ? 'docked' : 'overlay';
+    if (this.rootDoc && (!this.lastContext || this.lastContext.freeTalk)) {
+      await this.scanNow({ force: true });
+    }
+    return this.lastContext;
+  }
+
+  onPanelClose() {
+    this.panelMode = 'closed';
   }
 
   async snapshotVisibleIframes() {
@@ -1851,7 +1992,6 @@ class FocusTracker {
 
     this._isDocked = true;
     this._dockWidth = dockW;
-    this.liveScreenFallback = true;
     return { ok: true, width: dockW, viewWidth: view.width };
   }
 
@@ -1859,7 +1999,6 @@ class FocusTracker {
    * Restores host <main> layout and our plugin iframe back to standard fullscreen geometry.
    */
   async releaseDock({ restoreChip = true } = {}) {
-    this.liveScreenFallback = false;
     await this._restoreMainLayout();
 
     if (this._dockFrame && typeof this._dockFrame.setStyle === 'function') {
@@ -2232,6 +2371,7 @@ class FocusTracker {
 
   async stop() {
     this.enabled = false;
+    this._cancelPendingFreeTalk();
     clearTimeout(this._longPressTimer);
     this._drag = null;
     this._dragHandled = false;
@@ -2395,6 +2535,9 @@ export {
   classifyDomSignals,
   inspectFocusedElement,
   inspectVisibleScreen,
+  isWritableTarget,
+  toFreeTalk,
+  FREE_TALK_LABEL,
   syncModuleEditorDom,
   normalizeChipPos,
   MIN_DOCK_VIEWPORT_PX,

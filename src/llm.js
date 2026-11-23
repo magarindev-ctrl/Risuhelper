@@ -1,3 +1,4 @@
+import { FREE_EDIT_FIELDS } from './fields.js';
 import { buildKnowledgeForContext } from './knowledge.js';
 import {
   ALLOWED_CONFIG_KEYS,
@@ -134,6 +135,7 @@ const VALID_ACTIONS = new Set([
   'update_config',
   'update_greeting',
   'create_greeting',
+  'update_field',
 ]);
 
 /**
@@ -346,6 +348,7 @@ const PROPOSAL_KEYS_BY_ACTION = {
   update_config: ['changes'],
   update_greeting: ['greetingIndex', 'edits', 'content'],
   create_greeting: ['content', 'useInCurrentChat'],
+  update_field: ['field', 'edits', 'content'],
 };
 
 function findUnknownProposalKeys(item) {
@@ -476,6 +479,21 @@ function validateProposal(item) {
       return 'update_greeting에는 edits 배열 또는 content 문자열이 필요합니다.';
     }
   }
+  if (item.action === 'update_field') {
+    if (typeof item.field !== 'string' || !FREE_EDIT_FIELDS.includes(item.field)) {
+      return `update_field의 field는 다음 중 하나여야 합니다: ${FREE_EDIT_FIELDS.join(', ')}`;
+    }
+    const hasEdits = Array.isArray(item.edits) && item.edits.length > 0;
+    if (hasEdits) {
+      for (const e of item.edits) {
+        if (!e || typeof e.before !== 'string' || !e.before || typeof e.after !== 'string') {
+          return 'edits 항목은 비어 있지 않은 문자열 before와 문자열 after가 필요합니다.';
+        }
+      }
+    } else if (typeof item.content !== 'string') {
+      return 'update_field에는 edits 배열 또는 content 문자열이 필요합니다.';
+    }
+  }
   if (item.action === 'create_greeting') {
     if (typeof item.content !== 'string' || !item.content.trim()) {
       return 'create_greeting에는 비어 있지 않은 content 문자열이 필요합니다.';
@@ -510,6 +528,13 @@ function buildConversationMessages({ context, snapshot, extraContext, history, u
   if (extraContext?.charSummary) {
     extraBlocks.push(`[현재 캐릭터 요약]\n${JSON.stringify(extraContext.charSummary, null, 2)}`);
   }
+  if (extraContext?.fields?.length) {
+    extraBlocks.push(
+      '[캐릭터 필드 목록] update_field의 field 값과 현재 내용. truncated: true 인 항목은 앞부분만 보이는 상태이므로 ' +
+      'content 전체 교체를 제안하지 말고 보이는 구간의 edits만 제안하세요(전문이 필요하면 사용자에게 그 필드를 언급해 다시 요청하라고 안내).\n' +
+      JSON.stringify(extraContext.fields, null, 2)
+    );
+  }
   if (extraContext?.greetings?.greetings?.length) {
     extraBlocks.push(
       '[첫 메시지 목록] index -1 = 기본 첫 메시지(firstMessage), 0 이상 = 추가 첫 메시지(alternateGreetings) 번호. ' +
@@ -538,6 +563,16 @@ function buildConversationMessages({ context, snapshot, extraContext, history, u
   if (extraContext?.personasSummary) {
     extraBlocks.push(`[페르소나 목록 요약]\n${JSON.stringify(extraContext.personasSummary, null, 2)}`);
   }
+  if (extraContext?.openModule) {
+    const om = extraContext.openModule;
+    extraBlocks.push(
+      `[열려 있는 모듈 편집 화면 (참고용 힌트)] 모듈 "${om.name}" (moduleIndex: ${om.moduleIndex}). ` +
+      '이 모듈의 로어북을 고치거나 추가하려면 scope를 "module"로, moduleIndex를 이 값으로 지정하세요.' +
+      (Number.isInteger(om.expandedLoreIndex)
+        ? `\n현재 펼쳐져 있는 항목: loreIndex ${om.expandedLoreIndex} "${om.expandedLoreTitle}". 본문 원문:\n\`\`\`\n${om.expandedLoreContent}\n\`\`\``
+        : '')
+    );
+  }
   if (extraContext?.configSummary) {
     extraBlocks.push(`[현재 허용 RisuAI 설정값]\n${JSON.stringify(extraContext.configSummary, null, 2)}`);
   }
@@ -546,8 +581,15 @@ function buildConversationMessages({ context, snapshot, extraContext, history, u
     ? `\n⚠️ [원문 잘림 경고] 현재 원문(${currentText.length.toLocaleString()}자)은 앞 ${contentLimit.toLocaleString()}자만 제공되었습니다. 뒷부분 유실을 막기 위해 replace_text 및 전체 code 덮어쓰기는 차단됩니다. 반드시 patch_text 또는 edits로 보이는 구간만 부분 편집하세요.`
     : '';
 
-  const screenNote = context?.screen === 'chat'
-    ? '\n- 안내: 사용자는 현재 채팅 화면(대화 입력창)에 있습니다. 특정 편집 필드를 열지 않았더라도 아래 [현재 캐릭터 요약]/[첫 메시지 목록]/[로어북 목록 요약] 등을 바탕으로 질문에 답하거나, 첫 메시지 수정·추가(update_greeting / create_greeting), 새 로어북·페르소나·정규식·Lua 생성 및 설정 변경을 바로 제안할 수 있습니다.'
+  // Free talk: no input is selected, so nothing is "the current target". The model works through
+  // explicit actions; what the screen looks like is passed on as a hint only.
+  const isFreeTalk = Boolean(context?.freeTalk) || (snapshot?.target?.targetKind || context?.targetKind || 'general') === 'general';
+  const screenHintText = context?.screenHint || (context?.screen === 'chat' ? '채팅 화면' : '');
+  const screenNote = isFreeTalk
+    ? '\n- 모드: 자유대화 — 사용자가 특정 입력칸을 선택하지 않았습니다. 현재 대상이 없으므로 patch_text / replace_text는 쓸 수 없고, ' +
+      '아래 요약들을 바탕으로 질문에 답하거나 전용 동작(update_field, update_greeting / create_greeting, create_lorebook / update_lorebook / organize_lorebook, upsert_regex, update_lua, create_persona / update_persona, update_config)으로 바로 제안하세요. ' +
+      '채팅 말풍선과 모듈 기본 필드는 전용 동작이 없으니, 해당 칸을 클릭하거나 상단에서 대상을 고른 뒤 요청하라고 안내하세요.' +
+      (screenHintText ? `\n- 화면 힌트(참고용, 편집 대상 아님): ${screenHintText}` : '')
     : '';
 
   const systemPrompt = `당신은 RisuAI(및 PocketRisu, RisuBard, 해적리스, RisuNest 등 포크) 안에 내장된 소통형 어시스턴트 "RisuHelper"입니다.
@@ -579,6 +621,7 @@ ${extraBlocks.join('\n\n')}
 4. 주의: \`patch_text\`/\`replace_text\`에서 \`target\`을 임의로 바꿔 다른 필드를 지정하지 마세요.
 5. 로어북 폴더를 새로 만들어 로어북을 옮기거나 기존 폴더에 여러 로어북을 담을 때는 절대 \`update_lorebook\`을 여러 개로 쪼개거나 \`\\uf000folder:...\` 키를 임의로 지어내지 말고, 반드시 **단일 \`organize_lorebook\` 블록 하나**로 제안하세요.
 6. 첫 메시지(기본·추가)를 고치거나 새로 추가할 때는 현재 대상이 무엇이든 \`update_greeting\` / \`create_greeting\`을 사용하세요. "추가 첫 메시지를 새로 만들어 달라"는 요청에 기존 항목을 \`replace_text\`로 덮어쓰지 마세요.
+7. 캐릭터 설명·시스템 프롬프트 등 캐릭터 필드나 작가의 노트를 고칠 때, 그 필드가 현재 대상이 아니면 \`update_field\`를 사용하세요. 그 필드가 현재 대상이면 \`patch_text\` / \`replace_text\`도 됩니다.
 
 지원 action 스키마 (표준 JSON):
 - 부분 편집: {"action":"patch_text","title":"설명","edits":[{"before":"원문 구간","after":"수정 구간"}]}
@@ -591,6 +634,7 @@ ${extraBlocks.join('\n\n')}
 - 새 페르소나 생성: {"action":"create_persona","title":"설명","name":"이름","note":"메모","personaPrompt":"설명","bindToCurrentChat":true}
 - 기존 페르소나 수정: {"action":"update_persona","title":"설명","personaIndex":0,"name":"이름","note":"메모","personaPrompt":"설명","bindToCurrentChat":false}
 - 허용 설정 변경: {"action":"update_config","title":"설명","changes":{"temperature":80,"maxResponse":2000}}
+- 캐릭터 필드·작가의 노트 수정: {"action":"update_field","title":"설명","field":"desc","edits":[{"before":"...","after":"..."}]} (field는 [캐릭터 필드 목록]의 값. 작가의 노트는 "authorNote". 전체 교체는 edits 대신 "content":"새 전체 텍스트")
 - 첫 메시지 수정: {"action":"update_greeting","title":"설명","greetingIndex":-1,"edits":[{"before":"...","after":"..."}]} (greetingIndex -1 = 기본 첫 메시지, 0 이상 = 추가 첫 메시지 번호. 전체 교체는 edits 대신 "content":"새 전체 텍스트")
 - 추가 첫 메시지 새로 만들기: {"action":"create_greeting","title":"설명","content":"새 추가 첫 메시지 전체 텍스트","useInCurrentChat":false} (기존 항목은 바뀌지 않고 맨 뒤에 추가됨. 사용자가 지금 채팅에서 바로 쓰길 원하면 useInCurrentChat을 true로)
 

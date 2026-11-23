@@ -12,6 +12,7 @@ import {
 } from './version.js';
 import { applyTextEdits } from './text-edits.js';
 import { diffValues, revertOps } from './undo-journal.js';
+import { FREE_EDIT_FIELDS, AUTHOR_NOTE_FIELD, fieldLabel } from './fields.js';
 
 const BAD_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 const DB_PERMISSION_ERROR =
@@ -1656,7 +1657,7 @@ class HostAdapter {
             ok: true,
             target: t,
             hostBinding: { charIndex, ...getCharIdentity(char) },
-            label: `채팅 화면 (${char.name || '이름 없음'})`,
+            label: `자유대화 · 채팅 화면 (${char.name || '이름 없음'})`,
             content: '',
             charName: char.name || '',
             ...(orphanedCharLore.length > 0 ? {
@@ -1668,10 +1669,10 @@ class HostAdapter {
           };
         }
       } catch {}
-      return { ok: true, target: t, label: '채팅 입력 화면', content: '' };
+      return { ok: true, target: t, label: '자유대화 · 채팅 화면', content: '' };
     }
 
-    return { ok: true, target: t, label: '일반 대화 / 질문', content: '' };
+    return { ok: true, target: t, label: t.screenHint ? `자유대화 · ${t.screenHint}` : '자유대화', content: '' };
   }
 
   // ---------------------------------------------------------------------------------------------
@@ -2010,6 +2011,19 @@ class HostAdapter {
       }
     }
 
+    if (proposal.action === 'update_field') {
+      if (typeof proposal.field !== 'string' || !FREE_EDIT_FIELDS.includes(proposal.field)) {
+        return `수정할 수 없는 필드입니다: ${String(proposal.field)}. (가능: ${FREE_EDIT_FIELDS.join(', ')})`;
+      }
+      if (proposal.field !== AUTHOR_NOTE_FIELD) {
+        const { char } = await this.readActiveCharacter();
+        if (!char) return '선택된 캐릭터가 없습니다.';
+        if (char.type === 'group') {
+          return '그룹 채팅에는 캐릭터 필드가 없어 update_field로 수정할 수 없습니다. (작가의 노트는 가능)';
+        }
+      }
+    }
+
     if (proposal.action === 'update_greeting' || proposal.action === 'create_greeting') {
       const { char } = await this.readActiveCharacter();
       if (!char) return '선택된 캐릭터가 없습니다.';
@@ -2091,7 +2105,7 @@ class HostAdapter {
         return {
           ok: false,
           error: `현재 대상(${kind || '없음'})에는 직접 텍스트 적용을 지원하지 않습니다. 상단에서 편집할 대상을 선택해 주세요. ` +
-            '첫 메시지를 고치거나 새로 추가하려는 것이라면 대상 선택 없이 update_greeting / create_greeting 제안을 쓰면 됩니다(자동 재요청).',
+            '자유대화에서는 전용 동작을 쓰면 대상 선택 없이 됩니다: 캐릭터 필드·작가의 노트는 update_field, 첫 메시지는 update_greeting / create_greeting (자동 재요청).',
           label: snap.label,
           target: snap.target,
         };
@@ -2459,6 +2473,31 @@ class HostAdapter {
       };
     }
 
+    if (proposal.action === 'update_field') {
+      const fTarget = this._fieldTarget(proposal.field);
+      const snap = await this.readTargetSnapshot(fTarget);
+      if (!snap.ok) return { ok: false, error: snap.reason };
+      const before = String(snap.content ?? '');
+      const guardError = this._fieldOverwriteError(proposal, target, before);
+      if (guardError) return { ok: false, error: guardError, before, label: snap.label };
+      try {
+        const after = Array.isArray(proposal.edits) && proposal.edits.length > 0
+          ? applyTextEdits(before, proposal.edits, snap.label)
+          : String(proposal.content ?? '');
+        return {
+          ok: true,
+          before,
+          after,
+          label: snap.label,
+          target: { ...snap.target, fieldsShownFull: target.fieldsShownFull, greetingsShownFull: target.greetingsShownFull },
+          hostBinding: snap.hostBinding,
+          warning: proposal.field === 'firstMessage' ? await this._greetingScopeNotice(-1) : null,
+        };
+      } catch (err) {
+        return { ok: false, error: err.message, before, label: snap.label };
+      }
+    }
+
     if (proposal.action === 'update_greeting') {
       const gTarget = this._greetingTarget(proposal);
       const snap = await this.readTargetSnapshot(gTarget);
@@ -2555,6 +2594,8 @@ class HostAdapter {
         return await this._applyUpdatePersona(proposal, target, options);
       case 'update_config':
         return await this._applyUpdateConfig(proposal);
+      case 'update_field':
+        return await this._applyUpdateField(proposal, target, options);
       case 'update_greeting':
         return await this._applyUpdateGreeting(proposal, target, options);
       case 'create_greeting':
@@ -2666,7 +2707,7 @@ class HostAdapter {
         holder: root,
         key: fieldKey,
         label: `캐릭터 ${fieldKey}`,
-        summary: `캐릭터 ${CHAR_FIELD_META[fieldKey]?.label || fieldKey}에 적용했습니다.`,
+        summary: `${String(CHAR_FIELD_META[fieldKey]?.label || fieldKey).replace(/^(?!캐릭터)/, '캐릭터 ')}에 적용했습니다.`,
       }));
     }
 
@@ -2741,6 +2782,46 @@ class HostAdapter {
     }
 
     throw new Error(`현재 대상(${kind || '없음'})에는 직접 텍스트 적용을 지원하지 않습니다. 상단에서 대상을 선택해 주세요.`);
+  }
+
+  /** Where a free-talk field lives: the author note is on the chat, everything else on the character. */
+  _fieldTarget(field) {
+    return field === AUTHOR_NOTE_FIELD
+      ? { targetKind: 'chat_note', fieldKey: 'note' }
+      : { targetKind: 'char_field', fieldKey: field };
+  }
+
+  /**
+   * A whole-text replacement is only safe when the model was shown the whole field
+   * (`target.fieldsShownFull`, see src/fields.js). Partial edits are exact-match and always safe.
+   */
+  _fieldOverwriteError(proposal, target, before) {
+    const isOverwrite = !(Array.isArray(proposal.edits) && proposal.edits.length > 0);
+    if (!isOverwrite || before.length === 0) return null;
+    const shownFields = Array.isArray(target?.fieldsShownFull) ? target.fieldsShownFull : [];
+    const shownGreetings = Array.isArray(target?.greetingsShownFull) ? target.greetingsShownFull : [];
+    const wasShown = proposal.field === 'firstMessage'
+      ? shownGreetings.includes(-1) || shownFields.includes('firstMessage')
+      : shownFields.includes(proposal.field);
+    if (!wasShown) {
+      return `"${fieldLabel(proposal.field)}"은(는) 전문이 모델에 전달되지 않은 상태(앞부분 미리보기만 전달)라, 뒷부분 유실을 막기 위해 전체 덮어쓰기를 차단했습니다. ` +
+        '보이는 구간의 부분 편집(edits)을 쓰거나, 요청에 그 필드 이름을 넣어 다시 요청하거나, 해당 입력칸을 클릭한 뒤 요청해 주세요.';
+    }
+    return this._checkTruncationGuard(before, '필드 전체 덮어쓰기');
+  }
+
+  async _applyUpdateField(proposal, target, options = {}) {
+    const fTarget = this._fieldTarget(proposal.field);
+    const snap = await this.readTargetSnapshot(fTarget);
+    if (!snap.ok) throw new Error(snap.reason);
+    const guardError = this._fieldOverwriteError(proposal, target, String(snap.content ?? ''));
+    if (guardError) throw new Error(guardError);
+    const hasEdits = Array.isArray(proposal.edits) && proposal.edits.length > 0;
+    return await this._applyTextTarget(
+      hasEdits ? { action: 'patch_text', edits: proposal.edits } : { action: 'replace_text', content: proposal.content },
+      fTarget,
+      options
+    );
   }
 
   /** Where a greeting lives: index -1 is the default first message, n >= 0 an alternate greeting. */

@@ -631,10 +631,11 @@ test('dist/risuhelper.js renders LLM Markdown replies as rich editor cards with 
   assert.ok(doc.querySelector('.rh-md'), 'switching back restores rich Markdown view');
 });
 
-test('dist/risuhelper.js auto-identifies the open module lorebook in UI dropdowns (module + entry) and shows its real prompt content', async () => {
+test('dist/risuhelper.js treats an expanded module entry without a cursor as a free-talk hint and tells the model which module and entry are open', async () => {
   const code = fs.readFileSync(BUNDLE_PATH, 'utf8');
   const doc = createMockDocument();
   const registeredButtons = [];
+  let capturedSystemPrompt = null;
 
   const promptBody = '- CRITICAL: This is a front-end rendering command.\nBackground List: airplane interior, airport';
 
@@ -736,6 +737,7 @@ test('dist/risuhelper.js auto-identifies the open module lorebook in UI dropdown
     async getCharacter() { return { name: '테스트봇', desc: '', globalLore: [], customscript: [], triggerscript: [], chats: [{}] }; },
     async getCurrentCharacterIndex() { return 0; },
     async getCurrentChatIndex() { return 0; },
+    async runLLMModel({ messages }) { capturedSystemPrompt = messages[0].content; return '설명입니다.'; },
     async getRootDocument() { return rootDoc; },
     async getDatabase() {
       return {
@@ -792,22 +794,24 @@ test('dist/risuhelper.js auto-identifies the open module lorebook in UI dropdown
   };
   walk(doc.body);
 
-  // Target select + Module select + Module Lorebook entry select = 3 selects in context bar
-  assert.equal(selects.length, 3, 'should render target select, module select, and module lorebook entry select');
+  // Nothing has the cursor, so the expanded module entry is a hint, not the target: free talk.
+  assert.equal(selects.length, 1, 'without a selected input only the target select is shown');
   const autoOpt = selects[0].children.find(o => o.value === 'auto');
-  assert.match(autoOpt.textContent, /모듈 로어북 #2/);
+  assert.match(autoOpt.textContent, /자유대화/);
+  assert.match(doc.body.textContent, /화면 힌트: 모듈 로어북 #2/);
 
-  const selectedModOpt = selects[1].children.find(o => o.selected);
-  assert.equal(selectedModOpt.value, '1');
-  assert.match(selectedModOpt.textContent, /배경 자동 변경 모듈/);
-
-  const selectedLoreOpt = selects[2].children.find(o => o.selected);
-  assert.equal(selectedLoreOpt.value, '1');
-  assert.match(selectedLoreOpt.textContent, /Global LoreBook Override/);
-
-  // Preview displays the real module lorebook prompt, NOT modules[0].description
-  assert.match(doc.body.textContent, /CRITICAL: This is a front-end rendering command/);
-  assert.doesNotMatch(doc.body.textContent, /AI챗고수가도리거야/);
+  // The model still learns which module is open and gets the expanded entry's real text,
+  // so it can address it explicitly (scope module + moduleIndex + loreIndex).
+  doc.querySelector('.rh-composer-input').value = '펼쳐진 항목 설명해줘';
+  const sendBtn = (() => { let found = null; const w = (n) => { if (n.tagName === 'BUTTON' && n.textContent === '전송') found = n; for (const c of n.children || []) w(c); }; w(doc.body); return found; })();
+  sendBtn.click();
+  await new Promise(r => setTimeout(r, 60));
+  assert.ok(capturedSystemPrompt, 'the request must have been sent');
+  assert.match(capturedSystemPrompt, /배경 자동 변경 모듈/);
+  assert.match(capturedSystemPrompt, /moduleIndex: 1/);
+  assert.match(capturedSystemPrompt, /loreIndex 1 "Global LoreBook Override"/);
+  assert.match(capturedSystemPrompt, /CRITICAL: This is a front-end rendering command/);
+  assert.doesNotMatch(capturedSystemPrompt, /AI챗고수가도리거야/);
 });
 
 test('dist/risuhelper.js keeps multi-line template literals byte-identical to src (no bundler indentation injected)', () => {
@@ -955,7 +959,7 @@ test('dist/risuhelper.js warns about stale tempModule after module apply and ref
       if (patch.modules) db.modules = JSON.parse(JSON.stringify(patch.modules));
     },
     async runLLMModel() {
-      return '수정안입니다.\n```risuhelper-proposal\n{"action":"patch_text","title":"로어북 수정","edits":[{"before":"Initial module lore line","after":"Updated module lore line"}]}\n```';
+      return '수정안입니다.\n```risuhelper-proposal\n{"action":"update_lorebook","title":"로어북 수정","scope":"module","moduleIndex":0,"loreIndex":1,"edits":[{"before":"Initial module lore line","after":"Updated module lore line"}]}\n```';
     },
   };
 
@@ -1002,7 +1006,6 @@ test('dist/risuhelper.js warns about stale tempModule after module apply and ref
   assert.equal(db.modules[0].lorebook[1].content, patchedBody);
   assert.equal(liveDomText, initialBody, 'default safe mode must not overwrite DOM until user clicks fill or opts in');
   assert.match(doc.body.textContent, /하단 "모듈 수정" 버튼을 누르면/);
-  assert.match(doc.body.textContent, /현재 DB 원문 보기/);
 
   const fillBtns = findButtons('📝 입력칸에 채우기');
   assert.equal(fillBtns.length, 1, 'applied module card should offer 1-click DOM fill button');

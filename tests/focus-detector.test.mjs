@@ -266,7 +266,9 @@ test('inspectFocusedElement detects DefaultChatScreen textarea.text-input-area e
   const focusedCtx = await inspectFocusedElement(rootDocFocused);
   assert.ok(focusedCtx);
   assert.equal(focusedCtx.screen, 'chat');
-  assert.equal(focusedCtx.labelText, '채팅 입력 화면');
+  // The chat box is not an editable target: it is free talk, with the chat screen as a hint.
+  assert.equal(focusedCtx.labelText, '자유대화');
+  assert.equal(focusedCtx.freeTalk, true);
 
   // When nothing is focused (e.g. FAB tapped directly on chat screen), inspectVisibleScreen detects chat
   const rootDocNoFocus = {
@@ -873,7 +875,6 @@ test('FocusTracker PC right-dock self-verifies own iframe among multiple plugin 
   assert.equal(myStyles.width, '420px');
   assert.equal(mainStyles.width, 'calc(100% - 420px)');
   assert.equal(chipMounted, false, 'floating chip hides while docked');
-  assert.equal(tracker.liveScreenFallback, true);
 
   // Changing width to 500px updates both iframe & <main> while keeping original saved <main> style intact
   const widerRes = await tracker.applyDock({ width: 500, pushLayout: true, localWin });
@@ -1309,10 +1310,12 @@ test('PocketRisu & upstream RisuAI ModuleMenu detects active tabs, expanded lore
   // 1. Without focus (docked mode after clicking tab / expanding accordion / clicking '커서 재감지')
   const screenCtx = await inspectVisibleScreen(rootDoc);
   assert.ok(screenCtx);
-  assert.equal(screenCtx.targetKind, 'module_lorebook');
-  assert.equal(screenCtx.loreIndex, 1);
-  assert.equal(screenCtx.fieldKey, 'content');
-  assert.equal(screenCtx.labelText, '모듈 로어북 #2 · 본문');
+  // Without a cursor in an input the expanded entry is a hint, not a target (free talk).
+  assert.equal(screenCtx.freeTalk, true);
+  assert.equal(screenCtx.targetKind, 'general');
+  assert.equal(screenCtx.loreIndex, null);
+  assert.equal(screenCtx.labelText, '자유대화');
+  assert.match(screenCtx.screenHint, /모듈 로어북 #2/);
   assert.ok(screenCtx.moduleDomHints);
   assert.equal(screenCtx.moduleDomHints.tab, 'lorebook');
   assert.equal(screenCtx.moduleDomHints.openIdx, 1);
@@ -1363,7 +1366,8 @@ test('PocketRisu & upstream RisuAI ModuleMenu detects active tabs, expanded lore
   const regexDoc = makeQueryNode({ tag: 'html', children: [regexPage] });
 
   const regexScreenCtx = await inspectVisibleScreen(regexDoc);
-  assert.equal(regexScreenCtx.targetKind, 'module_regex');
+  assert.equal(regexScreenCtx.freeTalk, true);
+  assert.equal(regexScreenCtx.targetKind, 'general');
   assert.equal(regexScreenCtx.moduleDomHints?.tab, 'regex');
   assert.deepEqual(regexScreenCtx.moduleDomHints?.items, [{ idx: 0, title: 'BG Tag Parser' }]);
 
@@ -1410,8 +1414,9 @@ test('PocketRisu & upstream RisuAI ModuleMenu detects active tabs, expanded lore
     ],
   });
   const folderCtx = await inspectVisibleScreen(folderDoc);
-  assert.equal(folderCtx.targetKind, 'module_lorebook');
-  assert.equal(folderCtx.loreIndex, 2);
+  // Free talk without a cursor; the nested entry is still identified in the hints.
+  assert.equal(folderCtx.freeTalk, true);
+  assert.equal(folderCtx.moduleDomHints?.openIdx, 2);
   assert.equal(folderCtx.moduleDomHints?.textPreview, 'Child prompt body inside folder');
 });
 

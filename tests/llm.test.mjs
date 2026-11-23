@@ -319,3 +319,32 @@ test('create_greeting may ask to use the new greeting in the current chat, and t
   assert.ok(sys.includes('useInCurrentChat'));
   assert.match(sys, /이전 대화[^\n]*현재/);
 });
+
+test('update_field is validated, and free talk tells the model what it can do on any screen', async () => {
+  const { findUnknownProposalKeys } = await import('../src/llm.js');
+  assert.equal(validateProposal({ action: 'update_field', field: 'desc', edits: [{ before: 'a', after: 'b' }] }), null);
+  assert.equal(validateProposal({ action: 'update_field', field: 'authorNote', content: 'x' }), null);
+  assert.ok(validateProposal({ action: 'update_field', field: 'chats', content: 'x' }), 'unknown field');
+  assert.ok(validateProposal({ action: 'update_field', field: 'desc' }), 'needs edits or content');
+  assert.deepEqual(findUnknownProposalKeys({ action: 'update_field', title: 't', field: 'desc', content: 'x' }), []);
+
+  for (const context of [
+    { screen: 'unknown', targetKind: 'general', freeTalk: true, labelText: '자유대화', screenHint: '' },
+    { screen: 'lorebook', targetKind: 'general', freeTalk: true, labelText: '자유대화', screenHint: '채팅 로어북 목록', loreScope: 'chat' },
+  ]) {
+    const sys = buildConversationMessages({
+      context,
+      snapshot: { label: '자유대화', content: '', target: { targetKind: 'general' } },
+      extraContext: { fields: [{ field: 'desc', label: '캐릭터 설명', length: 30, text: 'FULL-DESCRIPTION-TEXT', truncated: false }] },
+      history: [],
+      userInput: '설명 고쳐줘',
+    })[0].content;
+    assert.ok(sys.includes('자유대화'));
+    assert.ok(sys.includes('update_field'));
+    assert.ok(sys.includes('FULL-DESCRIPTION-TEXT'));
+    if (context.screenHint) {
+      assert.ok(sys.includes('채팅 로어북 목록'), 'the screen guess is passed on as a hint');
+      assert.match(sys, /힌트|참고/);
+    }
+  }
+});
