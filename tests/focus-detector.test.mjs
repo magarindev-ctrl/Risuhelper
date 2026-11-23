@@ -779,6 +779,124 @@ test('FocusTracker survives disallowed touch* events like real PocketRisu, remov
   await tracker.stop();
 });
 
+test('FocusTracker PC right-dock self-verifies own iframe among multiple plugin iframes, pushes/restores <main>, guards mobile, and cleans up on stop', async () => {
+  const otherStyles = { display: 'block', width: '100%' };
+  const myStyles = { display: 'none', width: '100%' };
+  const mainStyles = { width: '', maxWidth: '', boxSizing: '' };
+  const myAttrs = {};
+  let viewportW = 1440;
+  let chipMounted = false;
+  let chipRemovedCount = 0;
+
+  const localWin = { innerWidth: 1440 };
+
+  const otherIframe = {
+    async getStyle(k) { return otherStyles[k] || ''; },
+    async setStyle(k, v) { otherStyles[k] = v; },
+    async setAttribute() {},
+  };
+  const myIframe = {
+    async getStyle(k) { return myStyles[k] || ''; },
+    async setStyle(k, v) {
+      myStyles[k] = v;
+      if (k === 'width') {
+        const px = parseInt(v, 10);
+        localWin.innerWidth = Number.isFinite(px) && String(v).endsWith('px') ? px : viewportW;
+      }
+    },
+    async setAttribute(k, v) { myAttrs[k] = v; },
+  };
+  const mainEl = {
+    async getStyle(k) { return mainStyles[k] || ''; },
+    async setStyle(k, v) { mainStyles[k] = v; },
+  };
+  const chipEl = {
+    async setAttribute() {},
+    async setStyleAttribute() {},
+    async setTextContent() {},
+    async getBoundingClientRect() { return { left: 1200, top: 700, width: 140, height: 36 }; },
+    async addEventListener() { return 'id'; },
+    async removeEventListener() {},
+    async remove() { chipMounted = false; chipRemovedCount++; },
+  };
+
+  const rootDoc = {
+    async getBoundingClientRect() { return { width: viewportW, height: 900, top: 0, left: 0 }; },
+    async querySelector(sel) {
+      if (sel === 'body') return { async appendChild() { chipMounted = true; } };
+      if (sel === 'main') return mainEl;
+      if (sel.includes('x-risuhelper-frame') && myAttrs['x-risuhelper-frame'] === '1') return myIframe;
+      return null;
+    },
+    async querySelectorAll(sel) {
+      if (sel === 'iframe') {
+        const list = [otherIframe, myIframe];
+        return { async length() { return list.length; }, async at(i) { return list[i]; } };
+      }
+      return { async length() { return 0; }, async at() { return null; } };
+    },
+    async createElement() { return chipEl; },
+    async addEventListener() { return 'l1'; },
+    async removeEventListener() {},
+  };
+
+  const tracker = new FocusTracker({ async getRootDocument() { return rootDoc; } }, { showFloatingChip: true });
+  assert.equal(await tracker.start(), true);
+  assert.equal(chipMounted, true);
+
+  // Mobile viewport must refuse docking cleanly
+  viewportW = 390;
+  const mobileRes = await tracker.applyDock({ width: 420, pushLayout: true, localWin });
+  assert.equal(mobileRes.ok, false);
+  assert.match(mobileRes.reason, /화면 너비/);
+
+  // PC viewport: simulate showContainer making myIframe visible
+  viewportW = 1440;
+  localWin.innerWidth = 1440;
+  const beforeVisible = await tracker.snapshotVisibleIframes();
+  assert.equal(beforeVisible.has(0), true);
+  assert.equal(beforeVisible.has(1), false);
+  myStyles.display = 'block';
+
+  const dockRes = await tracker.applyDock({
+    width: 420,
+    pushLayout: true,
+    beforeVisibleIndices: beforeVisible,
+    localWin,
+  });
+  assert.equal(dockRes.ok, true);
+  assert.equal(dockRes.width, 420);
+  assert.equal(myAttrs['x-risuhelper-frame'], '1');
+  assert.equal(otherStyles.width, '100%', 'other plugin iframe must remain untouched');
+  assert.equal(myStyles.right, '0px');
+  assert.equal(myStyles.left, 'auto');
+  assert.equal(myStyles.width, '420px');
+  assert.equal(mainStyles.width, 'calc(100% - 420px)');
+  assert.equal(chipMounted, false, 'floating chip hides while docked');
+  assert.equal(tracker.liveScreenFallback, true);
+
+  // Changing width to 500px updates both iframe & <main> while keeping original saved <main> style intact
+  const widerRes = await tracker.applyDock({ width: 500, pushLayout: true, localWin });
+  assert.equal(widerRes.ok, true);
+  assert.equal(myStyles.width, '500px');
+  assert.equal(mainStyles.width, 'calc(100% - 500px)');
+
+  // Releasing dock restores <main> to '' and iframe to 100%, and re-mounts floating chip
+  await tracker.releaseDock({ restoreChip: true });
+  assert.equal(mainStyles.width, '');
+  assert.equal(myStyles.width, '100%');
+  assert.equal(myStyles.left, '0');
+  assert.equal(chipMounted, true);
+  assert.ok(chipRemovedCount >= 1);
+
+  // Re-dock then unload via stop(): <main> MUST be restored automatically
+  await tracker.applyDock({ width: 420, pushLayout: true, localWin });
+  assert.equal(mainStyles.width, 'calc(100% - 420px)');
+  await tracker.stop();
+  assert.equal(mainStyles.width, '');
+});
+
+
 
 
 

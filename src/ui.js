@@ -1,6 +1,6 @@
 import { VERSION, STORAGE_KEY, PRESET_STORAGE_KEY, CHAR_FIELD_META, SCREEN_LABELS } from './version.js';
 import { STYLES } from './style.js';
-import { FocusTracker, normalizeChipPos } from './focus-detector.js';
+import { FocusTracker, normalizeChipPos, MIN_DOCK_VIEWPORT_PX } from './focus-detector.js';
 import { HostAdapter } from './host-adapter.js';
 import { callRisuModel, parseAssistantReply, buildConversationMessages } from './llm.js';
 import { buildDiffPreview } from './text-edits.js';
@@ -14,6 +14,10 @@ const DEFAULT_SETTINGS = {
   maxHistoryTurns: 12,
   showFloatingChip: true,
   floatingChipPos: null,
+  dockMode: false,
+  autoOpenDocked: false,
+  dockPushLayout: true,
+  dockWidth: 420,
   includeCharSummary: true,
   includeLoreSummary: true,
   includeConfigSummary: false,
@@ -79,7 +83,7 @@ class RisuHelperApp {
       showFloatingChip: this.settings.showFloatingChip,
       chipPos: this.settings.floatingChipPos,
       onChange: (ctx) => {
-        this.detectedContext = ctx;
+        this._handleLiveFocusChange(ctx);
       },
       onChipClick: () => {
         this.open();
@@ -91,6 +95,7 @@ class RisuHelperApp {
     });
 
     this.isOpen = false;
+    this.isDocked = false;
     this.settingsOpen = false;
     this.presetPanelOpen = false;
     this.presetState = newPresetState();
@@ -106,6 +111,40 @@ class RisuHelperApp {
     this.toastText = '';
     this.registeredIds = [];
     this.viewportHandler = null;
+    this._lastLiveFocusSig = '';
+    this._liveRefreshSeq = 0;
+  }
+
+  _focusSignature(ctx) {
+    if (!ctx) return '';
+    return [
+      ctx.screen || '',
+      ctx.targetKind || '',
+      ctx.fieldKey || '',
+      ctx.loreIndex ?? '',
+      ctx.loreScope || '',
+      ctx.regexIndex ?? '',
+      ctx.labelText || '',
+    ].join('|');
+  }
+
+  async _handleLiveFocusChange(ctx) {
+    this.detectedContext = ctx;
+    if (!this.isOpen) return;
+
+    const nextSig = this._focusSignature(ctx);
+    if (nextSig === this._lastLiveFocusSig) return;
+    this._lastLiveFocusSig = nextSig;
+
+    if (this.manualTarget) {
+      if (!this.busy) this.render();
+      return;
+    }
+
+    const seq = ++this._liveRefreshSeq;
+    await this.refreshContextSnapshot();
+    if (seq !== this._liveRefreshSeq || !this.isOpen) return;
+    this.render();
   }
 
   async init() {
@@ -143,7 +182,18 @@ class RisuHelperApp {
     // Start cursor focus tracker asynchronously (gracefully continues in manual mode if mainDom is declined)
     this.tracker.showFloatingChip = this.settings.showFloatingChip;
     this.tracker.chipPos = normalizeChipPos(this.settings.floatingChipPos);
-    this.tracker.start().catch(() => {});
+    const trackerStarted = await this.tracker.start().catch(() => false);
+
+    // Optional PC auto-dock on startup (strictly opt-in via user settings)
+    if (trackerStarted && this.settings.dockMode && this.settings.autoOpenDocked) {
+      try {
+        const view = await this.tracker.getHostViewportSize();
+        if (view && view.width >= MIN_DOCK_VIEWPORT_PX) {
+          await this.open({ forceDock: true });
+          return;
+        }
+      } catch {}
+    }
 
     this.render();
   }
@@ -233,24 +283,98 @@ class RisuHelperApp {
     };
   }
 
-  async open() {
+  async open({ forceDock = null } = {}) {
+    const wantDock = forceDock !== null ? Boolean(forceDock) : Boolean(this.settings.dockMode);
     this.isOpen = true;
     await this.syncHostTheme();
+    if (wantDock && !this.tracker.enabled) {
+      await this.tracker.start().catch(() => false);
+    }
     if (this.tracker.enabled && (!this.detectedContext || this.detectedContext.screen === 'unknown')) {
       await this.tracker.scanNow({ allowScreenFallback: true });
     }
-    if (typeof this.api.showContainer === 'function') {
-      await this.api.showContainer('fullscreen');
+    this._lastLiveFocusSig = this._focusSignature(this.detectedContext);
+
+    if (wantDock) {
+      const beforeVisible = await this.tracker.snapshotVisibleIframes();
+      if (typeof this.api.showContainer === 'function') {
+        await this.api.showContainer('fullscreen');
+      }
+      const dockRes = await this.tracker.applyDock({
+        width: this.settings.dockWidth,
+        pushLayout: this.settings.dockPushLayout,
+        beforeVisibleIndices: beforeVisible,
+        localWin: this.doc.defaultView,
+      });
+      this.isDocked = Boolean(dockRes.ok);
+    } else {
+      if (this.isDocked) {
+        await this.tracker.releaseDock({ restoreChip: false });
+        this.isDocked = false;
+      }
+      if (typeof this.api.showContainer === 'function') {
+        await this.api.showContainer('fullscreen');
+      }
     }
+
     await this.refreshContextSnapshot();
     this.render();
   }
 
   async close() {
     this.isOpen = false;
+    if (this.isDocked) {
+      await this.tracker.releaseDock({ restoreChip: true });
+      this.isDocked = false;
+    }
     if (typeof this.api.hideContainer === 'function') {
       await this.api.hideContainer();
     }
+  }
+
+  async toggleDockMode(nextValue = null) {
+    const wantDock = nextValue !== null ? Boolean(nextValue) : !this.isDocked;
+    this.settings.dockMode = wantDock;
+    await this.saveSettings();
+
+    if (!this.isOpen) {
+      this.render();
+      return;
+    }
+
+    if (wantDock) {
+      if (!this.tracker.enabled) {
+        await this.tracker.start().catch(() => false);
+      }
+      const res = await this.tracker.applyDock({
+        width: this.settings.dockWidth,
+        pushLayout: this.settings.dockPushLayout,
+        localWin: this.doc.defaultView,
+      });
+      if (res.ok) {
+        this.isDocked = true;
+        this.showToast('오른쪽 도킹 모드 활성 · RisuAI 입력칸을 클릭하면 실시간 반영됩니다.');
+      } else {
+        this.isDocked = false;
+        this.settings.dockMode = false;
+        await this.saveSettings();
+        this.showToast(res.reason || '도킹 모드로 전환할 수 없습니다.');
+      }
+    } else {
+      await this.tracker.releaseDock({ restoreChip: false });
+      this.isDocked = false;
+      this.showToast('일반 오버레이 모드로 전환했습니다.');
+    }
+    this.render();
+  }
+
+  async _applyLiveDockSettings() {
+    if (!this.isOpen || !this.isDocked) return;
+    await this.tracker.applyDock({
+      width: this.settings.dockWidth,
+      pushLayout: this.settings.dockPushLayout,
+      localWin: this.doc.defaultView,
+    });
   }
 
   async refreshContextSnapshot() {
@@ -842,6 +966,61 @@ class RisuHelperApp {
           })
         )
       ),
+      h(doc, 'div', { class: 'rh-field' },
+        h(doc, 'span', {}, 'PC 오른쪽 상시 도킹 (선택 · RisuAI 화면 동시 조작 + 실시간 커서 추적)'),
+        h(doc, 'div', { class: 'rh-checks' },
+          h(doc, 'label', {},
+            h(doc, 'input', {
+              type: 'checkbox',
+              checked: this.settings.dockMode,
+              onchange: async (e) => {
+                await this.toggleDockMode(Boolean(e.target.checked));
+              },
+            }),
+            'PC 화면에서 오른쪽 도킹 모드 사용 (mainDom 필요)'
+          ),
+          this.settings.dockMode && h(doc, 'label', {},
+            h(doc, 'input', {
+              type: 'checkbox',
+              checked: this.settings.autoOpenDocked,
+              onchange: async (e) => {
+                this.settings.autoOpenDocked = Boolean(e.target.checked);
+                await this.saveSettings();
+                this.render();
+              },
+            }),
+            'PC에서 시작 시 오른쪽에 자동으로 띄우기'
+          ),
+          this.settings.dockMode && h(doc, 'label', {},
+            h(doc, 'input', {
+              type: 'checkbox',
+              checked: this.settings.dockPushLayout,
+              onchange: async (e) => {
+                this.settings.dockPushLayout = Boolean(e.target.checked);
+                await this.saveSettings();
+                await this._applyLiveDockSettings();
+                this.render();
+              },
+            }),
+            'RisuAI 화면 자동 분할 (오른쪽 사이드바가 가려지지 않게 폭 조정)'
+          )
+        ),
+        this.settings.dockMode && h(doc, 'div', { class: 'rh-row', style: 'flex-wrap:wrap;gap:6px;margin-top:4px;' },
+          ...[
+            { label: '좁게 (360px)', w: 360 },
+            { label: '표준 (420px)', w: 420 },
+            { label: '넓게 (500px)', w: 500 },
+          ].map(opt => h(doc, 'button', {
+            class: `rh-btn${Number(this.settings.dockWidth) === opt.w ? ' primary' : ''}`,
+            onclick: async () => {
+              this.settings.dockWidth = opt.w;
+              await this.saveSettings();
+              await this._applyLiveDockSettings();
+              this.showToast(`도킹 패널 폭을 ${opt.w}px로 변경했습니다.`);
+            },
+          }, opt.label))
+        )
+      ),
       h(doc, 'div', { class: 'rh-row', style: 'justify-content:space-between;' },
         h(doc, 'div', { class: 'rh-checks' },
           h(doc, 'label', {},
@@ -909,13 +1088,20 @@ class RisuHelperApp {
     const subPicker = this.renderSubItemPicker(ctx);
     const quickPrompts = getQuickPromptsForContext(ctx);
 
+    const subtitleEl = this.isDocked
+      ? h(doc, 'div', { class: 'rh-subtitle' },
+          h(doc, 'span', { class: 'rh-live-dot' }),
+          `실시간 도킹 · ${flavor.name}`
+        )
+      : h(doc, 'div', { class: 'rh-subtitle' }, `${flavor.name} · ${this.tracker.enabled ? '커서 자동감지 활성' : '수동 대상 모드'}`);
+
     const header = h(doc, 'header', { class: 'rh-header' },
       h(doc, 'div', { class: 'rh-header-top' },
         h(doc, 'div', { class: 'rh-brand' },
           h(doc, 'div', { class: 'rh-logo' }, 'RH'),
           h(doc, 'div', { class: 'rh-title-wrap' },
             h(doc, 'div', { class: 'rh-title' }, `RisuHelper v${VERSION}`),
-            h(doc, 'div', { class: 'rh-subtitle' }, `${flavor.name} · ${this.tracker.enabled ? '커서 자동감지 활성' : '수동 대상 모드'}`)
+            subtitleEl
           )
         ),
         h(doc, 'button', {
@@ -944,13 +1130,17 @@ class RisuHelperApp {
           },
         }, '설정'),
         h(doc, 'button', {
+          class: `rh-btn${this.isDocked ? ' primary' : ' ghost rh-hide-mobile'}`,
+          onclick: () => this.toggleDockMode(),
+        }, this.isDocked ? '📌 도킹 해제' : '📌 오른쪽 도킹'),
+        h(doc, 'button', {
           class: 'rh-btn ghost',
           onclick: () => {
             this.messages = [];
             this.render();
           },
         }, '대화 비우기'),
-        h(doc, 'button', {
+        !this.isDocked && h(doc, 'button', {
           class: 'rh-btn ghost rh-hide-mobile',
           onclick: async () => {
             this.settings.wideMode = !this.settings.wideMode;
@@ -1150,7 +1340,7 @@ class RisuHelperApp {
     );
 
     const drawer = h(doc, 'section', {
-      class: `rh-drawer${this.settings.wideMode ? ' wide' : ''}`,
+      class: `rh-drawer${this.isDocked ? ' docked' : (this.settings.wideMode ? ' wide' : '')}`,
       onclick: (e) => e.stopPropagation(),
     },
       header,
@@ -1162,8 +1352,8 @@ class RisuHelperApp {
     );
 
     const shell = h(doc, 'div', {
-      class: 'rh-shell',
-      onclick: () => this.close(),
+      class: `rh-shell${this.isDocked ? ' docked' : ''}`,
+      onclick: this.isDocked ? null : () => this.close(),
     }, drawer);
 
     doc.body.appendChild(shell);

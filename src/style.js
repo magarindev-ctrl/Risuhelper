@@ -108,6 +108,35 @@ html, body {
   }
 }
 
+.rh-shell.docked {
+  align-items: stretch;
+  justify-content: stretch;
+  background: transparent;
+  backdrop-filter: none;
+}
+
+.rh-drawer.docked,
+.rh-drawer.docked.wide {
+  width: 100%;
+  max-width: 100%;
+  height: 100%;
+  border-left: none;
+  border-top: none;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.rh-live-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--rh-ok);
+  margin-right: 5px;
+  vertical-align: middle;
+  box-shadow: 0 0 0 2px rgba(52, 211, 153, 0.22);
+}
+
 .rh-header {
   display: flex;
   flex-direction: column;

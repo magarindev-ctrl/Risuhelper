@@ -419,4 +419,189 @@ test('dist/risuhelper.js preserves preset panel scrollTop on toggle click and re
   assert.equal(doc.querySelector('.rh-preset-body').scrollTop, 240);
 });
 
+test('dist/risuhelper.js supports opt-in PC right-side docking with live real-time DOM focus updates and clean restore', async () => {
+  const code = fs.readFileSync(BUNDLE_PATH, 'utf8');
+  const doc = createMockDocument();
+  const localWin = { innerWidth: 1440 };
+  doc.defaultView = localWin;
+
+  const storage = new Map([
+    ['risuhelper_state_v1', JSON.stringify({ dockMode: true, autoOpenDocked: true, dockPushLayout: true, dockWidth: 420 })],
+  ]);
+
+  const myIframeStyles = { display: 'none', width: '100%' };
+  const mainStyles = { width: '', maxWidth: '', boxSizing: '' };
+  const myIframeAttrs = {};
+  const rootListeners = [];
+  let unloadHandler = null;
+
+  const makeMockFocused = (labelText, tag = 'textarea', outerHtml = '<textarea></textarea>') => {
+    const editor = {
+      async getOuterHTML() { return outerHtml; },
+      async nodeName() { return tag.toUpperCase(); },
+      async textContent() { return ''; },
+      async innerText() { return ''; },
+      async getClassName() { return ''; },
+      async getParent() { return container; },
+      async getChildren() { return { async length() { return 0; }, async at() { return null; } }; },
+      async querySelector() { return null; },
+    };
+    const labelSpan = {
+      async getOuterHTML() { return `<span>${labelText}</span>`; },
+      async nodeName() { return 'SPAN'; },
+      async textContent() { return labelText; },
+      async getClassName() { return 'text-textcolor'; },
+      async getParent() { return container; },
+      async getChildren() { return { async length() { return 0; }, async at() { return null; } }; },
+    };
+    const container = {
+      async getOuterHTML() { return '<div class="char-config"></div>'; },
+      async nodeName() { return 'DIV'; },
+      async getClassName() { return 'char-config'; },
+      async getParent() { return null; },
+      async getChildren() {
+        const list = [labelSpan, editor];
+        return { async length() { return list.length; }, async at(i) { return list[i]; } };
+      },
+      async querySelector() { return null; },
+    };
+    return editor;
+  };
+
+  let currentFocused = makeMockFocused('설명');
+
+  const myIframe = {
+    async getStyle(k) { return myIframeStyles[k] || ''; },
+    async setStyle(k, v) {
+      myIframeStyles[k] = v;
+      if (k === 'width') {
+        const px = parseInt(v, 10);
+        localWin.innerWidth = Number.isFinite(px) && String(v).endsWith('px') ? px : 1440;
+      }
+    },
+    async setAttribute(k, v) { myIframeAttrs[k] = v; },
+  };
+  const mainEl = {
+    async getStyle(k) { return mainStyles[k] || ''; },
+    async setStyle(k, v) { mainStyles[k] = v; },
+  };
+  const rootDoc = {
+    async getBoundingClientRect() { return { width: 1440, height: 900, top: 0, left: 0 }; },
+    async querySelector(sel) {
+      if (sel.includes(':focus')) return currentFocused;
+      if (sel === 'body') return { async appendChild() {} };
+      if (sel === 'main') return mainEl;
+      if (sel.includes('x-risuhelper-frame') && myIframeAttrs['x-risuhelper-frame'] === '1') return myIframe;
+      return null;
+    },
+    async querySelectorAll(sel) {
+      if (sel === 'iframe') return { async length() { return 1; }, async at() { return myIframe; } };
+      return { async length() { return 0; }, async at() { return null; } };
+    },
+    async createElement() {
+      return {
+        async setAttribute() {},
+        async setStyleAttribute() {},
+        async setTextContent() {},
+        async getBoundingClientRect() { return { left: 1200, top: 700, width: 140, height: 36 }; },
+        async addEventListener() { return 'cid'; },
+        async removeEventListener() {},
+        async remove() {},
+      };
+    },
+    async addEventListener(type, fn) {
+      rootListeners.push({ type, fn });
+      return `lid-${rootListeners.length}`;
+    },
+    async removeEventListener() {},
+  };
+
+  const mockRisuai = {
+    pluginStorage: {
+      async getItem(k) { return storage.get(k) ?? null; },
+      async setItem(k, v) { storage.set(k, v); },
+    },
+    async getColorScheme() { return { scheme: { type: 'dark' } }; },
+    async registerButton(meta) { return { id: meta.id }; },
+    async registerSetting(_n, _cb, _i, _t, id) { return { id }; },
+    async unregisterUIPart() {},
+    async onUnload(fn) { unloadHandler = fn; },
+    async showContainer() { myIframeStyles.display = 'block'; },
+    async hideContainer() { myIframeStyles.display = 'none'; },
+    async getRootDocument() { return rootDoc; },
+    async getCharacter() {
+      return {
+        chaId: 'c1',
+        name: '세라',
+        desc: '캐릭터 설명 실시간 원문',
+        firstMessage: '첫 메시지 실시간 원문',
+        globalLore: [],
+        customscript: [],
+        triggerscript: [],
+        chatPage: 0,
+        chats: [{ note: '작가의 노트 실시간 원문', localLore: [] }],
+      };
+    },
+    async getCurrentCharacterIndex() { return 0; },
+    async getCurrentChatIndex() { return 0; },
+    async getChatFromIndex() { return { note: '작가의 노트 실시간 원문', localLore: [] }; },
+  };
+
+  const sandbox = {
+    risuai: mockRisuai,
+    document: doc,
+    console,
+    setTimeout,
+    clearTimeout,
+    TextEncoder,
+    TextDecoder,
+    Uint8Array,
+    Int32Array,
+    DataView,
+    URL,
+    Blob,
+    atob,
+    crypto,
+    DecompressionStream,
+    structuredClone,
+  };
+  sandbox.globalThis = sandbox;
+  vm.runInNewContext(code, sandbox, { filename: 'dist/risuhelper.js' });
+  await new Promise(r => setTimeout(r, 90));
+
+  // Auto-docked on PC startup
+  assert.equal(myIframeStyles.display, 'block');
+  assert.equal(myIframeStyles.right, '0px');
+  assert.equal(myIframeStyles.width, '420px');
+  assert.equal(mainStyles.width, 'calc(100% - 420px)');
+  assert.ok(doc.querySelector('.rh-shell').className.includes('docked'));
+  assert.ok(doc.querySelector('.rh-drawer').className.includes('docked'));
+  assert.match(doc.body.textContent, /캐릭터 설명 실시간 원문/);
+
+  // Keep a draft inside RisuHelper's composer while clicking different DOM fields in RisuAI
+  doc.querySelector('.rh-composer-input').value = '작업 중 초안';
+
+  // User clicks '첫 메시지' in RisuAI on the left -> RisuHelper live-updates to firstMessage!
+  currentFocused = makeMockFocused('첫 메시지');
+  for (const l of rootListeners) {
+    if (l.type === 'click') l.fn();
+  }
+  await new Promise(r => setTimeout(r, 80));
+  assert.match(doc.body.textContent, /첫 메시지 실시간 원문/);
+  assert.equal(doc.querySelector('.rh-composer-input').value, '작업 중 초안');
+
+  // User clicks '작가의 노트' in RisuAI on the left -> RisuHelper live-updates to chat.note!
+  currentFocused = makeMockFocused('작가의 노트');
+  for (const l of rootListeners) {
+    if (l.type === 'click') l.fn();
+  }
+  await new Promise(r => setTimeout(r, 80));
+  assert.match(doc.body.textContent, /작가의 노트 실시간 원문/);
+
+  // Clean unload restores <main> layout
+  await unloadHandler();
+  assert.equal(mainStyles.width, '');
+});
+
+
 

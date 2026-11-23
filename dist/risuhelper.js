@@ -219,6 +219,35 @@
       }
     }
 
+    .rh-shell.docked {
+      align-items: stretch;
+      justify-content: stretch;
+      background: transparent;
+      backdrop-filter: none;
+    }
+
+    .rh-drawer.docked,
+    .rh-drawer.docked.wide {
+      width: 100%;
+      max-width: 100%;
+      height: 100%;
+      border-left: none;
+      border-top: none;
+      border-radius: 0;
+      box-shadow: none;
+    }
+
+    .rh-live-dot {
+      display: inline-block;
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--rh-ok);
+      margin-right: 5px;
+      vertical-align: middle;
+      box-shadow: 0 0 0 2px rgba(52, 211, 153, 0.22);
+    }
+
     .rh-header {
       display: flex;
       flex-direction: column;
@@ -1581,9 +1610,16 @@
       };
     }
 
+    const FRAME_ATTR = 'x-risuhelper-frame';
+    const MIN_DOCK_VIEWPORT_PX = 960;
+    const DEFAULT_DOCK_WIDTH = 420;
+    const MIN_DOCK_WIDTH = 320;
+    const MAX_DOCK_WIDTH = 640;
+
     /**
      * Manages allowed Plugin v3 rootDoc listeners (pointer/touch/mouse/click/keyup) to cache the latest
-     * focused context BEFORE a user clicks the plugin button, and renders a draggable floating chip.
+     * focused context BEFORE a user clicks the plugin button, renders a draggable floating chip,
+     * and manages optional PC right-side docking so RisuAI remains interactive alongside RisuHelper.
      */
     class FocusTracker {
       constructor(api, options = {}) {
@@ -1599,6 +1635,7 @@
         this.chipListenerIds = [];
         this.lastContext = null;
         this.enabled = false;
+        this.liveScreenFallback = false;
         this._scanPending = false;
         this._drag = null;
         this._dragHandled = false;
@@ -1610,6 +1647,12 @@
         this._cachedChipRect = null;
         this._styleInFlight = false;
         this._pendingStyleUpdate = null;
+        this._dockFrame = null;
+        this._dockMain = null;
+        this._savedMainStyle = null;
+        this._isDocked = false;
+        this._dockWidth = DEFAULT_DOCK_WIDTH;
+        this._chipHiddenForDock = false;
       }
 
       async _getViewportSize() {
@@ -1651,6 +1694,16 @@
           return this._cachedViewport;
         }
         return this._cachedViewport || { width: 1024, height: 768 };
+      }
+
+      async getHostViewportSize() {
+        if (!this.rootDoc && typeof this.api?.getRootDocument === 'function') {
+          try {
+            const doc = await this.api.getRootDocument();
+            if (doc) this.rootDoc = doc;
+          } catch {}
+        }
+        return await this._getViewportSize();
       }
 
       async _refreshChipMetrics() {
@@ -1712,7 +1765,7 @@
             } catch {}
           }
 
-          if (this.showFloatingChip) {
+          if (this.showFloatingChip && !this._isDocked) {
             await this.mountFloatingChip();
           }
           this.scheduleScan();
@@ -1727,7 +1780,7 @@
         this._scanPending = true;
         setTimeout(async () => {
           this._scanPending = false;
-          await this.scanNow();
+          await this.scanNow({ allowScreenFallback: Boolean(this.liveScreenFallback) });
         }, 45);
       }
 
@@ -1743,6 +1796,222 @@
           await this.updateChipLabel(ctx);
         }
         return this.lastContext;
+      }
+
+      async snapshotVisibleIframes() {
+        const visible = new Set();
+        if (!this.rootDoc || typeof this.rootDoc.querySelectorAll !== 'function') return visible;
+        try {
+          const frames = await this.rootDoc.querySelectorAll('iframe');
+          const len = frames ? await frames.length() : 0;
+          for (let i = 0; i < len; i++) {
+            const f = await frames.at(i);
+            if (!f || typeof f.getStyle !== 'function') continue;
+            const disp = String((await f.getStyle('display')) || '').trim().toLowerCase();
+            if (disp && disp !== 'none') visible.add(i);
+          }
+        } catch {}
+        return visible;
+      }
+
+      async _findOwnIframe(beforeVisibleIndices, probeWidth, localWin) {
+        if (!this.rootDoc) return null;
+        if (this._dockFrame) return this._dockFrame;
+
+        // 1. Fast path: already tagged by us earlier in this session
+        try {
+          const tagged = await this.rootDoc.querySelector(`iframe[${FRAME_ATTR}="1"]`);
+          if (tagged) {
+            this._dockFrame = tagged;
+            return tagged;
+          }
+        } catch {}
+
+        if (typeof this.rootDoc.querySelectorAll !== 'function') return null;
+
+        let frames;
+        try {
+          frames = await this.rootDoc.querySelectorAll('iframe');
+        } catch {
+          return null;
+        }
+        const len = frames ? await frames.length() : 0;
+        if (len === 0) return null;
+
+        const newlyVisible = [];
+        const otherVisible = [];
+        for (let i = len - 1; i >= 0; i--) {
+          const f = await frames.at(i);
+          if (!f || typeof f.getStyle !== 'function' || typeof f.setStyle !== 'function') continue;
+          try {
+            const disp = String((await f.getStyle('display')) || '').trim().toLowerCase();
+            if (disp === 'none') continue;
+            if (beforeVisibleIndices && !beforeVisibleIndices.has(i)) {
+              newlyVisible.push(f);
+            } else {
+              otherVisible.push(f);
+            }
+          } catch {}
+        }
+
+        const candidates = [...newlyVisible, ...otherVisible];
+        if (candidates.length === 0) return null;
+
+        // 2. Cryptographically certain self-verification: probe candidate width and verify our own
+        //    iframe's window.innerWidth changes to match probeWidth before ever keeping any style change.
+        const canProbeWin = Boolean(localWin && Number.isFinite(localWin.innerWidth) && localWin.innerWidth > 0);
+        if (canProbeWin) {
+          const origLocalW = localWin.innerWidth;
+          const testWidth = Math.abs(origLocalW - probeWidth) < 16 ? probeWidth + 24 : probeWidth;
+          for (const cand of candidates) {
+            let origStyleW = '';
+            try {
+              origStyleW = String((await cand.getStyle('width')) || '');
+              await cand.setStyle('width', `${testWidth}px`);
+              await new Promise(r => setTimeout(r, 25));
+              if (Math.abs(localWin.innerWidth - testWidth) <= 8) {
+                try { await cand.setAttribute(FRAME_ATTR, '1'); } catch {}
+                this._dockFrame = cand;
+                return cand;
+              }
+              await cand.setStyle('width', origStyleW || '100%');
+            } catch {
+              try { await cand.setStyle('width', origStyleW || '100%'); } catch {}
+            }
+          }
+          return null;
+        }
+
+        // 3. Fallback when localWin.innerWidth isn't simulated (e.g. unit test sandbox):
+        //    only accept when strictly 1 iframe transitioned from hidden -> visible on showContainer().
+        if (newlyVisible.length === 1) {
+          const only = newlyVisible[0];
+          try { await only.setAttribute(FRAME_ATTR, '1'); } catch {}
+          this._dockFrame = only;
+          return only;
+        }
+        return null;
+      }
+
+      async _restoreMainLayout() {
+        if (!this._dockMain || !this._savedMainStyle) return;
+        try {
+          await this._dockMain.setStyle('width', this._savedMainStyle.width || '');
+          await this._dockMain.setStyle('maxWidth', this._savedMainStyle.maxWidth || '');
+          await this._dockMain.setStyle('boxSizing', this._savedMainStyle.boxSizing || '');
+        } catch {}
+        this._savedMainStyle = null;
+        this._dockMain = null;
+      }
+
+      /**
+       * Docks RisuHelper's own plugin iframe to the right edge on PC screens so RisuAI's native UI
+       * stays 100% interactive side-by-side while cursor focus changes stream live into RisuHelper.
+       */
+      async applyDock({
+        width = DEFAULT_DOCK_WIDTH,
+        pushLayout = true,
+        beforeVisibleIndices = null,
+        localWin = null,
+      } = {}) {
+        if (!this.rootDoc) {
+          if (typeof this.api?.getRootDocument === 'function') {
+            try { this.rootDoc = await this.api.getRootDocument(); } catch {}
+          }
+        }
+        if (!this.rootDoc) {
+          return { ok: false, reason: 'mainDom 권한이 없어 PC 오른쪽 도킹을 사용할 수 없습니다.' };
+        }
+
+        const view = await this._getViewportSize();
+        if (view.width < MIN_DOCK_VIEWPORT_PX) {
+          return {
+            ok: false,
+            reason: `화면 너비(${Math.round(view.width)}px)가 좁아 PC 오른쪽 도킹을 사용할 수 없습니다. (최소 ${MIN_DOCK_VIEWPORT_PX}px)`,
+          };
+        }
+
+        const maxAllowed = Math.max(MIN_DOCK_WIDTH, Math.min(MAX_DOCK_WIDTH, Math.round(view.width * 0.48)));
+        const dockW = Math.max(MIN_DOCK_WIDTH, Math.min(maxAllowed, Math.round(Number(width) || DEFAULT_DOCK_WIDTH)));
+
+        const frame = await this._findOwnIframe(beforeVisibleIndices, dockW, localWin);
+        if (!frame) {
+          return { ok: false, reason: '플러그인 컨테이너를 식별하지 못해 일반 창 모드로 열었습니다.' };
+        }
+
+        try {
+          await frame.setStyle('position', 'fixed');
+          await frame.setStyle('top', '0px');
+          await frame.setStyle('left', 'auto');
+          await frame.setStyle('right', '0px');
+          await frame.setStyle('width', `${dockW}px`);
+          await frame.setStyle('height', '100%');
+          await frame.setStyle('border', 'none');
+          await frame.setStyle('borderLeft', '1px solid rgba(161, 161, 170, 0.28)');
+          await frame.setStyle('boxShadow', '-8px 0 28px rgba(0, 0, 0, 0.32)');
+        } catch {
+          return { ok: false, reason: '도킹 스타일을 적용하지 못했습니다.' };
+        }
+
+        if (pushLayout) {
+          try {
+            const main = this._dockMain || await this.rootDoc.querySelector('main');
+            if (main && typeof main.setStyle === 'function') {
+              if (!this._savedMainStyle) {
+                this._savedMainStyle = {
+                  width: typeof main.getStyle === 'function' ? String((await main.getStyle('width')) || '') : '',
+                  maxWidth: typeof main.getStyle === 'function' ? String((await main.getStyle('maxWidth')) || '') : '',
+                  boxSizing: typeof main.getStyle === 'function' ? String((await main.getStyle('boxSizing')) || '') : '',
+                };
+              }
+              await main.setStyle('boxSizing', 'border-box');
+              await main.setStyle('width', `calc(100% - ${dockW}px)`);
+              await main.setStyle('maxWidth', `calc(100% - ${dockW}px)`);
+              this._dockMain = main;
+            }
+          } catch {}
+        } else {
+          await this._restoreMainLayout();
+        }
+
+        if (this.chipEl) {
+          this._chipHiddenForDock = true;
+          await this.unmountFloatingChip();
+        } else if (this.showFloatingChip) {
+          this._chipHiddenForDock = true;
+        }
+
+        this._isDocked = true;
+        this._dockWidth = dockW;
+        this.liveScreenFallback = true;
+        return { ok: true, width: dockW, viewWidth: view.width };
+      }
+
+      /**
+       * Restores host <main> layout and our plugin iframe back to standard fullscreen geometry.
+       */
+      async releaseDock({ restoreChip = true } = {}) {
+        this.liveScreenFallback = false;
+        await this._restoreMainLayout();
+
+        if (this._dockFrame && typeof this._dockFrame.setStyle === 'function') {
+          try {
+            await this._dockFrame.setStyle('left', '0');
+            await this._dockFrame.setStyle('right', '');
+            await this._dockFrame.setStyle('width', '100%');
+            await this._dockFrame.setStyle('borderLeft', '');
+            await this._dockFrame.setStyle('boxShadow', '');
+          } catch {}
+        }
+
+        const wasHiddenForDock = this._chipHiddenForDock;
+        this._isDocked = false;
+        this._chipHiddenForDock = false;
+
+        if (restoreChip && wasHiddenForDock && this.showFloatingChip && this.enabled && !this.chipEl) {
+          await this.mountFloatingChip();
+          if (this.lastContext) await this.updateChipLabel(this.lastContext);
+        }
       }
 
       async _applyChipStyle(pos, dragging = false) {
@@ -2050,7 +2319,7 @@
       async setChipVisible(visible) {
         this.showFloatingChip = Boolean(visible);
         if (!this.rootDoc) return;
-        if (this.showFloatingChip && !this.chipEl) {
+        if (this.showFloatingChip && !this.chipEl && !this._isDocked) {
           await this.mountFloatingChip();
           if (this.lastContext) await this.updateChipLabel(this.lastContext);
         } else if (!this.showFloatingChip && this.chipEl) {
@@ -2093,6 +2362,7 @@
         this._dragHandled = false;
         this._pendingStyleUpdate = null;
         this._cachedChipRect = null;
+        await this.releaseDock({ restoreChip: false });
         await this.unmountFloatingChip();
         if (this.rootDoc) {
           for (const entry of this.listenerIds) {
@@ -2102,6 +2372,7 @@
           }
         }
         this.listenerIds = [];
+        this._dockFrame = null;
         this.rootDoc = null;
       }
     }
@@ -2111,6 +2382,7 @@
       __exports.inspectFocusedElement = inspectFocusedElement;
       __exports.inspectVisibleScreen = inspectVisibleScreen;
       __exports.normalizeChipPos = normalizeChipPos;
+      __exports.MIN_DOCK_VIEWPORT_PX = MIN_DOCK_VIEWPORT_PX;
       __exports.FocusTracker = FocusTracker;
 
   },
@@ -6830,7 +7102,7 @@
   "src/ui.js"(__require, __exports) {
     const { VERSION, STORAGE_KEY, PRESET_STORAGE_KEY, CHAR_FIELD_META, SCREEN_LABELS } = __require("src/version.js");
     const { STYLES } = __require("src/style.js");
-    const { FocusTracker, normalizeChipPos } = __require("src/focus-detector.js");
+    const { FocusTracker, normalizeChipPos, MIN_DOCK_VIEWPORT_PX } = __require("src/focus-detector.js");
     const { HostAdapter } = __require("src/host-adapter.js");
     const { callRisuModel, parseAssistantReply, buildConversationMessages } = __require("src/llm.js");
     const { buildDiffPreview } = __require("src/text-edits.js");
@@ -6844,6 +7116,10 @@
       maxHistoryTurns: 12,
       showFloatingChip: true,
       floatingChipPos: null,
+      dockMode: false,
+      autoOpenDocked: false,
+      dockPushLayout: true,
+      dockWidth: 420,
       includeCharSummary: true,
       includeLoreSummary: true,
       includeConfigSummary: false,
@@ -6909,7 +7185,7 @@
           showFloatingChip: this.settings.showFloatingChip,
           chipPos: this.settings.floatingChipPos,
           onChange: (ctx) => {
-            this.detectedContext = ctx;
+            this._handleLiveFocusChange(ctx);
           },
           onChipClick: () => {
             this.open();
@@ -6921,6 +7197,7 @@
         });
 
         this.isOpen = false;
+        this.isDocked = false;
         this.settingsOpen = false;
         this.presetPanelOpen = false;
         this.presetState = newPresetState();
@@ -6936,6 +7213,40 @@
         this.toastText = '';
         this.registeredIds = [];
         this.viewportHandler = null;
+        this._lastLiveFocusSig = '';
+        this._liveRefreshSeq = 0;
+      }
+
+      _focusSignature(ctx) {
+        if (!ctx) return '';
+        return [
+          ctx.screen || '',
+          ctx.targetKind || '',
+          ctx.fieldKey || '',
+          ctx.loreIndex ?? '',
+          ctx.loreScope || '',
+          ctx.regexIndex ?? '',
+          ctx.labelText || '',
+        ].join('|');
+      }
+
+      async _handleLiveFocusChange(ctx) {
+        this.detectedContext = ctx;
+        if (!this.isOpen) return;
+
+        const nextSig = this._focusSignature(ctx);
+        if (nextSig === this._lastLiveFocusSig) return;
+        this._lastLiveFocusSig = nextSig;
+
+        if (this.manualTarget) {
+          if (!this.busy) this.render();
+          return;
+        }
+
+        const seq = ++this._liveRefreshSeq;
+        await this.refreshContextSnapshot();
+        if (seq !== this._liveRefreshSeq || !this.isOpen) return;
+        this.render();
       }
 
       async init() {
@@ -6973,7 +7284,18 @@
         // Start cursor focus tracker asynchronously (gracefully continues in manual mode if mainDom is declined)
         this.tracker.showFloatingChip = this.settings.showFloatingChip;
         this.tracker.chipPos = normalizeChipPos(this.settings.floatingChipPos);
-        this.tracker.start().catch(() => {});
+        const trackerStarted = await this.tracker.start().catch(() => false);
+
+        // Optional PC auto-dock on startup (strictly opt-in via user settings)
+        if (trackerStarted && this.settings.dockMode && this.settings.autoOpenDocked) {
+          try {
+            const view = await this.tracker.getHostViewportSize();
+            if (view && view.width >= MIN_DOCK_VIEWPORT_PX) {
+              await this.open({ forceDock: true });
+              return;
+            }
+          } catch {}
+        }
 
         this.render();
       }
@@ -7063,24 +7385,98 @@
         };
       }
 
-      async open() {
+      async open({ forceDock = null } = {}) {
+        const wantDock = forceDock !== null ? Boolean(forceDock) : Boolean(this.settings.dockMode);
         this.isOpen = true;
         await this.syncHostTheme();
+        if (wantDock && !this.tracker.enabled) {
+          await this.tracker.start().catch(() => false);
+        }
         if (this.tracker.enabled && (!this.detectedContext || this.detectedContext.screen === 'unknown')) {
           await this.tracker.scanNow({ allowScreenFallback: true });
         }
-        if (typeof this.api.showContainer === 'function') {
-          await this.api.showContainer('fullscreen');
+        this._lastLiveFocusSig = this._focusSignature(this.detectedContext);
+
+        if (wantDock) {
+          const beforeVisible = await this.tracker.snapshotVisibleIframes();
+          if (typeof this.api.showContainer === 'function') {
+            await this.api.showContainer('fullscreen');
+          }
+          const dockRes = await this.tracker.applyDock({
+            width: this.settings.dockWidth,
+            pushLayout: this.settings.dockPushLayout,
+            beforeVisibleIndices: beforeVisible,
+            localWin: this.doc.defaultView,
+          });
+          this.isDocked = Boolean(dockRes.ok);
+        } else {
+          if (this.isDocked) {
+            await this.tracker.releaseDock({ restoreChip: false });
+            this.isDocked = false;
+          }
+          if (typeof this.api.showContainer === 'function') {
+            await this.api.showContainer('fullscreen');
+          }
         }
+
         await this.refreshContextSnapshot();
         this.render();
       }
 
       async close() {
         this.isOpen = false;
+        if (this.isDocked) {
+          await this.tracker.releaseDock({ restoreChip: true });
+          this.isDocked = false;
+        }
         if (typeof this.api.hideContainer === 'function') {
           await this.api.hideContainer();
         }
+      }
+
+      async toggleDockMode(nextValue = null) {
+        const wantDock = nextValue !== null ? Boolean(nextValue) : !this.isDocked;
+        this.settings.dockMode = wantDock;
+        await this.saveSettings();
+
+        if (!this.isOpen) {
+          this.render();
+          return;
+        }
+
+        if (wantDock) {
+          if (!this.tracker.enabled) {
+            await this.tracker.start().catch(() => false);
+          }
+          const res = await this.tracker.applyDock({
+            width: this.settings.dockWidth,
+            pushLayout: this.settings.dockPushLayout,
+            localWin: this.doc.defaultView,
+          });
+          if (res.ok) {
+            this.isDocked = true;
+            this.showToast('오른쪽 도킹 모드 활성 · RisuAI 입력칸을 클릭하면 실시간 반영됩니다.');
+          } else {
+            this.isDocked = false;
+            this.settings.dockMode = false;
+            await this.saveSettings();
+            this.showToast(res.reason || '도킹 모드로 전환할 수 없습니다.');
+          }
+        } else {
+          await this.tracker.releaseDock({ restoreChip: false });
+          this.isDocked = false;
+          this.showToast('일반 오버레이 모드로 전환했습니다.');
+        }
+        this.render();
+      }
+
+      async _applyLiveDockSettings() {
+        if (!this.isOpen || !this.isDocked) return;
+        await this.tracker.applyDock({
+          width: this.settings.dockWidth,
+          pushLayout: this.settings.dockPushLayout,
+          localWin: this.doc.defaultView,
+        });
       }
 
       async refreshContextSnapshot() {
@@ -7672,6 +8068,61 @@
               })
             )
           ),
+          h(doc, 'div', { class: 'rh-field' },
+            h(doc, 'span', {}, 'PC 오른쪽 상시 도킹 (선택 · RisuAI 화면 동시 조작 + 실시간 커서 추적)'),
+            h(doc, 'div', { class: 'rh-checks' },
+              h(doc, 'label', {},
+                h(doc, 'input', {
+                  type: 'checkbox',
+                  checked: this.settings.dockMode,
+                  onchange: async (e) => {
+                    await this.toggleDockMode(Boolean(e.target.checked));
+                  },
+                }),
+                'PC 화면에서 오른쪽 도킹 모드 사용 (mainDom 필요)'
+              ),
+              this.settings.dockMode && h(doc, 'label', {},
+                h(doc, 'input', {
+                  type: 'checkbox',
+                  checked: this.settings.autoOpenDocked,
+                  onchange: async (e) => {
+                    this.settings.autoOpenDocked = Boolean(e.target.checked);
+                    await this.saveSettings();
+                    this.render();
+                  },
+                }),
+                'PC에서 시작 시 오른쪽에 자동으로 띄우기'
+              ),
+              this.settings.dockMode && h(doc, 'label', {},
+                h(doc, 'input', {
+                  type: 'checkbox',
+                  checked: this.settings.dockPushLayout,
+                  onchange: async (e) => {
+                    this.settings.dockPushLayout = Boolean(e.target.checked);
+                    await this.saveSettings();
+                    await this._applyLiveDockSettings();
+                    this.render();
+                  },
+                }),
+                'RisuAI 화면 자동 분할 (오른쪽 사이드바가 가려지지 않게 폭 조정)'
+              )
+            ),
+            this.settings.dockMode && h(doc, 'div', { class: 'rh-row', style: 'flex-wrap:wrap;gap:6px;margin-top:4px;' },
+              ...[
+                { label: '좁게 (360px)', w: 360 },
+                { label: '표준 (420px)', w: 420 },
+                { label: '넓게 (500px)', w: 500 },
+              ].map(opt => h(doc, 'button', {
+                class: `rh-btn${Number(this.settings.dockWidth) === opt.w ? ' primary' : ''}`,
+                onclick: async () => {
+                  this.settings.dockWidth = opt.w;
+                  await this.saveSettings();
+                  await this._applyLiveDockSettings();
+                  this.showToast(`도킹 패널 폭을 ${opt.w}px로 변경했습니다.`);
+                },
+              }, opt.label))
+            )
+          ),
           h(doc, 'div', { class: 'rh-row', style: 'justify-content:space-between;' },
             h(doc, 'div', { class: 'rh-checks' },
               h(doc, 'label', {},
@@ -7739,13 +8190,20 @@
         const subPicker = this.renderSubItemPicker(ctx);
         const quickPrompts = getQuickPromptsForContext(ctx);
 
+        const subtitleEl = this.isDocked
+          ? h(doc, 'div', { class: 'rh-subtitle' },
+              h(doc, 'span', { class: 'rh-live-dot' }),
+              `실시간 도킹 · ${flavor.name}`
+            )
+          : h(doc, 'div', { class: 'rh-subtitle' }, `${flavor.name} · ${this.tracker.enabled ? '커서 자동감지 활성' : '수동 대상 모드'}`);
+
         const header = h(doc, 'header', { class: 'rh-header' },
           h(doc, 'div', { class: 'rh-header-top' },
             h(doc, 'div', { class: 'rh-brand' },
               h(doc, 'div', { class: 'rh-logo' }, 'RH'),
               h(doc, 'div', { class: 'rh-title-wrap' },
                 h(doc, 'div', { class: 'rh-title' }, `RisuHelper v${VERSION}`),
-                h(doc, 'div', { class: 'rh-subtitle' }, `${flavor.name} · ${this.tracker.enabled ? '커서 자동감지 활성' : '수동 대상 모드'}`)
+                subtitleEl
               )
             ),
             h(doc, 'button', {
@@ -7774,13 +8232,17 @@
               },
             }, '설정'),
             h(doc, 'button', {
+              class: `rh-btn${this.isDocked ? ' primary' : ' ghost rh-hide-mobile'}`,
+              onclick: () => this.toggleDockMode(),
+            }, this.isDocked ? '📌 도킹 해제' : '📌 오른쪽 도킹'),
+            h(doc, 'button', {
               class: 'rh-btn ghost',
               onclick: () => {
                 this.messages = [];
                 this.render();
               },
             }, '대화 비우기'),
-            h(doc, 'button', {
+            !this.isDocked && h(doc, 'button', {
               class: 'rh-btn ghost rh-hide-mobile',
               onclick: async () => {
                 this.settings.wideMode = !this.settings.wideMode;
@@ -7980,7 +8442,7 @@
         );
 
         const drawer = h(doc, 'section', {
-          class: `rh-drawer${this.settings.wideMode ? ' wide' : ''}`,
+          class: `rh-drawer${this.isDocked ? ' docked' : (this.settings.wideMode ? ' wide' : '')}`,
           onclick: (e) => e.stopPropagation(),
         },
           header,
@@ -7992,8 +8454,8 @@
         );
 
         const shell = h(doc, 'div', {
-          class: 'rh-shell',
-          onclick: () => this.close(),
+          class: `rh-shell${this.isDocked ? ' docked' : ''}`,
+          onclick: this.isDocked ? null : () => this.close(),
         }, drawer);
 
         doc.body.appendChild(shell);
