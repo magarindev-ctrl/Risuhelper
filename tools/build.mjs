@@ -142,8 +142,10 @@ function transformModule(relPath) {
     outLines.push(...exportAssignments);
   }
 
-  const indentedBody = outLines.map(l => (l === '' ? '' : `    ${l}`)).join('\n');
-  return { relPath, deps, indentedBody };
+  // Module bodies are emitted verbatim. Re-indenting them would also indent the continuation lines
+  // of multi-line template literals (system prompt, CSS, knowledge base), changing their content.
+  const body = outLines.join('\n');
+  return { relPath, deps, body };
 }
 
 function collectGraph(entryRel) {
@@ -181,7 +183,7 @@ function build() {
   const modules = collectGraph(ENTRY_REL);
   const moduleBlocks = modules.map((mod, idx) => {
     const comma = idx < modules.length - 1 ? ',' : '';
-    return `  ${JSON.stringify(mod.relPath)}(__require, __exports) {\n${mod.indentedBody}\n\n  }${comma}`;
+    return `  ${JSON.stringify(mod.relPath)}(__require, __exports) {\n${mod.body}\n\n  }${comma}`;
   });
 
   const bundle = [

@@ -341,6 +341,7 @@ function resolveModuleIndex(modules, target, preferredModuleId = null) {
 
     let bestIdx = -1;
     let bestScore = 0;
+    let tiedWithBest = false;
 
     for (let i = 0; i < modules.length; i++) {
       const m = modules[i];
@@ -441,11 +442,15 @@ function resolveModuleIndex(modules, target, preferredModuleId = null) {
       if (score > bestScore) {
         bestScore = score;
         bestIdx = i;
+        tiedWithBest = false;
+      } else if (score === bestScore && score > 0) {
+        tiedWithBest = true;
       }
     }
 
     if (bestIdx !== -1 && bestScore > 0) {
-      return { index: bestIdx, matchedBy: 'dom_hints', score: bestScore };
+      // Two modules that look identical in the DOM (e.g. a duplicated module) cannot be told apart.
+      return { index: bestIdx, matchedBy: tiedWithBest ? 'ambiguous' : 'dom_hints', score: bestScore };
     }
   }
 
@@ -456,7 +461,16 @@ function resolveModuleIndex(modules, target, preferredModuleId = null) {
     }
   }
 
-  return { index: 0, matchedBy: 'fallback' };
+  // Nothing identified the module. With a single installed module index 0 is certain;
+  // otherwise it is only a guess that callers must not write to.
+  return { index: 0, matchedBy: modules.length === 1 ? 'single' : 'fallback' };
+}
+
+const MODULE_UNCERTAIN_ERROR =
+  '어느 모듈을 편집 중인지 자동으로 확정하지 못했습니다. 상단의 모듈 선택기에서 대상 모듈을 직접 선택한 뒤 다시 요청해 주세요.';
+
+function isUncertainModuleMatch(matchedBy) {
+  return matchedBy === 'fallback' || matchedBy === 'ambiguous';
 }
 
 /**
@@ -482,6 +496,9 @@ class HostAdapter {
       if (byId !== -1) return byId;
     }
     const res = resolveModuleIndex(modules, target, this._lastMatchedModuleId);
+    if (isUncertainModuleMatch(res.matchedBy)) {
+      throw new Error(MODULE_UNCERTAIN_ERROR);
+    }
     return res.index ?? 0;
   }
 
@@ -1088,6 +1105,7 @@ class HostAdapter {
         },
         hostBinding: { moduleIndex: modIdx, moduleId: mod.id || null },
         moduleMatchedBy: resolvedMod.matchedBy,
+        moduleUncertain: isUncertainModuleMatch(resolvedMod.matchedBy),
         label,
         content,
         entry,
@@ -1167,6 +1185,7 @@ class HostAdapter {
     if (proposal.action === 'patch_text' || proposal.action === 'replace_text') {
       const snap = await this.readTargetSnapshot(target);
       if (!snap.ok) return { ok: false, error: snap.reason };
+      if (snap.moduleUncertain) return { ok: false, error: MODULE_UNCERTAIN_ERROR, label: snap.label, target: snap.target };
       const kind = snap.target?.targetKind || target.targetKind;
       const nonEditableTextKinds = new Set(['general', 'char_regex', 'module_regex']);
       if (!kind || nonEditableTextKinds.has(kind)) {
@@ -1259,6 +1278,7 @@ class HostAdapter {
         moduleDomHints: proposal.moduleIndex === undefined ? target.moduleDomHints : undefined,
       });
       if (!snap.ok) return { ok: false, error: snap.reason };
+      if (snap.moduleUncertain) return { ok: false, error: MODULE_UNCERTAIN_ERROR, label: snap.label, target: snap.target };
       const before = snap.content;
       if (!proposal.edits) {
         const truncErr = checkTruncationGuard(before, 'Lua 전체 교체');
@@ -1305,6 +1325,7 @@ class HostAdapter {
         fieldKey,
       });
       if (!snap.ok) return { ok: false, error: snap.reason };
+      if (snap.moduleUncertain) return { ok: false, error: MODULE_UNCERTAIN_ERROR, label: snap.label, target: snap.target };
       if (!snap.entry) return { ok: false, error: `수정할 로어북 항목(#${loreIndex})을 찾을 수 없습니다.` };
 
       const before = String(snap.entry[fieldKey] ?? '');
@@ -1344,6 +1365,7 @@ class HostAdapter {
         fieldKey,
       });
       if (!snap.ok) return { ok: false, error: snap.reason };
+      if (snap.moduleUncertain) return { ok: false, error: MODULE_UNCERTAIN_ERROR, label: snap.label, target: snap.target };
       if (!snap.entry) return { ok: false, error: '수정할 페르소나를 찾을 수 없습니다.' };
 
       const before = String(snap.entry[fieldKey] ?? '');
@@ -1402,6 +1424,7 @@ class HostAdapter {
         moduleDomHints: proposal.moduleIndex === undefined ? target.moduleDomHints : undefined,
       });
       if (!snap.ok) return { ok: false, error: snap.reason };
+      if (snap.moduleUncertain) return { ok: false, error: MODULE_UNCERTAIN_ERROR, label: snap.label, target: snap.target };
       const existing = idx !== null ? snap.entry : null;
       const nextEntry = normalizeRegexEntry(proposal, existing);
       const metaChanges = existing
@@ -1432,6 +1455,7 @@ class HostAdapter {
         moduleDomHints: proposal.moduleIndex === undefined ? target.moduleDomHints : undefined,
       });
       if (!snap.ok) return { ok: false, error: snap.reason };
+      if (snap.moduleUncertain) return { ok: false, error: MODULE_UNCERTAIN_ERROR, label: snap.label, target: snap.target };
       const nextEntry = normalizeLorebookEntry(proposal);
       const metaChanges = LORE_META_SPECS
         .filter(([k]) => nextEntry[k] !== undefined && nextEntry[k] !== '' && nextEntry[k] !== false)

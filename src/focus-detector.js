@@ -48,6 +48,25 @@ function matchAny(text, keywords) {
   return keywords.some(kw => norm === kw || norm.startsWith(kw + ' ') || norm.includes(kw));
 }
 
+/**
+ * Exact (whole-label) match for a field label or placeholder.
+ * Field labels must never be matched by substring: "캐릭터 설명 Prefix" (a global setting) and
+ * "Additional Description" both contain a keyword of the character description field.
+ */
+function labelIs(text, keywords) {
+  const norm = normalizeLabel(text).replace(/\s*[:：*?]+$/u, '').trim();
+  if (!norm) return false;
+  return keywords.includes(norm);
+}
+
+function isSearchField(placeholder, inputType) {
+  if (String(inputType || '').toLowerCase() === 'search') return true;
+  const norm = normalizeLabel(placeholder);
+  return norm === '검색' || norm === 'search' || norm.endsWith(' 검색') || norm.endsWith('로 검색') || norm.startsWith('search ');
+}
+
+const LORE_CHAT_TAB_LABELS = ['챗', '채팅', 'chat'];
+
 function isChatElementAttrs(attrs) {
   const cls = String(attrs?.class || '');
   const id = String(attrs?.id || '');
@@ -148,6 +167,31 @@ async function extractLabelFromColWrapper(el, className) {
       }
     }
   } catch {}
+  return '';
+}
+
+/**
+ * Finds the label of the active tab that governs a list item (e.g. LoreBookSetting's
+ * 캐릭터 / 챗 / 설정 bar). The tab buttons live in a sibling container of the list, so they are
+ * never direct children of the focused field's ancestors: climb and query each ancestor's subtree,
+ * and stop at the first (innermost) ancestor that contains an active tab.
+ */
+async function findNearestActiveTabLabel(startNode, maxHops = 6) {
+  let cur = startNode;
+  for (let hop = 0; hop < maxHops && cur; hop++) {
+    let parent = null;
+    try {
+      parent = await cur.getParent();
+    } catch {}
+    if (!parent || typeof parent.querySelector !== 'function') return '';
+    try {
+      const tab = await parent.querySelector('button.bg-selected, [role="tab"][aria-selected="true"]');
+      if (tab) {
+        return String((await tab.textContent()) || '').replace(/\s+/g, ' ').trim().slice(0, 36);
+      }
+    } catch {}
+    cur = parent;
+  }
   return '';
 }
 
@@ -365,6 +409,7 @@ function classifyDomSignals(signals) {
     isChatMessageEdit = false,
     tableRowIndex = null,
     moduleDomHints = null,
+    loreTabLabel = '',
   } = signals || {};
 
   const headingText = headings.join(' | ');
@@ -428,6 +473,43 @@ function classifyDomSignals(signals) {
     };
   }
 
+  // 0.8. List search boxes are never an edit target (module / persona / lorebook list filters).
+  if (isSearchField(placeholder, inputType)) {
+    const screen = matchAny(headingText, ['페르소나', 'persona'])
+      ? 'persona'
+      : matchAny(headingText, MODULE_HEADING_KEYWORDS) ? 'module' : 'unknown';
+    return {
+      detectedAt: Date.now(),
+      screen,
+      targetKind: 'general',
+      fieldKey: null,
+      loreIndex: null,
+      loreScope: null,
+      labelText: `${SCREEN_LABELS[screen] || SCREEN_LABELS.unknown} · 검색창`,
+      placeholder,
+      liveTextPreview,
+      warnings,
+    };
+  }
+
+  // 0.9. Any other declarative setting row (PocketRisu `data-setting-id`, e.g. `adv.descPrefix`)
+  //      is a global setting: it must never fall through to character / lorebook label heuristics.
+  if (normSettingId && !normSettingId.startsWith('module.')) {
+    return {
+      detectedAt: Date.now(),
+      screen: 'settings',
+      targetKind: 'config',
+      fieldKey: null,
+      loreIndex: null,
+      loreScope: null,
+      settingId: String(settingId).trim(),
+      labelText: `설정 · ${nearbyLabel ? nearbyLabel.slice(0, 28) : String(settingId).trim()}`,
+      placeholder,
+      liveTextPreview,
+      warnings,
+    };
+  }
+
   // 1. Persona settings screen
   const isPersonaScreen =
     matchAny(headingText, ['페르소나', 'persona']) ||
@@ -435,13 +517,31 @@ function classifyDomSignals(signals) {
     placeholder.toLowerCase().includes('persona');
 
   if (isPersonaScreen) {
-    let fieldKey = 'personaPrompt';
-    if (matchAny(nearbyLabel, ['이름', 'name']) || placeholder === 'User') {
+    let fieldKey = null;
+    if (labelIs(nearbyLabel, ['이름', 'name']) || placeholder === 'User') {
       fieldKey = 'name';
-    } else if (matchAny(nearbyLabel, ['메모', 'note'])) {
+    } else if (labelIs(nearbyLabel, ['메모', 'note'])) {
       fieldKey = 'note';
-    } else if (matchAny(nearbyLabel, ['설명', 'description'])) {
+    } else if (
+      labelIs(nearbyLabel, ['설명', 'description']) ||
+      placeholder.toLowerCase().includes('description of this persona') ||
+      (!nearbyLabel && (tag === 'textarea' || isContentEditable))
+    ) {
       fieldKey = 'personaPrompt';
+    }
+    if (!fieldKey) {
+      return {
+        detectedAt: Date.now(),
+        screen: 'persona',
+        targetKind: 'general',
+        fieldKey: null,
+        loreIndex: null,
+        loreScope: null,
+        labelText: `페르소나 화면${nearbyLabel ? ` (${nearbyLabel.slice(0, 28)})` : ''}`,
+        placeholder,
+        liveTextPreview,
+        warnings,
+      };
     }
     return {
       detectedAt: Date.now(),
@@ -470,7 +570,7 @@ function classifyDomSignals(signals) {
   if (
     luaButtonActive ||
     hasTriggerContainer ||
-    matchAny(nearbyLabel, ['트리거 스크립트', 'trigger script'])
+    labelIs(nearbyLabel, ['트리거 스크립트', 'trigger script'])
   ) {
     const targetKind = isModuleScreen ? 'module_lua' : 'char_lua';
     return {
@@ -489,12 +589,12 @@ function classifyDomSignals(signals) {
   }
 
   // 4. Regex script editor (checked BEFORE lorebook because RegexData.svelte also carries data-risu-idx)
-  if (hasRegexContainer || matchAny(nearbyLabel, ['정규식 스크립트', 'regex script'])) {
+  if (hasRegexContainer || labelIs(nearbyLabel, ['정규식 스크립트', 'regex script'])) {
     const targetKind = isModuleScreen ? 'module_regex' : 'char_regex';
     const regexIdx = loreIdx !== null && Number.isInteger(loreIdx) && loreIdx >= 0 ? loreIdx : null;
     let fieldKey = 'in';
-    if (matchAny(nearbyLabel, ['out', '출력', '치환'])) fieldKey = 'out';
-    else if (matchAny(nearbyLabel, ['이름', 'name', 'comment'])) fieldKey = 'comment';
+    if (labelIs(nearbyLabel, ['out', '출력', '치환'])) fieldKey = 'out';
+    else if (labelIs(nearbyLabel, ['이름', 'name', 'comment'])) fieldKey = 'comment';
     return {
       detectedAt: Date.now(),
       screen: isModuleScreen ? 'module' : 'scripts',
@@ -518,17 +618,34 @@ function classifyDomSignals(signals) {
     if (isModuleScreen) {
       loreScope = 'module';
       targetKind = 'module_lorebook';
-    } else if (matchAny(activeTabText, ['채팅', 'chat'])) {
+    } else if (labelIs(loreTabLabel, LORE_CHAT_TAB_LABELS) || activeTabs.some(t => labelIs(t, LORE_CHAT_TAB_LABELS))) {
       loreScope = 'chat';
       targetKind = 'chat_lorebook';
     }
 
-    let fieldKey = 'content';
-    if (matchAny(nearbyLabel, ['폴더 이름', 'folder name', '이름', 'name'])) fieldKey = 'comment';
-    else if (matchAny(nearbyLabel, ['두번째 키', 'secondary keys', '보조 키'])) fieldKey = 'secondkey';
-    else if (matchAny(nearbyLabel, ['활성화 키', 'activation keys'])) fieldKey = 'key';
-    else if (matchAny(nearbyLabel, ['배치 순서', 'insert order'])) fieldKey = 'insertorder';
-    else if (matchAny(nearbyLabel, ['프롬프트', 'prompt']) || tag === 'textarea' || isContentEditable) fieldKey = 'content';
+    let fieldKey = null;
+    if (labelIs(nearbyLabel, ['폴더 이름', 'folder name', '이름', 'name'])) fieldKey = 'comment';
+    else if (labelIs(nearbyLabel, ['두번째 키', 'secondary keys', '보조 키'])) fieldKey = 'secondkey';
+    else if (labelIs(nearbyLabel, ['활성화 키', 'activation keys'])) fieldKey = 'key';
+    else if (labelIs(nearbyLabel, ['배치 순서', 'insert order', 'insertion order'])) fieldKey = 'insertorder';
+    else if (labelIs(nearbyLabel, ['프롬프트', 'prompt']) || tag === 'textarea' || isContentEditable) fieldKey = 'content';
+
+    if (!fieldKey) {
+      // Unknown single-line input inside a lore entry: never guess that it is the entry body.
+      const scopeName = loreScope === 'module' ? '모듈 로어북' : loreScope === 'chat' ? '채팅 로어북' : '캐릭터 로어북';
+      return {
+        detectedAt: Date.now(),
+        screen: isModuleScreen ? 'module' : 'lorebook',
+        targetKind: 'general',
+        fieldKey: null,
+        loreIndex: null,
+        loreScope: null,
+        labelText: `${scopeName} #${loreIdx + 1}${nearbyLabel ? ` · ${nearbyLabel.slice(0, 20)}` : ''} (편집 대상 아님)`,
+        placeholder,
+        liveTextPreview,
+        warnings,
+      };
+    }
 
     const scopeLabel = loreScope === 'module' ? '모듈 로어북' : loreScope === 'chat' ? '채팅 로어북' : '캐릭터 로어북';
     const fieldLabelMap = { comment: '이름', key: '활성화 키', secondkey: '보조 키', insertorder: '배치 순서', content: '본문' };
@@ -551,20 +668,20 @@ function classifyDomSignals(signals) {
   if (isModuleScreen) {
     const isExplicitBgEmbed =
       normSettingId === 'module.backgroundembedding' ||
-      matchAny(nearbyLabel, ['백그라운드 임베딩', 'background embedding', 'background html']) ||
-      matchAny(placeholder, ['백그라운드 임베딩', 'background embedding']);
+      labelIs(nearbyLabel, ['백그라운드 임베딩', 'background embedding', 'background html']) ||
+      labelIs(placeholder, ['백그라운드 임베딩', 'background embedding']);
     const isExplicitToggle =
       normSettingId === 'module.custommoduletoggle' ||
-      matchAny(nearbyLabel, ['커스텀 토글', 'custom toggle', '토글', 'toggle']);
+      labelIs(nearbyLabel, ['커스텀 토글', 'custom toggle', 'custom toggles', '토글', 'toggle']);
     const isExplicitNamespace =
       normSettingId === 'module.namespace' ||
-      matchAny(nearbyLabel, ['네임스페이스', 'namespace']);
+      labelIs(nearbyLabel, ['네임스페이스', 'namespace']);
     const isExplicitName =
       normSettingId === 'module.name' ||
-      matchAny(nearbyLabel, ['이름', 'name']);
+      labelIs(nearbyLabel, ['이름', 'name']);
     const isExplicitDesc =
       normSettingId === 'module.description' ||
-      matchAny(nearbyLabel, ['설명', 'description']);
+      labelIs(nearbyLabel, ['설명', 'description']);
     const hasExplicitModuleField =
       isExplicitBgEmbed || isExplicitToggle || isExplicitNamespace || isExplicitName || isExplicitDesc;
 
@@ -620,6 +737,23 @@ function classifyDomSignals(signals) {
       }
     }
 
+    if (!hasExplicitModuleField) {
+      // Module list or an unlabeled control: do not guess "module description".
+      return {
+        detectedAt: Date.now(),
+        screen: 'module',
+        targetKind: 'general',
+        fieldKey: null,
+        loreIndex: null,
+        loreScope: null,
+        labelText: `모듈 화면${nearbyLabel ? ` (${nearbyLabel.slice(0, 28)})` : ''}`,
+        placeholder,
+        liveTextPreview,
+        ...modHintsExtra,
+        warnings,
+      };
+    }
+
     let fieldKey = 'description';
     if (isExplicitBgEmbed) {
       fieldKey = 'backgroundEmbedding';
@@ -646,8 +780,8 @@ function classifyDomSignals(signals) {
   }
 
   // 7. Explicit config CSS/HTML fields (upstream RisuAI & PocketRisu labels)
-  if (matchAny(nearbyLabel, ['커스텀 css', 'custom css', '채팅 html', 'chat html', 'gui html'])) {
-    const fieldKey = matchAny(nearbyLabel, ['채팅 html', 'chat html', 'gui html']) ? 'guiHTML' : 'customCSS';
+  if (labelIs(nearbyLabel, ['커스텀 css', 'custom css', '채팅 html', 'chat html', 'gui html'])) {
+    const fieldKey = labelIs(nearbyLabel, ['채팅 html', 'chat html', 'gui html']) ? 'guiHTML' : 'customCSS';
     return {
       detectedAt: Date.now(),
       screen: 'settings',
@@ -663,7 +797,7 @@ function classifyDomSignals(signals) {
   }
 
   // 8. Chat Author's Note (CharConfig.svelte -> char.chats[chatPage].note)
-  if (matchAny(nearbyLabel, ['작가의 노트', "author's note", 'author note'])) {
+  if (labelIs(nearbyLabel, ['작가의 노트', "author's note", 'author note'])) {
     return {
       detectedAt: Date.now(),
       screen: 'character',
@@ -679,7 +813,7 @@ function classifyDomSignals(signals) {
   }
 
   // 8.5. Character Alternate Greetings (checked BEFORE firstMessage because '추가 첫 메시지' contains '첫 메시지')
-  if (matchAny(nearbyLabel, ['추가 첫 메시지', 'alternate greetings', 'alt greet'])) {
+  if (labelIs(nearbyLabel, ['추가 첫 메시지', 'alternate greetings', 'alternative first messages', 'alt greet'])) {
     const gIdx = Number.isInteger(tableRowIndex) && tableRowIndex >= 0 ? tableRowIndex : null;
     return {
       detectedAt: Date.now(),
@@ -713,7 +847,7 @@ function classifyDomSignals(signals) {
     ['scenario', ['시나리오', 'scenario']],
     ['defaultVariables', ['기본 변수', 'default variables']],
     ['translatorNote', ['번역가의 노트', 'translator note', "translator's note"]],
-    ['customModuleToggle', ['커스텀 토글', 'custom toggle', 'custom prompt template toggle']],
+    ['customModuleToggle', ['커스텀 토글', 'custom toggle', 'custom toggles', 'custom prompt template toggle']],
     ['depthPrompt', ['깊이 프롬프트', 'depth prompt']],
     ['backgroundHTML', ['백그라운드 임베딩', 'background embedding', 'background html']],
     ['virtualscript', ['캐릭터js', '캐릭터 js', 'charjs', 'character js']],
@@ -723,7 +857,7 @@ function classifyDomSignals(signals) {
     if (key === 'depthPrompt' && String(inputType || '').toLowerCase() === 'number') {
       continue;
     }
-    if (matchAny(nearbyLabel, terms) || matchAny(placeholder, terms)) {
+    if (labelIs(nearbyLabel, terms) || labelIs(placeholder, terms)) {
       const meta = CHAR_FIELD_META[key];
       return {
         detectedAt: Date.now(),
@@ -738,6 +872,27 @@ function classifyDomSignals(signals) {
         warnings,
       };
     }
+  }
+
+  // 9.5. Character Advanced fields RisuHelper does not edit (creator, version, numeric depth).
+  //      They share <h2>고급 설정</h2> with the global Advanced Settings page, so name them
+  //      explicitly rather than reporting the global settings screen.
+  if (
+    labelIs(nearbyLabel, ['제작자', 'creator', '캐릭터 버전', 'character version']) ||
+    (labelIs(nearbyLabel, ['깊이 프롬프트', 'depth prompt']) && String(inputType || '').toLowerCase() === 'number')
+  ) {
+    return {
+      detectedAt: Date.now(),
+      screen: 'character',
+      targetKind: 'general',
+      fieldKey: null,
+      loreIndex: null,
+      loreScope: null,
+      labelText: `캐릭터 · ${nearbyLabel.slice(0, 24)} (편집 미지원)`,
+      placeholder,
+      liveTextPreview,
+      warnings,
+    };
   }
 
   // 10. Settings / Config screens
@@ -763,7 +918,7 @@ function classifyDomSignals(signals) {
 
   // 11. Lorebook heading open without specific item focused
   if (matchAny(headingText, ['로어북', 'lorebook'])) {
-    const isChat = matchAny(activeTabText, ['채팅', 'chat']);
+    const isChat = labelIs(loreTabLabel, LORE_CHAT_TAB_LABELS) || activeTabs.some(t => labelIs(t, LORE_CHAT_TAB_LABELS));
     return {
       detectedAt: Date.now(),
       screen: 'lorebook',
@@ -844,6 +999,7 @@ async function inspectFocusedElement(rootDoc) {
     let hasTriggerContainer = false;
     let moduleScopeCandidate = null;
     let moduleH2Node = null;
+    let loreItemNode = null;
     // Check the focused element itself first (DefaultChatScreen puts `text-input-area` directly on <textarea>)
     let isChatInput = isChatElementAttrs(attrs);
     let isChatMessageEdit = String(attrs.class || '').includes('message-edit-area');
@@ -862,7 +1018,10 @@ async function inspectFocusedElement(rootDoc) {
 
       if (loreIdx === null && pAttrs['data-risu-idx'] !== undefined) {
         const parsed = parseInt(pAttrs['data-risu-idx'], 10);
-        if (!Number.isNaN(parsed)) loreIdx = parsed;
+        if (!Number.isNaN(parsed)) {
+          loreIdx = parsed;
+          loreItemNode = parent;
+        }
       }
 
       if (!settingId && pAttrs['data-setting-id']) {
@@ -1077,6 +1236,8 @@ async function inspectFocusedElement(rootDoc) {
       } catch {}
     }
 
+    const loreTabLabel = loreItemNode ? await findNearestActiveTabLabel(loreItemNode) : '';
+
     let moduleDomHints = null;
     const isModuleFocusContext =
       !isChatInput &&
@@ -1115,6 +1276,7 @@ async function inspectFocusedElement(rootDoc) {
       isChatMessageEdit,
       tableRowIndex,
       moduleDomHints,
+      loreTabLabel,
     });
   } catch {
     return null;

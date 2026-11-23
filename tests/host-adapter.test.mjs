@@ -805,3 +805,63 @@ test('HostAdapter auto-matches the open module via moduleDomHints instead of def
   });
   assert.equal(luaMatch.index, 1);
 });
+
+function createTwinModuleHost() {
+  const lore = (comment, content) => ({ comment, key: 'k', content, insertorder: 100, alwaysActive: false });
+  const host = createMockHost();
+  host.state.db.modules = [
+    { id: 'mod-a', name: 'Original', description: 'first', lorebook: [lore('Intro', 'same body text here')], regex: [], trigger: [] },
+    { id: 'mod-b', name: 'Copy of Original', description: 'second', lorebook: [lore('Intro', 'same body text here')], regex: [], trigger: [] },
+  ];
+  host.state.db.enabledModules = [];
+  return host;
+}
+
+test('resolveModuleIndex reports a tie between identical modules as ambiguous instead of silently picking the first', async () => {
+  const { resolveModuleIndex } = await import('../src/host-adapter.js');
+  const { state } = createTwinModuleHost();
+  const res = resolveModuleIndex(state.db.modules, {
+    targetKind: 'module_lorebook',
+    moduleDomHints: { tab: 'lorebook', items: [{ idx: 0, title: 'Intro' }], openIdx: 0, textPreview: 'same body text here', totalIdxCount: 1 },
+  });
+  assert.equal(res.matchedBy, 'ambiguous');
+});
+
+test('resolveModuleIndex flags the modules[0] guess as a fallback only when several modules are installed', async () => {
+  const { resolveModuleIndex } = await import('../src/host-adapter.js');
+  const { state } = createTwinModuleHost();
+  assert.equal(resolveModuleIndex(state.db.modules, { targetKind: 'module_field', fieldKey: 'description' }).matchedBy, 'fallback');
+  const single = resolveModuleIndex(state.db.modules.slice(0, 1), { targetKind: 'module_field', fieldKey: 'description' });
+  assert.deepEqual({ index: single.index, matchedBy: single.matchedBy }, { index: 0, matchedBy: 'single' });
+});
+
+test('HostAdapter refuses to preview or apply a module edit when the open module cannot be identified', async () => {
+  const { api, state } = createTwinModuleHost();
+  const adapter = new HostAdapter(api);
+  const target = { targetKind: 'module_lorebook', loreIndex: 0, fieldKey: 'content' };
+  const proposal = { action: 'replace_text', content: 'OVERWRITTEN' };
+
+  const snap = await adapter.readTargetSnapshot(target);
+  assert.equal(snap.moduleUncertain, true);
+
+  const preview = await adapter.previewProposal(proposal, target);
+  assert.equal(preview.ok, false);
+  assert.match(preview.error, /모듈/);
+
+  await assert.rejects(() => adapter.applyProposal(proposal, target, {}), /모듈/);
+  assert.equal(state.db.modules[0].lorebook[0].content, 'same body text here');
+  assert.equal(state.db.modules[1].lorebook[0].content, 'same body text here');
+});
+
+test('HostAdapter edits the module the user picked explicitly even when modules are otherwise indistinguishable', async () => {
+  const { api, state } = createTwinModuleHost();
+  const adapter = new HostAdapter(api);
+  const target = { targetKind: 'module_lorebook', moduleIndex: 1, loreIndex: 0, fieldKey: 'content' };
+  const proposal = { action: 'replace_text', content: 'PICKED' };
+
+  const preview = await adapter.previewProposal(proposal, target);
+  assert.equal(preview.ok, true);
+  await adapter.applyProposal(proposal, preview.target, { hostBinding: preview.hostBinding });
+  assert.equal(state.db.modules[0].lorebook[0].content, 'same body text here');
+  assert.equal(state.db.modules[1].lorebook[0].content, 'PICKED');
+});

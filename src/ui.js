@@ -14,6 +14,7 @@ const DEFAULT_SETTINGS = {
   timeoutSeconds: 120,
   maxHistoryTurns: 12,
   showFloatingChip: true,
+  showHostActionButton: false,
   floatingChipPos: null,
   dockMode: false,
   autoOpenDocked: false,
@@ -24,6 +25,16 @@ const DEFAULT_SETTINGS = {
   includeConfigSummary: false,
   wideMode: false,
 };
+
+/**
+ * The host renders `location: 'action'` buttons itself at a fixed top-right position on the chat
+ * screen; a plugin cannot move them. Since it duplicates the draggable chip, it is only registered
+ * when the user asks for it, or as the fallback entry point when the chip cannot be shown
+ * (mainDom declined, or the chip switched off).
+ */
+function shouldRegisterHostActionButton({ userEnabled = false, chipAvailable = false } = {}) {
+  return Boolean(userEnabled) || !chipAvailable;
+}
 
 const ACTION_LABELS = {
   patch_text: '부분 편집',
@@ -95,6 +106,7 @@ class RisuHelperApp {
     this.toastTimer = null;
     this.toastText = '';
     this.registeredIds = [];
+    this.hostActionButtonId = null;
     this.viewportHandler = null;
     this._lastLiveFocusSig = '';
     this._liveRefreshSeq = 0;
@@ -145,13 +157,8 @@ class RisuHelperApp {
 
     const openHandler = () => { this.open(); };
 
+    this._openHandler = openHandler;
     if (typeof this.api.registerButton === 'function') {
-      const fab = await this.api.registerButton(
-        { name: 'RisuHelper', icon: '✨', iconType: 'html', location: 'action', id: 'risuhelper-fab' },
-        openHandler
-      );
-      if (fab?.id) this.registeredIds.push(fab.id);
-
       const ham = await this.api.registerButton(
         { name: 'RisuHelper', icon: '✨', iconType: 'html', location: 'hamburger', id: 'risuhelper-ham' },
         openHandler
@@ -172,6 +179,7 @@ class RisuHelperApp {
     this.tracker.showFloatingChip = this.settings.showFloatingChip;
     this.tracker.chipPos = normalizeChipPos(this.settings.floatingChipPos);
     const trackerStarted = await this.tracker.start().catch(() => false);
+    await this.syncHostActionButton();
     await this.adapter.probeHostFlavor(this.tracker.rootDoc).catch(() => {});
 
     // Optional PC auto-dock on startup (strictly opt-in via user settings)
@@ -186,6 +194,32 @@ class RisuHelperApp {
     }
 
     this.render();
+  }
+
+  async syncHostActionButton() {
+    if (typeof this.api.registerButton !== 'function') return;
+    const chipAvailable = Boolean(this.tracker?.enabled && this.settings.showFloatingChip);
+    const want = shouldRegisterHostActionButton({
+      userEnabled: this.settings.showHostActionButton,
+      chipAvailable,
+    });
+    if (want && !this.hostActionButtonId) {
+      try {
+        const fab = await this.api.registerButton(
+          { name: 'RisuHelper', icon: '✨', iconType: 'html', location: 'action', id: 'risuhelper-fab' },
+          this._openHandler || (() => { this.open(); })
+        );
+        this.hostActionButtonId = fab?.id || 'risuhelper-fab';
+        this.registeredIds.push(this.hostActionButtonId);
+      } catch {}
+    } else if (!want && this.hostActionButtonId) {
+      const id = this.hostActionButtonId;
+      this.hostActionButtonId = null;
+      this.registeredIds = this.registeredIds.filter(x => x !== id);
+      if (typeof this.api.unregisterUIPart === 'function') {
+        try { await this.api.unregisterUIPart(id); } catch {}
+      }
+    }
   }
 
   mountBaseStyles() {
@@ -1152,10 +1186,24 @@ class RisuHelperApp {
                 this.settings.showFloatingChip = Boolean(e.target.checked);
                 await this.saveSettings();
                 await this.tracker.setChipVisible(this.settings.showFloatingChip);
+                await this.syncHostActionButton();
                 this.render();
               },
             }),
             '화면에 플로팅 버튼 표시 (드래그 이동 가능 · mainDom 필요)'
+          ),
+          h(doc, 'label', {},
+            h(doc, 'input', {
+              type: 'checkbox',
+              checked: this.settings.showHostActionButton,
+              onchange: async (e) => {
+                this.settings.showHostActionButton = Boolean(e.target.checked);
+                await this.saveSettings();
+                await this.syncHostActionButton();
+                this.render();
+              },
+            }),
+            '채팅 화면 우측 상단 고정 ✨ 버튼도 표시 (RisuAI가 그리는 버튼 · 위치 이동 불가)'
           )
         )
       ),
@@ -1377,6 +1425,11 @@ class RisuHelperApp {
       }
     }
 
+    if (this.activeSnapshot?.ok && this.activeSnapshot.moduleUncertain) {
+      contextBarChildren.push(h(doc, 'div', { class: 'rh-banner error' },
+        '열려 있는 모듈을 자동으로 확정하지 못했습니다. 아래 모듈 선택기에서 편집할 모듈을 직접 선택해 주세요. 선택 전에는 모듈 편집 제안을 적용할 수 없습니다.'));
+    }
+
     if (this.activeSnapshot && !this.activeSnapshot.ok) {
       contextBarChildren.push(h(doc, 'div', { class: 'rh-banner error' }, this.activeSnapshot.reason));
     } else if (this.activeSnapshot?.content) {
@@ -1550,4 +1603,4 @@ class RisuHelperApp {
   }
 }
 
-export { RisuHelperApp };
+export { RisuHelperApp, shouldRegisterHostActionButton };

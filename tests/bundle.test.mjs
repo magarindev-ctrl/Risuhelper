@@ -893,3 +893,13 @@ test('dist/risuhelper.js auto-identifies the open module lorebook in UI dropdown
   assert.match(doc.body.textContent, /CRITICAL: This is a front-end rendering command/);
   assert.doesNotMatch(doc.body.textContent, /AI챗고수가도리거야/);
 });
+
+test('dist/risuhelper.js keeps multi-line template literals byte-identical to src (no bundler indentation injected)', () => {
+  const src = fs.readFileSync(path.resolve(__dirname, '..', 'src', 'llm.js'), 'utf8');
+  const dist = fs.readFileSync(BUNDLE_PATH, 'utf8');
+  const start = src.indexOf('[수정·생성 제안 프로토콜]');
+  assert.ok(start !== -1, 'expected the proposal protocol block in src/llm.js');
+  const literalChunk = src.slice(start, start + 400);
+  assert.ok(literalChunk.includes('\n'), 'chunk must span several lines');
+  assert.ok(dist.includes(literalChunk), 'system prompt text in dist differs from src');
+});

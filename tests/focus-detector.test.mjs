@@ -1414,3 +1414,32 @@ test('PocketRisu & upstream RisuAI ModuleMenu detects active tabs, expanded lore
   assert.equal(folderCtx.loreIndex, 2);
   assert.equal(folderCtx.moduleDomHints?.textPreview, 'Child prompt body inside folder');
 });
+
+test('classifyDomSignals keeps uneditable Character Advanced fields on the character screen instead of global settings', () => {
+  for (const label of ['제작자', 'Creator', '캐릭터 버전', 'Character Version']) {
+    const ctx = classifyDomSignals({ tag: 'input', inputType: 'text', nearbyLabel: label, headings: ['고급 설정'] });
+    assert.equal(ctx.screen, 'character', label);
+    assert.equal(ctx.targetKind, 'general', label);
+  }
+  const depth = classifyDomSignals({ tag: 'input', inputType: 'number', nearbyLabel: '깊이 프롬프트', headings: ['고급 설정'] });
+  assert.equal(depth.screen, 'character');
+  assert.equal(depth.targetKind, 'general');
+});
+
+test('classifyDomSignals never treats a label that merely contains a field keyword as that field', () => {
+  const prefix = classifyDomSignals({ tag: 'input', inputType: 'text', nearbyLabel: '캐릭터 설명 Prefix', headings: ['고급 설정'] });
+  assert.notEqual(prefix.targetKind, 'char_field');
+  const order = classifyDomSignals({ tag: 'input', inputType: 'number', loreIdx: 0, nearbyLabel: 'Insertion Order' });
+  assert.equal(order.fieldKey, 'insertorder');
+  const unknownLoreInput = classifyDomSignals({ tag: 'input', inputType: 'number', loreIdx: 0, nearbyLabel: 'Activation Percent' });
+  assert.equal(unknownLoreInput.targetKind, 'general');
+});
+
+test('classifyDomSignals reads the lorebook scope from the nearest active tab label, including the Korean "챗" tab', () => {
+  for (const tab of ['챗', 'Chat']) {
+    const ctx = classifyDomSignals({ tag: 'textarea', loreIdx: 0, nearbyLabel: '프롬프트', loreTabLabel: tab });
+    assert.equal(ctx.targetKind, 'chat_lorebook', tab);
+  }
+  const charTab = classifyDomSignals({ tag: 'textarea', loreIdx: 0, nearbyLabel: '프롬프트', loreTabLabel: '캐릭터' });
+  assert.equal(charTab.targetKind, 'char_lorebook');
+});

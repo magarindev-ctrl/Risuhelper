@@ -1,6 +1,6 @@
 # RisuHelper 아키텍처 및 RisuAI 포크 호환성 분석
 
-> 버전: `0.3.0` · 라이선스: `GPL-3.0-only` · 외부 런타임 의존성: 0개
+> 버전: `0.4.0` · 라이선스: `GPL-3.0-only` · 외부 런타임 의존성: 0개
 
 ---
 
@@ -79,5 +79,11 @@ User Input + Detected/Manual Target
   - 캐릭터(`ALLOWED_CHAR_FIELDS`), 로어북(`ALLOWED_LORE_TEXT_FIELDS`), 페르소나(`ALLOWED_PERSONA_TEXT_FIELDS`), 설정(`ALLOWED_CONFIG_KEYS`) 필드 화이트리스트를 강제하며, `patch_text`/`replace_text`에서 `proposal.target`으로 대상을 탈취하는 시도를 차단합니다.
   - 모델 입력 상한(`24,000자`)을 초과해 잘린 원문에는 전체 덮어쓰기(`replace_text` / Lua 전체 `code` 교체)를 차단하고 부분 편집(`patch_text` / `edits`)만 허용합니다.
   - 기존 V1/V2 트리거가 있는 상태에서 Lua로 전환할 때는 삭제·대체 경고와 명시적 확인 체크박스를 요구합니다.
+- **추측하지 않는 대상 판정**:
+  - 필드 라벨·placeholder는 전체 일치(`labelIs`)로만 매칭합니다. 부분 일치는 `캐릭터 설명 Prefix`(전역 설정)나 `Additional Description`을 캐릭터 설명으로 오인해 엉뚱한 데이터를 덮어쓰게 만듭니다.
+  - 알 수 없는 라벨, 목록 검색창, 매핑이 없는 PocketRisu `data-setting-id` 항목은 편집 가능한 대상이 아닌 `general` / `config(fieldKey 없음)`으로 분류합니다.
+  - 로어북 범위(캐릭터/챗)는 항목에서 가장 가까운 조상이 포함하는 활성 탭(`button.bg-selected`, `[role="tab"][aria-selected="true"]`)의 라벨로 결정합니다. 탭 버튼은 목록의 형제 컨테이너 안에 있어 조상의 직계 자식만 봐서는 찾을 수 없습니다.
+  - 열려 있는 모듈을 DOM 단서로 특정하지 못했거나(`fallback`) 동점인 모듈이 있으면(`ambiguous`) 미리보기와 적용을 모두 차단하고 모듈 선택기를 안내합니다. 모듈이 하나뿐이면(`single`) 그대로 진행합니다.
+- **실제 호스트 DOM 회귀 테스트**: `tools/capture-host-fixtures.cjs`가 실제 호스트 화면의 DOM과 각 입력칸에 바인딩된 값을 기록하고, `tests/host-fixtures.test.mjs`가 그 스냅샷 위에서 감지기를 실행합니다. 기대 대상은 호스트가 바인딩한 값에서 유도되므로 감지 휴리스틱과 독립적입니다.
 - **원문 구분자 프로토콜(Raw Delimiter Sections)**: 표준 JSON 외에 `<<<CODE>>>`, `<<<CONTENT>>>`, `<<<BEFORE>>>`/`<<<AFTER>>>`, `<<<IN>>>`/`<<<OUT>>>`, `<<<END>>>` 구분자를 지원해 따옴표·백슬래시가 많은 Lua/정규식/HTML 생성 시 JSON 이스케이프 오류를 방지합니다.
 - **본체 프리셋 불변**: 프리셋 적용 모드의 `.risup` / `.risupreset` / `.json` 상태는 `pluginStorage`에 독립 저장되며 RisuAI 본체의 활성 프리셋이나 모듈 활성 상태를 변경하지 않습니다.

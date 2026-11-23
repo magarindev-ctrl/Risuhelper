@@ -7,6 +7,9 @@ RisuAI 및 공개 포크(`PocketRisu`, `RisuBard`, `HaejeokRisuai`, `RisuNest`, 
 - **화면 · 커서 자동 감지 (`mainDom` 우회 아키텍처)**
   - Plugin v3 샌드박스(`SafeElement`)에서 허용되는 `pointerup`/`click`/`keyup` 이벤트와 `querySelector(':focus')`·`getBoundingClientRect()`를 조합해 사용자가 마지막으로 커서를 둔 화면·필드·로어북/정규식 항목(`data-risu-idx`)을 정확하게 자동 추적합니다 (`PocketRisu` 2중 래퍼 `TextAreaInput` 및 bits-ui 환경 완전 대응).
   - 화면의 플로팅 버튼(`⋮⋮ ✨ ...`)은 마우스·터치 드래그로 자유롭게 이동할 수 있으며, 600ms 길게 누르기 자리 순환 및 설정 내 6방향 원클릭 이동을 지원합니다.
+  - 필드 라벨은 **전체 일치**로만 판정합니다. `캐릭터 설명 Prefix`(전역 설정)처럼 키워드가 일부만 들어간 라벨, 목록 검색창, 알 수 없는 입력칸은 편집 대상으로 추측하지 않고 "대상 없음"으로 둡니다. 로어북의 캐릭터/챗 탭은 가장 가까운 활성 탭으로 구분하며, PocketRisu의 설정 항목은 `data-setting-id`로 판정합니다.
+  - 여러 모듈이 설치된 상태에서 열려 있는 모듈을 특정하지 못하거나 내용이 같은 모듈이 둘 이상이면, 첫 번째 모듈로 넘겨짚지 않고 모듈 선택기에서 직접 고를 때까지 적용을 막습니다.
+  - 채팅 화면 우측 상단의 고정 `✨` 버튼은 RisuAI 본체가 그리는 버튼이라 옮길 수 없습니다. 드래그 가능한 플로팅 버튼과 겹치지 않도록 기본으로 숨기며, 설정에서 켜거나 플로팅 버튼을 쓸 수 없을 때(`mainDom` 거부 등) 자동으로 대신 표시됩니다.
   - `mainDom` 권한을 거부하더라도 상단 **수동 대상 선택기**로 모든 편집/질문 기능을 그대로 사용할 수 있습니다.
 - **PC 오른쪽 상시 도킹(분할 화면 · 사용자 선택) & 웹 · 모바일 반응형 UI**
   - PC(`960px` 이상)에서 **`📌 오른쪽 도킹`** 또는 설정 옵션을 켜면 RisuHelper가 화면 오른쪽에 고정되고 RisuAI 본체(`<main>`)가 왼쪽으로 자동 분할되어 **RisuAI 화면을 그대로 조작하면서 클릭하는 DOM 입력칸이 RisuHelper에 실시간 반영**됩니다. (시작 시 자동 도킹, 패널 폭 `360/420/500px`, 화면 자동 분할 on/off 선택 가능)
@@ -42,7 +45,7 @@ RisuAI 및 공개 포크(`PocketRisu`, `RisuBard`, `HaejeokRisuai`, `RisuNest`, 
 
 1. [`dist/risuhelper.js`](dist/risuhelper.js) 파일을 내려받습니다.
 2. RisuAI(또는 포크)의 **설정 → 플러그인 → 플러그인 가져오기**에서 `dist/risuhelper.js`를 추가합니다.
-3. 화면의 플로팅 버튼(`✨`), 햄버거 메뉴, 설정 메뉴, 또는 커서 추적 플로팅 칩을 눌러 RisuHelper를 엽니다.
+3. 드래그 가능한 플로팅 버튼(`⋮⋮ ✨ ...`), 햄버거 메뉴, 설정 메뉴 중 하나를 눌러 RisuHelper를 엽니다.
 4. 모델은 RisuAI에 이미 설정된 메인 모델(`model`) / 보조 모델(`submodel`) / `otherAx`를 `Risuai.runLLMModel()`으로 그대로 사용합니다.
 
 ## 필요한 Plugin v3 권한
@@ -60,6 +63,20 @@ npm run build   # src/ -> dist/risuhelper.js 단일 번들 생성 및 문법 검
 npm test        # 단위 테스트 + 모의 호스트/샌드박스 부팅 검증
 npm run check   # build + test 일괄 실행
 ```
+
+### 실제 호스트 DOM 회귀 테스트
+
+`tests/fixtures/host-dom/`에는 실제 `kwaroran/Risuai`(한국어·영어)와 `PocketRisu`(한국어) 화면에서 기록한 DOM 스냅샷이 들어 있고, `tests/host-fixtures.test.mjs`가 각 입력칸에 포커스를 둔 상태로 감지 결과를 검증합니다. 기대값은 라벨이 아니라 **호스트가 그 입력칸에 바인딩한 실제 값**에서 얻으므로, 라벨 휴리스틱이 틀리면 테스트가 실패합니다. 브라우저 없이 `npm test`에 포함되어 실행됩니다.
+
+본체 UI가 바뀌면 호스트 개발 서버를 띄운 뒤 스냅샷을 다시 기록합니다(Playwright 필요, `npm test`와 무관한 관리용 도구).
+
+```bash
+node tools/capture-host-fixtures.cjs --url http://127.0.0.1:5174/ --host upstream --lang ko
+```
+
+### 릴리스 규칙
+
+RisuAI는 원격 `//@version`이 설치본보다 **클 때만** 업데이트를 제안합니다. `dist/risuhelper.js`가 바뀌면 `package.json`과 `src/version.js`의 버전을 함께 올려야 하며, CI(`tools/check-version-bump.mjs`)가 이를 검사합니다.
 
 ## 구조
 
@@ -83,9 +100,13 @@ src/
   ui.js             # 반응형 드로어/바텀시트 UI 및 대화/제안 카드 컨트롤러
   style.js          # 다크/라이트 대응 CSS
 tools/
-  build.mjs         # 무의존성 ESM -> IIFE 단일 플러그인 번들러
+  build.mjs                  # 무의존성 ESM -> IIFE 단일 플러그인 번들러
+  check-version-bump.mjs     # 번들 변경 시 버전 상승 여부 검사 (CI)
+  capture-host-fixtures.cjs  # 실제 호스트 DOM 스냅샷 기록 (관리용, Playwright 필요)
 tests/
   *.test.mjs        # 자동 테스트 스위트
+  fixtures/host-dom # 실제 RisuAI / PocketRisu 화면 DOM 스냅샷
+  helpers/          # 스냅샷을 SafeElement 형태로 되살리는 테스트 헬퍼
 docs/
   architecture.md   # 포크별 Plugin API v3 호환성 분석 및 샌드박스 설계 문서
 dist/
