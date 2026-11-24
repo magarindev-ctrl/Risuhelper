@@ -8,14 +8,16 @@
 //   node tools/eval-real-model.mjs --dry-run
 //   node tools/eval-real-model.mjs --golden
 //   OPENAI_API_KEY=... node tools/eval-real-model.mjs --provider openai --model gpt-4o-mini
-//   OPENAI_API_KEY=... node tools/eval-real-model.mjs --provider openai --base-url https://openrouter.ai/api/v1 --model google/gemini-2.5-flash
-//   ANTHROPIC_API_KEY=... node tools/eval-real-model.mjs --provider anthropic --model claude-sonnet-4-5
-//   GEMINI_API_KEY=... node tools/eval-real-model.mjs --provider gemini --model gemini-2.5-flash
+//   OPENAI_API_KEY=... node tools/eval-real-model.mjs --provider openai --base-url https://openrouter.ai/api/v1 --model google/gemini-2.5-flash --out eval-report.md
+//   ANTHROPIC_API_KEY=... node tools/eval-real-model.mjs --provider anthropic --model claude-sonnet-4-5 --runs 3 --out eval-claude.md
+//   GEMINI_API_KEY=... node tools/eval-real-model.mjs --provider gemini --model gemini-2.5-flash --out eval-gemini.md
 
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { EVAL_SCENARIOS, runEvalScenario } from './eval-scenarios.mjs';
+
+const DEFAULT_MAX_TOKENS = 8192;
 
 function parseArgs(argv) {
   const opts = {
@@ -26,7 +28,8 @@ function parseArgs(argv) {
     baseUrl: '',
     apiKey: '',
     temperature: 0.2,
-    maxTokens: 2048,
+    maxTokens: DEFAULT_MAX_TOKENS,
+    runs: 1,
     concurrency: 2,
     timeoutSec: 90,
     only: null,
@@ -48,7 +51,8 @@ function parseArgs(argv) {
     else if (a === '--base-url') opts.baseUrl = next();
     else if (a === '--api-key') opts.apiKey = next();
     else if (a === '--temperature') opts.temperature = Number(next());
-    else if (a === '--max-tokens') opts.maxTokens = Number(next());
+    else if (a === '--max-tokens') opts.maxTokens = Math.max(256, Number(next()) || DEFAULT_MAX_TOKENS);
+    else if (a === '--runs') opts.runs = Math.max(1, Math.min(10, Math.floor(Number(next())) || 1));
     else if (a === '--concurrency') opts.concurrency = Math.max(1, Math.min(8, Number(next()) || 1));
     else if (a === '--timeout') opts.timeoutSec = Math.max(10, Number(next()) || 90);
     else if (a === '--only') opts.only = new Set(next().split(',').map(s => s.trim()).filter(Boolean));
@@ -63,7 +67,7 @@ function usage() {
   return `RisuHelper Real-Model 20-Scenario Evaluation Harness
 
 Usage:
-  node tools/eval-real-model.mjs [options]
+  OPENAI_API_KEY=... node tools/eval-real-model.mjs [options]
 
 Modes:
   --dry-run                Build all 20 prompts and measure prompt sizes (0 API calls)
@@ -73,9 +77,10 @@ Modes:
 Options:
   --model <id>             Model identifier (required for live API runs)
   --base-url <url>         Custom API base URL (e.g. https://openrouter.ai/api/v1 or http://127.0.0.1:11434/v1)
-  --api-key <key>          API key (defaults to EVAL_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY / GEMINI_API_KEY)
+  --api-key <key>          API key (prefer env vars EVAL_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY / GEMINI_API_KEY to avoid shell history exposure)
   --temperature <num>      Sampling temperature (default: 0.2)
-  --max-tokens <num>       Max output tokens (default: 2048)
+  --max-tokens <num>       Max output tokens (default: ${DEFAULT_MAX_TOKENS}; set high enough for thinking/reasoning models)
+  --runs <1..10>           Repeat each scenario N times to measure consistency (default: 1)
   --concurrency <1..8>     Concurrent scenario requests (default: 2)
   --timeout <sec>          Per-request timeout in seconds (default: 90)
   --only <id1,id2,...>     Run only specific scenario IDs
@@ -94,10 +99,13 @@ function resolveApiKey(opts) {
 }
 
 function makeProviderCaller(opts) {
+  if (opts.apiKey) {
+    console.warn('[eval] Warning: --api-key on CLI can stay in shell history. Prefer environment variables (OPENAI_API_KEY / ANTHROPIC_API_KEY / GEMINI_API_KEY / EVAL_API_KEY).');
+  }
   const apiKey = resolveApiKey(opts);
   if (!opts.model) throw new Error('--model is required for live API runs (or use --dry-run / --golden)');
   if (!apiKey && !opts.baseUrl) {
-    throw new Error(`API key not found for provider "${opts.provider}". Pass --api-key or set EVAL_API_KEY / provider env var.`);
+    throw new Error(`API key not found for provider "${opts.provider}". Set EVAL_API_KEY or provider env var (OPENAI_API_KEY / ANTHROPIC_API_KEY / GEMINI_API_KEY).`);
   }
 
   return async (messages) => {
@@ -123,11 +131,14 @@ function makeProviderCaller(opts) {
         if (!res.ok) {
           throw new Error(`HTTP ${res.status}: ${data?.error?.message || JSON.stringify(data)?.slice(0, 300)}`);
         }
-        const text = data?.choices?.[0]?.message?.content ?? '';
+        const choice = data?.choices?.[0];
+        const text = choice?.message?.content ?? '';
+        const finishReason = String(choice?.finish_reason || '');
+        const truncated = finishReason === 'length';
         const usage = data?.usage
           ? { inputTokens: data.usage.prompt_tokens || 0, outputTokens: data.usage.completion_tokens || 0 }
           : null;
-        return { text, usage };
+        return { text, usage, finishReason, truncated };
       }
 
       if (opts.provider === 'anthropic') {
@@ -158,10 +169,12 @@ function makeProviderCaller(opts) {
           throw new Error(`HTTP ${res.status}: ${data?.error?.message || JSON.stringify(data)?.slice(0, 300)}`);
         }
         const text = (data?.content || []).filter(b => b.type === 'text').map(b => b.text).join('\n');
+        const finishReason = String(data?.stop_reason || '');
+        const truncated = finishReason === 'max_tokens';
         const usage = data?.usage
           ? { inputTokens: data.usage.input_tokens || 0, outputTokens: data.usage.output_tokens || 0 }
           : null;
-        return { text, usage };
+        return { text, usage, finishReason, truncated };
       }
 
       if (opts.provider === 'gemini') {
@@ -189,11 +202,14 @@ function makeProviderCaller(opts) {
         if (!res.ok) {
           throw new Error(`HTTP ${res.status}: ${data?.error?.message || JSON.stringify(data)?.slice(0, 300)}`);
         }
-        const text = (data?.candidates?.[0]?.content?.parts || []).map(p => p.text || '').join('');
+        const cand = data?.candidates?.[0];
+        const text = (cand?.content?.parts || []).filter(p => !p.thought).map(p => p.text || '').join('');
+        const finishReason = String(cand?.finishReason || '');
+        const truncated = finishReason === 'MAX_TOKENS';
         const usage = data?.usageMetadata
           ? { inputTokens: data.usageMetadata.promptTokenCount || 0, outputTokens: data.usageMetadata.candidatesTokenCount || 0 }
           : null;
-        return { text, usage };
+        return { text, usage, finishReason, truncated };
       }
 
       throw new Error(`Unsupported provider "${opts.provider}". Use openai, anthropic, or gemini.`);
@@ -222,11 +238,17 @@ function summarizeResults(results, meta) {
   const totalOut = results.reduce((s, r) => s + (r.usage?.outputTokens || 0), 0);
 
   const byCategory = new Map();
+  const byScenario = new Map();
   for (const r of results) {
     const cur = byCategory.get(r.category) || { total: 0, passed: 0 };
     cur.total++;
     if (r.ok) cur.passed++;
     byCategory.set(r.category, cur);
+
+    const sc = byScenario.get(r.id) || { id: r.id, category: r.category, title: r.title, total: 0, passed: 0 };
+    sc.total++;
+    if (r.ok) sc.passed++;
+    byScenario.set(r.id, sc);
   }
 
   const failuresByType = new Map();
@@ -250,16 +272,19 @@ function summarizeResults(results, meta) {
     avgLatencyMs,
     tokens: { input: totalIn, output: totalOut },
     byCategory: [...byCategory.entries()].map(([category, v]) => ({ category, ...v })),
+    byScenario: [...byScenario.values()],
     failuresByType: [...failuresByType.entries()].map(([type, count]) => ({ type, count })),
   };
 }
 
 function renderMarkdownReport(results, summary) {
+  const runs = summary.meta.runs || 1;
   const lines = [
     `# RisuHelper 실모델 20문항 평가 리포트`,
     '',
     `- **모드 / 모델**: ${summary.meta.mode}${summary.meta.model ? ` (\`${summary.meta.provider}:${summary.meta.model}\`)` : ''}`,
     `- **실행 시각**: ${summary.meta.timestamp}`,
+    `- **설정**: \`maxTokens=${summary.meta.maxTokens ?? DEFAULT_MAX_TOKENS}\` · 시나리오당 \`${runs}회\` 실행`,
     `- **종합 통과율**: **${summary.passed} / ${summary.total} (${summary.passRate}%)**`,
     `  - 수정·생성 시나리오: **${summary.mutationPassed} / ${summary.mutationTotal}**`,
     `  - 안전·비수정 가드(단순 질문 · 콜드 스토리지): **${summary.guardPassed} / ${summary.guardTotal}**`,
@@ -277,6 +302,13 @@ function renderMarkdownReport(results, summary) {
     lines.push(`| ${row.category} | ${row.passed} | ${row.total} |`);
   }
 
+  if (runs > 1 && summary.byScenario?.length) {
+    lines.push('', `## 시나리오별 일관성 (${runs}회 반복)`, '', '| ID | 카테고리 | 통과 |', '|---|---|---:|');
+    for (const sc of summary.byScenario) {
+      lines.push(`| \`${sc.id}\` | ${sc.category} | ${sc.passed}/${sc.total} |`);
+    }
+  }
+
   if (summary.failuresByType.length > 0) {
     lines.push('', '## 실패 유형 분류', '', '| 실패 유형 | 건수 |', '|---|---:|');
     for (const row of summary.failuresByType) {
@@ -284,18 +316,21 @@ function renderMarkdownReport(results, summary) {
     }
   }
 
-  lines.push('', '## 문항별 상세', '', '| # | ID | 카테고리 | 결과 | 프롬프트(자) | 제안 액션 | 지연(ms) |', '|---:|---|---|---|---:|---|---:|');
+  lines.push('', '## 실행별 상세', '', '| # | ID | 회차 | 결과 | 종료 사유 | 프롬프트(자) | 제안 액션 | 지연(ms) |', '|---:|---|---:|---|---|---:|---|---:|');
   results.forEach((r, idx) => {
     const status = r.ok ? '✅ PASS' : `❌ FAIL (\`${r.failureCategory}\`)`;
     const acts = r.proposalActions.length ? r.proposalActions.join(', ') : '(없음)';
-    lines.push(`| ${idx + 1} | \`${r.id}\` | ${r.category} | ${status} | ${r.systemChars.toLocaleString()} | ${acts} | ${r.latencyMs} |`);
+    const finish = r.finishReason || '-';
+    lines.push(`| ${idx + 1} | \`${r.id}\` | ${r.runIndex || 1} | ${status} | ${finish} | ${r.systemChars.toLocaleString()} | ${acts} | ${r.latencyMs} |`);
   });
 
   const failed = results.filter(r => !r.ok);
   if (failed.length > 0) {
     lines.push('', '## 실패 상세 진단');
     for (const r of failed) {
-      lines.push('', `### ❌ \`${r.id}\` — ${r.title}`);
+      const runTag = runs > 1 ? ` (회차 ${r.runIndex || 1}/${runs})` : '';
+      lines.push('', `### ❌ \`${r.id}\`${runTag} — ${r.title}`);
+      if (r.finishReason) lines.push(`- 종료 사유: \`${r.finishReason}\``);
       for (const issue of r.issues) lines.push(`- ${issue}`);
       if (r.rawReplyExcerpt) {
         lines.push('', '<details><summary>모델 원문 발췌 (앞 500자)</summary>', '', '```text', r.rawReplyExcerpt, '```', '</details>');
@@ -337,19 +372,30 @@ async function main() {
   const mode = opts.dryRun ? 'dry-run' : opts.golden ? 'golden' : 'live';
   const callModel = mode === 'live' ? makeProviderCaller(opts) : null;
   const concurrency = mode === 'live' ? opts.concurrency : 1;
+  const runs = mode === 'dry-run' ? 1 : opts.runs;
 
-  console.log(`[eval] Running ${scenarios.length} scenarios (mode=${mode}${opts.model ? `, ${opts.provider}:${opts.model}` : ''})...\n`);
+  const jobs = [];
+  for (let runIndex = 1; runIndex <= runs; runIndex++) {
+    for (const sc of scenarios) {
+      jobs.push({ sc, runIndex });
+    }
+  }
 
-  const results = await runWithConcurrency(scenarios, concurrency, async (sc, idx) => {
+  console.log(`[eval] Running ${scenarios.length} scenarios x ${runs} run(s) = ${jobs.length} total (mode=${mode}${opts.model ? `, ${opts.provider}:${opts.model}, maxTokens=${opts.maxTokens}` : ''})...\n`);
+
+  const results = await runWithConcurrency(jobs, concurrency, async ({ sc, runIndex }, idx) => {
     const r = await runEvalScenario(sc, {
       callModel,
       dryRun: opts.dryRun,
       useGolden: opts.golden,
     });
-    const num = String(idx + 1).padStart(2, '0');
+    r.runIndex = runIndex;
+    const num = String(idx + 1).padStart(String(jobs.length).length, '0');
     const tag = r.ok ? 'PASS' : `FAIL(${r.failureCategory})`;
     const acts = r.proposalActions.length ? r.proposalActions.join(',') : 'none';
-    console.log(`[${num}/${scenarios.length}] ${tag.padEnd(20)} ${r.id.padEnd(30)} sys=${String(r.systemChars).padStart(5)}c  acts=${acts}${r.latencyMs ? `  ${r.latencyMs}ms` : ''}`);
+    const runSuffix = runs > 1 ? ` #${runIndex}` : '';
+    const fin = r.finishReason ? ` finish=${r.finishReason}` : '';
+    console.log(`[${num}/${jobs.length}] ${tag.padEnd(22)} ${(r.id + runSuffix).padEnd(32)} sys=${String(r.systemChars).padStart(5)}c  acts=${acts}${fin}${r.latencyMs ? `  ${r.latencyMs}ms` : ''}`);
     if (!r.ok) {
       for (const issue of r.issues) console.log(`      -> ${issue}`);
     }
@@ -360,6 +406,8 @@ async function main() {
     mode,
     provider: opts.provider,
     model: opts.model,
+    maxTokens: opts.maxTokens,
+    runs,
     timestamp: new Date().toISOString(),
   });
   const md = renderMarkdownReport(results, summary);
@@ -387,4 +435,4 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   });
 }
 
-export { parseArgs, summarizeResults, renderMarkdownReport };
+export { DEFAULT_MAX_TOKENS, parseArgs, summarizeResults, renderMarkdownReport };

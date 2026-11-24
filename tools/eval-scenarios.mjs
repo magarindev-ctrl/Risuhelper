@@ -987,17 +987,43 @@ function createScenarioHost(setupRes, callModelFn) {
   return { state, storage, api, capturedRequests };
 }
 
+function hasUnclosedProposalFence(text) {
+  const lines = String(text || '').replace(/\r\n/g, '\n').split('\n');
+  let openTicks = 0;
+  for (const line of lines) {
+    if (!openTicks) {
+      const m = line.match(/^\s*(`{3,})risuhelper-proposal\b/i);
+      if (m) openTicks = m[1].length;
+    } else {
+      const closeRe = new RegExp(`^\\s*\`{${openTicks},}\\s*$`);
+      if (closeRe.test(line)) openTicks = 0;
+    }
+  }
+  return openTicks > 0;
+}
+
+function formatUndoConflict(c) {
+  if (typeof c === 'string') return c;
+  if (c && typeof c === 'object') {
+    const where = c.path ? `${c.path}: ` : '';
+    return `${where}${c.reason || JSON.stringify(c)}`;
+  }
+  return String(c);
+}
+
 /**
  * Runs a single scenario through the real RisuHelperApp pipeline and grades the result.
  * @param {object} scenario
  * @param {object} opts
- * @param {Function} [opts.callModel] async (messages, scenario) => { text, usage? } | string
+ * @param {Function} [opts.callModel] async (messages, scenario) => { text, usage?, finishReason?, truncated? } | string
  * @param {boolean} [opts.dryRun]
  * @param {boolean} [opts.useGolden]
  */
 async function runEvalScenario(scenario, { callModel = null, dryRun = false, useGolden = false } = {}) {
   const setupRes = scenario.setup();
   let modelUsage = null;
+  let finishReason = '';
+  let truncatedByProvider = false;
   let rawReply = '';
   let latencyMs = 0;
 
@@ -1022,6 +1048,8 @@ async function runEvalScenario(scenario, { callModel = null, dryRun = false, use
     }
     rawReply = String(res?.text ?? '');
     modelUsage = res?.usage || null;
+    finishReason = String(res?.finishReason || '');
+    truncatedByProvider = Boolean(res?.truncated) || /^(length|max_tokens)$/i.test(finishReason);
     return rawReply;
   };
 
@@ -1048,6 +1076,8 @@ async function runEvalScenario(scenario, { callModel = null, dryRun = false, use
     systemChars: 0,
     latencyMs: 0,
     usage: null,
+    finishReason: '',
+    truncated: false,
     proposalActions: [],
     parseErrors: [],
     unknownKeys: [],
@@ -1061,6 +1091,7 @@ async function runEvalScenario(scenario, { callModel = null, dryRun = false, use
     result.promptChars = sentMessages.reduce((sum, m) => sum + String(m?.content || '').length, 0);
     result.latencyMs = latencyMs;
     result.usage = modelUsage;
+    result.finishReason = finishReason;
 
     if (dryRun) {
       result.ok = true;
@@ -1073,6 +1104,22 @@ async function runEvalScenario(scenario, { callModel = null, dryRun = false, use
     if (assistantMsg?.error) {
       result.failureCategory = 'modelError';
       result.issues.push(`모델 호출 오류: ${assistantMsg.error}`);
+      return result;
+    }
+
+    const unclosedFence = hasUnclosedProposalFence(rawReply);
+    result.truncated = truncatedByProvider || unclosedFence;
+
+    if (result.truncated) {
+      result.failureCategory = 'outputTruncated';
+      const detail = finishReason ? `finishReason=${finishReason}` : '닫히지 않은 risuhelper-proposal 블록';
+      result.issues.push(`응답이 출력 한도 등으로 중간에 잘렸습니다 (${detail}). --max-tokens 값을 높여 다시 실행하세요.`);
+      return result;
+    }
+
+    if (!String(rawReply || '').trim()) {
+      result.failureCategory = 'emptyResponse';
+      result.issues.push(`모델이 빈 응답을 반환했습니다${finishReason ? ` (finishReason=${finishReason})` : ''} — 생각 토큰 소진 또는 안전 필터 차단 가능성`);
       return result;
     }
 
@@ -1102,7 +1149,7 @@ async function runEvalScenario(scenario, { callModel = null, dryRun = false, use
         if (failedPreviews.length > 0) {
           result.failureCategory ||= 'previewFailed';
           for (const fp of failedPreviews) {
-            result.issues.push(`미리보기 실패(${fp.proposal?.action}): ${fp.preview?.reason || 'unknown'}`);
+            result.issues.push(`미리보기 실패(${fp.proposal?.action}): ${fp.preview?.error || fp.preview?.reason || 'unknown'}`);
           }
         } else {
           const toApply = scenario.expectMode === 'apply_first' ? [proposals[0]] : proposals;
@@ -1142,7 +1189,7 @@ async function runEvalScenario(scenario, { callModel = null, dryRun = false, use
         const undoRes = await app.adapter.undo();
         if (undoRes?.conflicts?.length) {
           result.failureCategory ||= 'undoFailed';
-          result.issues.push(`Undo 충돌 발생: ${undoRes.conflicts.join('; ')}`);
+          result.issues.push(`Undo 충돌 발생: ${undoRes.conflicts.map(formatUndoConflict).join('; ')}`);
         }
       }
       if (JSON.stringify(state.character) !== JSON.stringify(initialSnapshot.character) ||
@@ -1159,4 +1206,5 @@ async function runEvalScenario(scenario, { callModel = null, dryRun = false, use
   }
 }
 
-export { EVAL_SCENARIOS, runEvalScenario };
+export { EVAL_SCENARIOS, runEvalScenario, hasUnclosedProposalFence, formatUndoConflict };
+
