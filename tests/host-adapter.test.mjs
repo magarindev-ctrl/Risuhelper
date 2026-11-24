@@ -1667,3 +1667,172 @@ test('clearUndoHistory commits single, group, or all undo records without alteri
   assert.ok(events.some(e => Array.isArray(e.clearedIds) && e.clearedIds.length === 2));
 });
 
+
+// --- Chat migration: import_chat copies state from another chat of the same character ---
+
+function createTwoChatHost() {
+  const host = createMockHost();
+  host.state.character.chats = [
+    {
+      id: 'chat-a',
+      name: '1부',
+      note: 'A챗 노트',
+      message: [{ role: 'user', data: '안녕' }, { role: 'char', data: '어서 와' }],
+      scriptstate: { $hp: 80, $affection: '12' },
+      localLore: [{ comment: '성검', key: '검', content: '빛나는 검', insertorder: 100 }],
+      bindedPersona: 'p-knight',
+      modules: ['mod-1'],
+      fmIndex: 0,
+    },
+    { id: 'chat-b', name: '2부', note: '', message: [], localLore: [] },
+  ];
+  host.state.character.alternateGreetings = ['다른 인사'];
+  host.state.db.personas = [{ name: '기사', personaPrompt: '', icon: '', note: '', id: 'p-knight' }];
+  host.state.chatIndex = 1;
+  host.state.character.chatPage = 1;
+  return host;
+}
+
+const IMPORT_ALL = { action: 'import_chat', title: '1부에서 이사', sourceChatIndex: 0, items: ['variables', 'authorNote', 'localLore', 'persona', 'modules', 'greeting'] };
+
+test('the adapter lists the chats of the active character and reads another chat for reference', async () => {
+  const { adapter } = createTwoChatHost();
+  const listed = await adapter.listActiveChats();
+  assert.equal(listed.activeIndex, 1);
+  assert.deepEqual(listed.chats.map(c => [c.index, c.name, c.current, c.messages]), [[0, '1부', false, 2], [1, '2부', true, 0]]);
+
+  const ref = await adapter.readReferenceChat(0, { budget: 5000 });
+  assert.equal(ref.ok, true, ref.reason);
+  assert.equal(ref.chat.name, '1부');
+  assert.deepEqual(ref.chat.transcript.map(m => m.text), ['안녕', '어서 와']);
+  assert.deepEqual(ref.chat.variables, [{ name: 'hp', value: '80' }, { name: 'affection', value: '12' }]);
+
+  assert.equal((await adapter.readReferenceChat(1)).ok, false, 'the current chat is not a reference');
+  assert.equal((await adapter.readReferenceChat(7)).ok, false);
+});
+
+test('import_chat copies the chosen items into the current chat exactly, and one undo takes them back out', async () => {
+  const { state, adapter } = createTwoChatHost();
+  const preview = await adapter.previewProposal(IMPORT_ALL, FREE_TALK);
+  assert.equal(preview.ok, true, preview.error);
+  assert.match(preview.label, /1부/);
+  assert.match(preview.label, /2부/);
+  assert.ok(preview.metaChanges.some(c => c.label === '변수 hp' && c.after === '80'));
+  assert.match(preview.after, /A챗 노트/);
+  assert.equal(preview.requiresConfirm, undefined, 'nothing existing is replaced in an empty chat');
+
+  const res = await adapter.applyProposal(IMPORT_ALL, preview.target, { hostBinding: preview.hostBinding });
+  const b = state.character.chats[1];
+  assert.deepEqual(b.scriptstate, { $hp: 80, $affection: '12' });
+  assert.equal(b.note, 'A챗 노트');
+  assert.deepEqual(b.localLore.map(e => e.comment), ['성검']);
+  assert.equal(b.bindedPersona, 'p-knight');
+  assert.deepEqual(b.modules, ['mod-1']);
+  assert.equal(b.fmIndex, 0);
+  assert.deepEqual(b.message, [], 'messages are never copied');
+  assert.match(res.summary, /변수 2개/);
+  assert.equal(state.character.chats[0].note, 'A챗 노트', 'the source chat is left as it was');
+  assert.deepEqual(state.setChatCalls.map(c => c.chi), [1], 'only the current chat is written');
+
+  await adapter.undo(res.undoId);
+  const undone = state.character.chats[1];
+  assert.equal(undone.note, '');
+  assert.equal(undone.scriptstate, undefined);
+  assert.deepEqual(undone.localLore, []);
+  assert.equal(undone.bindedPersona, undefined);
+});
+
+test('import_chat refuses the current chat, a missing chat, and an import that would change nothing', async () => {
+  const { state, adapter } = createTwoChatHost();
+  const self = await adapter.previewProposal({ ...IMPORT_ALL, sourceChatIndex: 1 }, FREE_TALK);
+  assert.equal(self.ok, false);
+  assert.match(self.error, /현재 채팅/);
+
+  const missing = await adapter.previewProposal({ ...IMPORT_ALL, sourceChatIndex: 5 }, FREE_TALK);
+  assert.equal(missing.ok, false);
+  assert.match(missing.error, /없습니다/);
+
+  state.character.chats[0] = { id: 'chat-a', name: '1부', message: [] };
+  const empty = await adapter.previewProposal(IMPORT_ALL, FREE_TALK);
+  assert.equal(empty.ok, false);
+  assert.match(empty.error, /옮길/);
+});
+
+test('import_chat asks for an explicit confirmation before replacing values the current chat already has', async () => {
+  const { state, adapter } = createTwoChatHost();
+  state.character.chats[1].note = 'B챗에서 쓰던 노트';
+  state.character.chats[1].scriptstate = { $hp: 100, $gold: 3 };
+  const proposal = { action: 'import_chat', sourceChatIndex: 0, items: ['variables', 'authorNote'] };
+
+  const preview = await adapter.previewProposal(proposal, FREE_TALK);
+  assert.equal(preview.ok, true, preview.error);
+  assert.equal(preview.requiresConfirm, true);
+  assert.match(preview.destructiveWarning, /2/);
+
+  const options = { hostBinding: preview.hostBinding, requireDestructiveConfirm: true };
+  await assert.rejects(() => adapter.applyProposal(proposal, preview.target, options), /확인/);
+  assert.equal(state.character.chats[1].note, 'B챗에서 쓰던 노트');
+
+  await adapter.applyProposal(proposal, preview.target, { ...options, destructiveConfirmed: true });
+  assert.equal(state.character.chats[1].note, 'A챗 노트');
+  assert.deepEqual(state.character.chats[1].scriptstate, { $hp: 80, $gold: 3, $affection: '12' });
+});
+
+test('import_chat follows the source chat by its id when the chat list changed, and stops if it is gone', async () => {
+  const { state, adapter } = createTwoChatHost();
+  const proposal = { action: 'import_chat', sourceChatIndex: 0, items: ['authorNote'] };
+  const preview = await adapter.previewProposal(proposal, FREE_TALK);
+  assert.equal(preview.ok, true, preview.error);
+
+  // A new chat was inserted in front: the source is now #2 and the current chat #3.
+  state.character.chats.unshift({ id: 'chat-new', name: '끼어든 챗', note: '엉뚱한 노트', message: [] });
+  state.chatIndex = 2;
+  await assert.rejects(
+    () => adapter.applyProposal(proposal, preview.target, { hostBinding: preview.hostBinding }),
+    /다른 채팅으로 전환/,
+    'the current chat moved, so the pinned destination no longer matches'
+  );
+
+  // Same destination, but the source chat was replaced at its index.
+  const { state: s2, adapter: a2 } = createTwoChatHost();
+  const p2 = await a2.previewProposal(proposal, FREE_TALK);
+  s2.character.chats[0] = { id: 'chat-other', name: '바뀐 챗', note: '엉뚱한 노트', message: [] };
+  await assert.rejects(() => a2.applyProposal(proposal, p2.target, { hostBinding: p2.hostBinding }), /원본 채팅/);
+  assert.equal(s2.character.chats[1].note, '');
+
+  // The source moved to another index while the destination stayed: found again by id.
+  const { state: s3, adapter: a3 } = createTwoChatHost();
+  s3.character.chats.push({ id: 'chat-c', name: '3부', note: 'C 노트', message: [] });
+  const p3 = await a3.previewProposal(proposal, FREE_TALK);
+  [s3.character.chats[0], s3.character.chats[2]] = [s3.character.chats[2], s3.character.chats[0]];
+  await a3.applyProposal(proposal, p3.target, { hostBinding: p3.hostBinding });
+  assert.equal(s3.character.chats[1].note, 'A챗 노트', 'the note of the pinned source chat, not of whatever sits at its old index');
+});
+
+test('import_chat reads a source chat the host has not loaded yet (PocketRisu placeholder) through getChatFromIndex', async () => {
+  const { state, api, adapter } = createTwoChatHost();
+  const full = structuredClone(state.character.chats[0]);
+  // The character object only carries a stub for the unopened chat; its body comes from the server.
+  const stub = { id: full.id, name: full.name, message: [], _placeholder: true };
+  api.getCharacter = async () => {
+    const c = structuredClone(state.character);
+    c.chats[0] = structuredClone(stub);
+    return c;
+  };
+  api.getChatFromIndex = async (ci, chi) => (chi === 0 ? structuredClone(full) : structuredClone(state.character.chats[chi]));
+
+  const listed = await adapter.listActiveChats();
+  assert.equal(listed.chats[0].messages, null, 'the size of an unloaded chat is unknown');
+  assert.equal(listed.chats[0].name, '1부');
+
+  const ref = await adapter.readReferenceChat(0, { budget: 5000 });
+  assert.equal(ref.ok, true, ref.reason);
+  assert.deepEqual(ref.chat.transcript.map(m => m.text), ['안녕', '어서 와']);
+
+  const proposal = { action: 'import_chat', sourceChatIndex: 0, items: ['variables', 'authorNote'] };
+  const preview = await adapter.previewProposal(proposal, FREE_TALK);
+  assert.equal(preview.ok, true, preview.error);
+  await adapter.applyProposal(proposal, preview.target, { hostBinding: preview.hostBinding });
+  assert.equal(state.character.chats[1].note, 'A챗 노트');
+  assert.deepEqual(state.character.chats[1].scriptstate, { $hp: 80, $affection: '12' });
+});

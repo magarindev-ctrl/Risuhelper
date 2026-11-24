@@ -10,6 +10,7 @@ import { renderPresetPanel } from './preset-ui.js';
 import { renderMarkdown } from './markdown.js';
 import { planGreetingContext, wantsGreetingText } from './greetings.js';
 import { planFieldContext, mentionedFields, AUTHOR_NOTE_FIELD } from './fields.js';
+import { summarizeChatList, mentionedChatIndex } from './chat-transfer.js';
 
 const DEFAULT_SETTINGS = {
   modelMode: 'model',
@@ -44,6 +45,7 @@ const ACTION_LABELS = {
   update_field: '캐릭터 필드 수정',
   update_greeting: '첫 메시지 수정',
   create_greeting: '추가 첫 메시지 생성',
+  import_chat: '채팅 이사',
 };
 
 function h(doc, tag, props = {}, ...children) {
@@ -107,6 +109,10 @@ class RisuHelperApp {
     this._undoSaveTimer = null;
     this.toastText = '';
     this.confirmDialog = null;
+    // Chat migration: the active character's chats, and the other chat attached as reference.
+    this.chatList = [];
+    this.referenceChat = null;
+    this.referenceInfo = null;
     this.registeredIds = [];
     this.viewportHandler = null;
     this._lastLiveFocusSig = '';
@@ -700,6 +706,45 @@ class RisuHelperApp {
       this.activeSnapshot = { ok: false, reason: err.message, content: '' };
     }
     this.moduleHintSnapshot = await this._readModuleHintSnapshot(ctx);
+    await this.refreshChatList();
+  }
+
+  /** Reloads the active character's chat list and drops a reference chat that no longer exists. */
+  async refreshChatList({ force = false } = {}) {
+    // The host hands over the whole character for this, so focus-driven refreshes are throttled.
+    const now = Date.now();
+    if (!force && this._chatListAt && now - this._chatListAt < 2000) return;
+    this._chatListAt = now;
+    try {
+      const listed = await this.adapter.listActiveChats();
+      this.chatList = listed.chats;
+      this._chatListCharKey = listed.char ? `${listed.charIndex}:${listed.char.chaId || listed.char.name || ''}` : null;
+    } catch {
+      this.chatList = [];
+      this._chatListCharKey = null;
+    }
+    const ref = this.referenceChat;
+    if (!ref) return;
+    let entry = ref.charKey === this._chatListCharKey ? this.chatList[ref.index] : null;
+    if (entry && (ref.id ? entry.id !== ref.id : entry.name !== ref.name)) {
+      entry = ref.id ? this.chatList.find(c => c.id === ref.id) || null : null;
+    }
+    if (!entry || entry.current) {
+      this.referenceChat = null;
+      this.referenceInfo = null;
+    } else if (entry.index !== ref.index) {
+      this.referenceChat = { ...ref, index: entry.index, name: entry.name };
+      this.referenceInfo = null;
+    }
+  }
+
+  /** Attaches another chat of this character as reference material (null clears it). */
+  setReferenceChat(index) {
+    const entry = Number.isInteger(index) ? this.chatList[index] : null;
+    this.referenceInfo = null;
+    this.referenceChat = entry && !entry.current
+      ? { index: entry.index, id: entry.id, name: entry.name, charKey: this._chatListCharKey }
+      : null;
   }
 
   /**
@@ -757,6 +802,31 @@ class RisuHelperApp {
 
   async gatherExtraContext(ctx, userInput = '') {
     const extra = {};
+    // Chat migration: the list of this character's chats (short), and the attached reference
+    // chat's state and transcript (as much as the content limit allows, newest first).
+    if (this.chatList.length > 1) {
+      extra.chatList = summarizeChatList(this.chatList);
+      if (this.referenceChat) {
+        try {
+          const ref = await this.adapter.readReferenceChat(this.referenceChat.index, { budget: this.settings.maxContentChars });
+          if (ref.ok) {
+            extra.referenceChat = ref.chat;
+            this.referenceInfo = {
+              index: ref.chat.index,
+              messageCount: ref.chat.messageCount,
+              sent: ref.chat.transcript.length,
+              omitted: ref.chat.omittedMessages,
+              chars: ref.chat.transcriptChars,
+              hasMemory: ref.chat.memorySummaries.length > 0,
+            };
+          } else {
+            this.referenceInfo = { index: this.referenceChat.index, error: ref.reason };
+          }
+        } catch (err) {
+          this.referenceInfo = { index: this.referenceChat.index, error: err?.message || String(err) };
+        }
+      }
+    }
     // First messages & character fields: full text when the request mentions them (or on the
     // chat/greeting screen for first messages), otherwise short previews when char summary is on.
     const wantGreetingText = wantsGreetingText(ctx, userInput);
@@ -1021,6 +1091,11 @@ class RisuHelperApp {
     if (!trimmed || this.busy) return;
 
     await this.refreshContextSnapshot();
+    // A chat named in the request ("2번 채팅", its exact name) becomes the reference chat and
+    // stays attached for follow-ups until the picker is cleared.
+    await this.refreshChatList({ force: true });
+    const namedChat = mentionedChatIndex(trimmed, this.chatList);
+    if (namedChat !== null && namedChat !== this.referenceChat?.index) this.setReferenceChat(namedChat);
     const ctx = this.getEffectiveContext();
     const userMsg = { role: 'user', content: trimmed, rawText: trimmed };
     const assistantMsg = {
@@ -2181,6 +2256,45 @@ class RisuHelperApp {
         )
       )
     );
+
+    const otherChats = this.chatList.filter(c => !c.current);
+    if (this.chatList.length > 1 && otherChats.length > 0) {
+      const refIndex = this.referenceChat?.index ?? null;
+      contextBarChildren.push(
+        h(doc, 'div', { class: 'rh-row' },
+          h(doc, 'select', {
+            class: 'rh-select rh-ref-chat',
+            title: '같은 캐릭터의 다른 채팅을 참고 자료로 붙입니다 (요약·이사용). 변경은 항상 지금 열려 있는 채팅에만 적용됩니다.',
+            onchange: (e) => {
+              this.setReferenceChat(e.target.value === '' ? null : Number(e.target.value));
+              this.render();
+            },
+          },
+            h(doc, 'option', { value: '', selected: refIndex === null }, '참조 채팅: 없음 (다른 채팅에서 요약·이사할 때 선택)'),
+            ...otherChats.map(c =>
+              h(doc, 'option', { value: String(c.index), selected: c.index === refIndex },
+                `참조 채팅: ${c.index + 1}번 · ${c.name}${c.messages !== null ? ` (메시지 ${c.messages}개)` : ''}`)
+            )
+          )
+        )
+      );
+      if (refIndex !== null) {
+        const info = this.referenceInfo?.index === refIndex ? this.referenceInfo : null;
+        let line = `${refIndex + 1}번 채팅의 작가의 노트·변수·대화 내용을 요청마다 함께 보냅니다 (대화는 원문 입력 한도 ${this.settings.maxContentChars.toLocaleString()}자까지, 최근 메시지 우선). 다 쓰면 "없음"으로 되돌리세요.`;
+        if (info?.error) {
+          line = `참조 채팅을 읽지 못했습니다: ${info.error}`;
+        } else if (info) {
+          line = `최근 요청에 ${refIndex + 1}번 채팅의 메시지 ${info.messageCount}개 중 ${info.sent}개(${info.chars.toLocaleString()}자)를 보냈습니다.` +
+            (info.omitted > 0
+              ? ` 앞쪽 ${info.omitted}개는 한도를 넘어 빠졌습니다${info.hasMemory ? '(RisuAI가 만들어 둔 메모리 요약으로 대신함)' : ''}. 더 보내려면 설정에서 원문 입력 한도를 올리세요.`
+              : '') +
+            ' 다 쓰면 "없음"으로 되돌리세요.';
+        }
+        contextBarChildren.push(
+          h(doc, 'div', { class: info?.error || info?.omitted > 0 ? 'rh-banner' : '', style: info?.error || info?.omitted > 0 ? '' : 'font-size:11.5px;color:var(--rh-muted);' }, line)
+        );
+      }
+    }
 
     if (ctx.freeTalk) {
       contextBarChildren.push(

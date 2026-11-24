@@ -13,6 +13,7 @@ import {
 import { applyTextEdits } from './text-edits.js';
 import { diffValues, revertOps } from './undo-journal.js';
 import { FREE_EDIT_FIELDS, AUTHOR_NOTE_FIELD, fieldLabel } from './fields.js';
+import { listChats, buildReferenceChat, planChatImport, chatName } from './chat-transfer.js';
 
 const BAD_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 const DB_PERMISSION_ERROR =
@@ -1124,6 +1125,104 @@ class HostAdapter {
     const resolvedChatIdx = Number.isInteger(chatIndex) ? chatIndex : (char.chatPage ?? 0);
     const chat = await this._readChatAt(charIndex, resolvedChatIdx, char);
     return { chat, char, charIndex, chatIndex: resolvedChatIdx };
+  }
+
+  /** Chats of the active character (for naming a migration source) and which one is open. */
+  async listActiveChats() {
+    const { char, charIndex, chatIndex } = await this.readActiveCharacter();
+    if (!char) return { chats: [], activeIndex: null, charIndex, char: null };
+    const activeIndex = Number.isInteger(chatIndex) ? chatIndex : (char.chatPage ?? 0);
+    return { chats: listChats(char, activeIndex), activeIndex, charIndex, char };
+  }
+
+  /**
+   * Reads another chat of the active character as reference material for the model: its note,
+   * variables, lorebook names and as much of the transcript as fits `budget`. Read-only.
+   */
+  async readReferenceChat(index, { budget } = {}) {
+    const { chats, activeIndex, charIndex, char } = await this.listActiveChats();
+    if (!char) return { ok: false, reason: '선택된 캐릭터가 없습니다.' };
+    const entry = Number.isInteger(index) ? chats[index] : null;
+    if (!entry) return { ok: false, reason: `${Number(index) + 1}번 채팅이 없습니다. (이 캐릭터의 채팅 ${chats.length}개)` };
+    if (index === activeIndex) return { ok: false, reason: '현재 채팅은 참조 채팅으로 고를 수 없습니다.' };
+    try {
+      const chat = await this._readChatAt(charIndex, index, char);
+      if (!chat) return { ok: false, reason: `${index + 1}번 채팅을 읽지 못했습니다.` };
+      const ref = buildReferenceChat(chat, { index, budget });
+      ref.name = entry.name;
+      return { ok: true, chat: ref, id: entry.id, charIndex, ...getCharIdentity(char) };
+    } catch (err) {
+      return { ok: false, reason: err.message };
+    }
+  }
+
+  /**
+   * Resolves the chat an import_chat proposal copies from and plans the copy into the open chat.
+   * Once previewed, the source is pinned by chat id (`binding.sourceChatId`): if the chat list
+   * changed it is found again by id, and the import stops rather than read a different chat.
+   */
+  async _planImportChat(proposal, binding = null) {
+    const { chats, activeIndex, charIndex, char } = await this.listActiveChats();
+    if (!char) throw new Error('선택된 캐릭터가 없습니다.');
+
+    let sourceIndex = proposal.sourceChatIndex;
+    if (binding?.sourceChatId) {
+      if (chats[sourceIndex]?.id !== binding.sourceChatId) {
+        const moved = chats.find(c => c.id === binding.sourceChatId);
+        if (!moved) throw new Error('원본 채팅을 찾을 수 없습니다. (삭제되었거나 채팅 목록이 바뀌었습니다) 다시 요청해 주세요.');
+        sourceIndex = moved.index;
+      }
+    } else if (binding?.sourceChatName && chats[sourceIndex]?.name !== binding.sourceChatName) {
+      throw new Error('원본 채팅을 확인할 수 없습니다. (채팅 목록이 바뀌었습니다) 다시 요청해 주세요.');
+    }
+
+    const entry = Number.isInteger(sourceIndex) ? chats[sourceIndex] : null;
+    if (!entry) {
+      throw new Error(`가져올 ${Number(sourceIndex) + 1}번 채팅이 없습니다. (이 캐릭터의 채팅 ${chats.length}개)`);
+    }
+    if (sourceIndex === activeIndex) {
+      throw new Error('원본으로 지정된 채팅이 현재 채팅입니다. 이사는 다른 채팅에서 현재 채팅으로만 가능합니다. 옮겨 받을 채팅을 연 뒤 다시 요청해 주세요.');
+    }
+
+    const source = await this._readChatAt(charIndex, sourceIndex, char);
+    if (!source) throw new Error(`${sourceIndex + 1}번 채팅을 읽지 못했습니다.`);
+    const current = await this._readChatAt(charIndex, activeIndex, char);
+    if (!current) throw new Error('활성 채팅을 찾을 수 없습니다.');
+
+    // Persona / module names for the preview. Reading them needs DB access (a host permission
+    // prompt), so it only happens when those items are actually being moved; a host that denies
+    // it still gets the copy, shown by id.
+    const items = Array.isArray(proposal.items) ? proposal.items : [];
+    let personas = null;
+    let modules = null;
+    if (items.includes('persona') && source.bindedPersona) {
+      try {
+        const p = await this.readPersonas();
+        if (!p.permissionDenied) personas = p.personas;
+      } catch {}
+    }
+    if (items.includes('modules') && Array.isArray(source.modules) && source.modules.length > 0) {
+      try {
+        const m = await this.readModules();
+        if (!m.permissionDenied) modules = m.modules;
+      } catch {}
+    }
+
+    const plan = planChatImport(source, current, {
+      items: proposal.items,
+      variableKeys: proposal.variableKeys,
+      personas,
+      modules,
+    });
+    return {
+      plan,
+      current,
+      charIndex,
+      chatIndex: activeIndex,
+      char,
+      source: { index: sourceIndex, id: entry.id, name: entry.name },
+      currentName: chatName(current, activeIndex),
+    };
   }
 
   /**
@@ -2568,6 +2667,53 @@ class HostAdapter {
       };
     }
 
+    if (proposal.action === 'import_chat') {
+      let planned;
+      try {
+        planned = await this._planImportChat(proposal);
+      } catch (err) {
+        return { ok: false, error: err.message };
+      }
+      const { plan, source, currentName, charIndex, chatIndex, char } = planned;
+      const label = `${source.index + 1}번 채팅 "${source.name}" → 현재 채팅 "${currentName}"`;
+      if (!plan.changed) {
+        const reasons = plan.skipped.map(s => s.reason);
+        return {
+          ok: false,
+          label,
+          error: `옮길 내용이 없습니다. ${reasons.length > 0 ? reasons.join(' ') : '현재 채팅이 이미 같은 값을 갖고 있습니다.'}`,
+        };
+      }
+      const notes = [
+        ...plan.skipped.map(s => s.reason),
+        ...(plan.missingVariables.length > 0 ? [`원본 채팅에 없는 변수는 건너뜁니다: ${plan.missingVariables.join(', ')}`] : []),
+      ];
+      return {
+        ok: true,
+        before: plan.before,
+        after: plan.after,
+        metaChanges: plan.metaChanges,
+        label,
+        target: { targetKind: 'general' },
+        hostBinding: {
+          charIndex,
+          chatIndex,
+          ...getCharIdentity(char),
+          sourceChatIndex: source.index,
+          sourceChatId: source.id,
+          sourceChatName: source.name,
+        },
+        warning: [`값은 원본 그대로 복사합니다 (${plan.copied.join(', ')}). 대화 메시지는 옮기지 않으며 원본 채팅은 바뀌지 않습니다.`, ...notes].join(' '),
+        ...(plan.overwrites > 0
+          ? {
+              requiresConfirm: true,
+              destructiveWarning: `현재 채팅에 이미 있는 값 ${plan.overwrites}개(변수·작가의 노트)를 원본 채팅의 값으로 덮어씁니다. 아래 변경 내용을 확인해 주세요.`,
+              confirmLabel: `현재 채팅의 기존 값 ${plan.overwrites}개를 덮어쓰는 것을 확인했습니다`,
+            }
+          : {}),
+      };
+    }
+
     if (proposal.action === 'update_config') {
       const cfg = await this.readAllowedConfig();
       if (!cfg) return { ok: false, error: DB_PERMISSION_ERROR };
@@ -2629,6 +2775,8 @@ class HostAdapter {
         return await this._applyUpdateGreeting(proposal, target, options);
       case 'create_greeting':
         return await this._applyCreateGreeting(proposal, target, options);
+      case 'import_chat':
+        return await this._applyImportChat(proposal, options);
       default:
         throw new Error(`지원하지 않는 작업 종류입니다: ${proposal.action}`);
     }
@@ -2938,6 +3086,25 @@ class HostAdapter {
       summary: switched
         ? `추가 첫 메시지 #${number}을(를) 새로 만들고 현재 채팅의 첫 메시지로 전환했습니다.`
         : `추가 첫 메시지 #${number}을(를) 새로 만들었습니다. 채팅 화면의 첫 메시지 좌우 화살표로 전환할 수 있습니다.`,
+    };
+  }
+
+  async _applyImportChat(proposal, options = {}) {
+    const { chat, charIndex, chatIndex } = await this._requireSameActiveChat(options.hostBinding);
+    const { plan, source } = await this._planImportChat(proposal, options.hostBinding);
+    if (!plan.changed) throw new Error('옮길 내용이 없습니다. 현재 채팅이 이미 같은 값을 갖고 있습니다.');
+    if (plan.overwrites > 0 && !options.destructiveConfirmed) {
+      throw new Error(
+        `현재 채팅에 이미 있는 값 ${plan.overwrites}개를 덮어쓰게 되어 확인 체크가 필요합니다. ` +
+        '카드에 확인란이 없다면 미리보기 이후 현재 채팅이 바뀐 것이니 다시 요청해 주세요.'
+      );
+    }
+    const from = `${source.index + 1}번 채팅 "${source.name}"`;
+    const undoId = await this._commitChat(chat, charIndex, chatIndex, plan.next, `채팅 이사 (${from} → 현재 채팅)`);
+    return {
+      ok: true,
+      undoId,
+      summary: `${from}에서 현재 채팅으로 옮겼습니다: ${plan.copied.join(', ')}.`,
     };
   }
 

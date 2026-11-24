@@ -6,6 +6,7 @@ import {
   parseAssistantReply,
   validateProposal,
   buildConversationMessages,
+  findUnknownProposalKeys,
 } from '../src/llm.js';
 
 function streamFrom(chunks) {
@@ -379,3 +380,55 @@ test('openModule free-talk hint includes Lua code and regex details when those t
   assert.ok(sysRegex.includes('<div>bg</div>'));
 });
 
+
+test('import_chat proposals need a source chat number and a list of known items', () => {
+  assert.equal(validateProposal({ action: 'import_chat', sourceChatIndex: 0, items: ['variables', 'authorNote'] }), null);
+  assert.equal(validateProposal({ action: 'import_chat', sourceChatIndex: 2, items: ['variables'], variableKeys: ['hp'] }), null);
+  assert.match(validateProposal({ action: 'import_chat', items: ['variables'] }), /sourceChatIndex/);
+  assert.match(validateProposal({ action: 'import_chat', sourceChatIndex: -1, items: ['variables'] }), /sourceChatIndex/);
+  assert.match(validateProposal({ action: 'import_chat', sourceChatIndex: 0, items: [] }), /items/);
+  assert.match(validateProposal({ action: 'import_chat', sourceChatIndex: 0, items: ['messages'] }), /items/);
+  assert.match(validateProposal({ action: 'import_chat', sourceChatIndex: 0, items: ['variables'], variableKeys: 'hp' }), /variableKeys/);
+  assert.deepEqual(findUnknownProposalKeys({ action: 'import_chat', sourceChatIndex: 0, items: ['variables'], variableKeys: ['hp'], mode: 'x' }), ['mode']);
+});
+
+test('the prompt lists the character\'s chats and carries the reference chat the user pointed at', () => {
+  const messages = buildConversationMessages({
+    context: { screen: 'chat', targetKind: 'general', freeTalk: true },
+    snapshot: { ok: true, content: '', target: { targetKind: 'general' } },
+    extraContext: {
+      chatList: { chats: [{ chatIndex: 0, name: '1부', messages: 120 }, { chatIndex: 1, name: '2부', messages: 0, current: true }], total: 2 },
+      referenceChat: {
+        index: 0, name: '1부', messageCount: 120, authorNote: 'A챗 노트',
+        variables: [{ name: 'hp', value: '80' }], variablesOmitted: 0,
+        chatLore: [{ comment: '성검', key: '검', chars: 5 }], chatLoreOmitted: 0,
+        memorySummaries: ['1장 요약: 마을을 떠났다'], memoryTruncated: false,
+        transcript: [{ n: 119, role: '유저', text: '검을 줘' }, { n: 120, role: '캐릭터', text: '여기 있어' }],
+        omittedMessages: 118, transcriptChars: 10,
+      },
+    },
+    history: [],
+    userInput: '1번 채팅 요약해서 이사해줘',
+  });
+  const system = messages[0].content;
+  assert.match(system, /같은 캐릭터의 채팅 목록/);
+  assert.match(system, /"chatIndex": 0/);
+  assert.match(system, /import_chat/);
+  assert.match(system, /참조 채팅/);
+  assert.match(system, /hp = 80/);
+  assert.match(system, /#120 캐릭터: 여기 있어/);
+  assert.match(system, /118개/, 'the model is told older messages were left out');
+  assert.match(system, /1장 요약: 마을을 떠났다/);
+});
+
+test('without a reference chat the model is told it cannot see other chats\' conversations', () => {
+  const messages = buildConversationMessages({
+    context: { screen: 'chat', targetKind: 'general', freeTalk: true },
+    snapshot: { ok: true, content: '', target: { targetKind: 'general' } },
+    extraContext: { chatList: { chats: [{ chatIndex: 0, name: '1부' }, { chatIndex: 1, name: '2부', current: true }], total: 2 } },
+    history: [],
+    userInput: '이전 챗에서 이사해줘',
+  });
+  assert.match(messages[0].content, /대화 내용은 전달되지 않았/);
+  assert.doesNotMatch(messages[0].content, /\[참조 채팅 #/);
+});

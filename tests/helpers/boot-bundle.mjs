@@ -40,7 +40,7 @@ async function bootBundle({ state, runLLMModel, storage = createMemoryStorage() 
     async getCharacter() { return structuredClone(state.character); },
     async setCharacter(c) { state.character = structuredClone(c); },
     async getCurrentCharacterIndex() { return 0; },
-    async getCurrentChatIndex() { return 0; },
+    async getCurrentChatIndex() { return Number.isInteger(state.chatIndex) ? state.chatIndex : 0; },
     async getRootDocument() { return null; },
     runLLMModel,
   };
@@ -66,6 +66,14 @@ async function bootBundle({ state, runLLMModel, storage = createMemoryStorage() 
   const buttons = (matcher) => findAll(n => n.tagName === 'BUTTON' && (matcher instanceof RegExp ? matcher.test(n.textContent) : n.textContent === matcher));
   const selectTarget = async (value) => {
     const selectEl = findAll(n => n.tagName === 'SELECT')[0];
+    selectEl.value = value;
+    for (const fn of selectEl.listeners.get('change') || []) await fn({ target: selectEl });
+    await tick(10);
+  };
+  /** Sets a <select> found by class name (e.g. the reference-chat picker). */
+  const selectByClass = async (className, value) => {
+    const selectEl = findAll(n => n.tagName === 'SELECT' && String(n.className || '').split(/\s+/).includes(className))[0];
+    if (!selectEl) throw new Error(`select not found: .${className}`);
     selectEl.value = value;
     for (const fn of selectEl.listeners.get('change') || []) await fn({ target: selectEl });
     await tick(10);
@@ -119,7 +127,7 @@ async function bootBundle({ state, runLLMModel, storage = createMemoryStorage() 
     }
   };
   const unload = async () => { if (unloadHandler) await unloadHandler(); };
-  return { doc, storage, findAll, buttons, selectTarget, send, click, clickConfirm, dialog, answerDialog, bodyText, tick, waitFor, settle, unload };
+  return { doc, storage, findAll, buttons, selectTarget, selectByClass, send, click, clickConfirm, dialog, answerDialog, bodyText, tick, waitFor, settle, unload };
 }
 
 const proposalBlock = (obj) => '```risuhelper-proposal\n' + JSON.stringify(obj) + '\n```';
