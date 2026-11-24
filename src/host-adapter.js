@@ -14,6 +14,18 @@ import { applyTextEdits } from './text-edits.js';
 import { diffValues, revertOps } from './undo-journal.js';
 import { FREE_EDIT_FIELDS, AUTHOR_NOTE_FIELD, fieldLabel } from './fields.js';
 import { listChats, buildReferenceChat, planChatImport, chatName, isColdStoredChat } from './chat-transfer.js';
+import {
+  summarizeChatVariables,
+  planChatVarsUpdate,
+  hasCbsSyntax,
+  previewRegexApplication,
+  sanitizeFetchLog,
+  buildBlankCharacterSkeleton,
+  normalizeBiasPair,
+  normalizeLoreSettingsInput,
+  planCharSettingsUpdate,
+  planCharacterPort,
+} from './runtime-tools.js';
 
 const BAD_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 const DB_PERMISSION_ERROR =
@@ -1130,6 +1142,71 @@ class HostAdapter {
     return { chat, char, charIndex, chatIndex: resolvedChatIdx };
   }
 
+  /** Summarizes the active chat's scriptstate variables without touching cold-stored chats. */
+  async readActiveChatVariables() {
+    try {
+      const { chat } = await this.readActiveChat();
+      if (!chat || isColdStoredChat(chat)) return { variables: [], total: 0, omitted: 0 };
+      return summarizeChatVariables(chat);
+    } catch {
+      return { variables: [], total: 0, omitted: 0 };
+    }
+  }
+
+  /**
+   * Simulates RisuAI CBS (and optional regex) evaluation via `risuai.parseRisuChat` with
+   * `runVar: false` so previewing never mutates live chat variables.
+   */
+  async simulateRisuChat(text, { processRegex = false, role = 'char' } = {}) {
+    if (typeof this.api?.parseRisuChat !== 'function') {
+      return { ok: false, unsupported: true, reason: '이 호스트는 parseRisuChat API를 지원하지 않습니다.' };
+    }
+    const sample = String(text ?? '').slice(0, 2000);
+    try {
+      const output = await this.api.parseRisuChat(sample, {
+        messageIndex: -1,
+        role,
+        processRegex: Boolean(processRegex),
+        runVar: false,
+      });
+      return {
+        ok: true,
+        input: sample,
+        output: String(output ?? ''),
+        truncated: String(text ?? '').length > 2000,
+      };
+    } catch (err) {
+      return { ok: false, unsupported: false, reason: err?.message || String(err) };
+    }
+  }
+
+  /**
+   * Reads and sanitizes the newest request log entry from `risuai.getFetchLogs()`.
+   * Must ONLY be called when the user explicitly clicks the attach button (never automatically).
+   */
+  async readLatestFetchLog({ index = 0 } = {}) {
+    if (typeof this.api?.getFetchLogs !== 'function') {
+      return { ok: false, reason: '이 RisuAI 버전은 요청 로그(getFetchLogs) API를 지원하지 않습니다.' };
+    }
+    try {
+      const logs = await this.api.getFetchLogs();
+      if (logs === null || logs === undefined) {
+        return { ok: false, permissionDenied: true, reason: '요청 로그 읽기 권한(fetchLogs)이 거부되었습니다.' };
+      }
+      if (!Array.isArray(logs) || logs.length === 0) {
+        return { ok: false, reason: '기록된 최근 요청 로그가 없습니다. RisuAI에서 대화를 한 번 보낸 뒤 다시 시도해 주세요.' };
+      }
+      const targetIdx = Number.isInteger(index) && logs[index] ? index : 0;
+      const sanitized = sanitizeFetchLog(logs[targetIdx]);
+      if (!sanitized) {
+        return { ok: false, reason: '요청 로그를 해석할 수 없습니다.' };
+      }
+      return { ok: true, log: sanitized, total: logs.length, index: targetIdx };
+    } catch (err) {
+      return { ok: false, reason: `요청 로그 조회 실패: ${err?.message || String(err)}` };
+    }
+  }
+
   /** Chats of the active character (for naming a migration source) and which one is open. */
   async listActiveChats() {
     const { char, charIndex, chatIndex } = await this.readActiveCharacter();
@@ -1386,6 +1463,224 @@ class HostAdapter {
       enabledModules: Array.isArray(db.enabledModules) ? db.enabledModules : [],
       moduleIntergration: typeof db.moduleIntergration === 'string' ? db.moduleIntergration : '',
       permissionDenied: false,
+    };
+  }
+
+  /**
+   * Reads a lightweight read-only catalog of characters in `db.characters` for cross-character porting.
+   * Should ONLY be called on demand (when user requests porting or inspecting other characters).
+   */
+  async readCharacterCatalog() {
+    const db = await this.readDbSubset(['characters']);
+    if (!db) return { characters: [], catalog: [], activeIndex: null, permissionDenied: true };
+    const characters = Array.isArray(db.characters) ? db.characters : [];
+    const { charIndex } = await this._getActiveIndices();
+    const activeIndex = Number.isInteger(charIndex) ? charIndex : null;
+    const catalog = [];
+    for (let i = 0; i < characters.length; i++) {
+      const c = characters[i];
+      if (!c || c.trashTime || c.chaId === '§temp' || c.chaId === '§playground') continue;
+      const lore = Array.isArray(c.globalLore) ? c.globalLore : [];
+      const regex = Array.isArray(c.customscript) ? c.customscript : [];
+      const lua = extractLuaFromTriggers(c.triggerscript);
+      catalog.push({
+        charIndex: i,
+        name: String(c.name || '(이름 없음)'),
+        type: c.type === 'group' ? 'group' : 'character',
+        current: i === activeIndex,
+        loreCount: lore.length,
+        loreNames: lore.slice(0, 25).map((e, idx) => `#${idx} ${e?.mode === 'folder' ? '📁 ' : ''}${e?.comment || '(무제)'}`),
+        regexCount: regex.length,
+        regexNames: regex.slice(0, 25).map((r, idx) => `#${idx} ${r?.comment || '(무제)'}`),
+        hasLua: Boolean(lua.isLua && lua.code.trim()),
+        tags: Array.isArray(c.tags) ? c.tags.slice(0, 12) : [],
+      });
+      if (catalog.length >= 60) break;
+    }
+    return { characters, catalog, activeIndex, permissionDenied: false };
+  }
+
+  /**
+   * Builds and validates a complete RisuModule object from a `create_module` proposal.
+   */
+  _buildNewModuleFromProposal(proposal, id) {
+    const name = String(proposal.name ?? '').trim();
+    if (!name) return { ok: false, error: '모듈 이름(name)이 비어 있습니다.' };
+
+    const lorebook = Array.isArray(proposal.lorebook)
+      ? proposal.lorebook.map(e => normalizeLorebookEntry(e || {}))
+      : [];
+    const regex = Array.isArray(proposal.regex)
+      ? proposal.regex.map(r => normalizeRegexEntry(r || {}))
+      : [];
+
+    for (let i = 0; i < regex.length; i++) {
+      const check = previewRegexApplication(regex[i], '');
+      if (!check.ok) {
+        return { ok: false, error: `모듈 정규식 #${i + 1} (${regex[i].comment}): ${check.error}` };
+      }
+    }
+
+    const rawLua = String(proposal.luaCode ?? proposal.code ?? '');
+    const trigger = rawLua.trim() ? buildLuaTriggers(rawLua) : [];
+
+    const mod = {
+      id: String(id || makeUuid()),
+      name,
+      description: String(proposal.description ?? ''),
+      namespace: String(proposal.namespace ?? ''),
+      lorebook,
+      regex,
+      trigger,
+      lowLevelAccess: Boolean(proposal.lowLevelAccess),
+      hideIcon: Boolean(proposal.hideIcon),
+      backgroundEmbedding: String(proposal.backgroundEmbedding ?? ''),
+      customModuleToggle: String(proposal.customModuleToggle ?? ''),
+    };
+
+    const metaChanges = [
+      { key: 'name', label: '모듈 이름', before: '(신규)', after: mod.name },
+    ];
+    if (mod.description) metaChanges.push({ key: 'description', label: '설명', before: '(신규)', after: formatMetaValue(mod.description) });
+    if (mod.namespace) metaChanges.push({ key: 'namespace', label: '네임스페이스', before: '(신규)', after: mod.namespace });
+    metaChanges.push({
+      key: 'contents',
+      label: '포함 구성',
+      before: '(신규)',
+      after: [
+        `로어북 ${lorebook.length}개`,
+        `정규식 ${regex.length}개`,
+        `Lua ${rawLua.trim() ? `${rawLua.length}자` : '없음'}`,
+        mod.customModuleToggle ? '커스텀 토글' : null,
+        mod.backgroundEmbedding ? '백그라운드 임베딩' : null,
+      ].filter(Boolean).join(' · '),
+    });
+    if (mod.lowLevelAccess) {
+      metaChanges.push({ key: 'lowLevelAccess', label: '저수준 접근', before: '(신규)', after: '켜짐 (주의)' });
+    }
+
+    const sections = [];
+    if (mod.customModuleToggle) sections.push(`[커스텀 토글]\n${mod.customModuleToggle}`);
+    if (mod.backgroundEmbedding) sections.push(`[백그라운드 임베딩]\n${mod.backgroundEmbedding}`);
+    if (rawLua.trim()) sections.push(`[Lua 트리거]\n${rawLua}`);
+    if (regex.length > 0) {
+      sections.push(
+        `[정규식 ${regex.length}개]\n` +
+        regex.map((r, i) => `#${i + 1} ${r.comment} (${r.type})\nIN: ${r.in}\nOUT: ${r.out}`).join('\n\n')
+      );
+    }
+    if (lorebook.length > 0) {
+      sections.push(
+        `[로어북 ${lorebook.length}개]\n` +
+        lorebook.map((l, i) => `#${i + 1} ${l.comment}${l.key ? ` [${l.key}]` : l.alwaysActive ? ' [항상 활성]' : ''}\n${l.content}`).join('\n\n')
+      );
+    }
+
+    return {
+      ok: true,
+      module: mod,
+      metaChanges,
+      summaryText: sections.join('\n\n') || `(빈 모듈 "${mod.name}")`,
+      firstRegex: regex[0] || null,
+    };
+  }
+
+  /**
+   * Builds and validates a complete RisuAI character object from a `create_character` proposal.
+   */
+  _buildNewCharacterFromProposal(proposal, chaId) {
+    const name = String(proposal.name ?? '').trim();
+    if (!name) return { ok: false, error: '캐릭터 이름(name)이 비어 있습니다.' };
+
+    const char = buildBlankCharacterSkeleton(chaId || makeUuid());
+    char.name = name;
+    const strFields = [
+      'desc', 'firstMessage', 'personality', 'scenario', 'exampleMessage',
+      'systemPrompt', 'replaceGlobalNote', 'creatorNotes', 'nickname',
+      'additionalText', 'defaultVariables', 'customModuleToggle', 'backgroundHTML',
+      'creator', 'characterVersion',
+    ];
+    for (const f of strFields) {
+      if (proposal[f] !== undefined && proposal[f] !== null) {
+        char[f] = String(proposal[f]);
+      }
+    }
+    if (Array.isArray(proposal.alternateGreetings)) {
+      char.alternateGreetings = proposal.alternateGreetings.map(g => String(g ?? ''));
+    }
+    if (Array.isArray(proposal.tags)) {
+      char.tags = [...new Set(proposal.tags.map(t => String(t ?? '').trim()).filter(Boolean))];
+    }
+    if (proposal.loreSettings !== undefined) {
+      const norm = normalizeLoreSettingsInput(proposal.loreSettings, null);
+      if (!norm.ok) return norm;
+      char.loreSettings = norm.value;
+    }
+    if (Array.isArray(proposal.bias)) {
+      const normBias = [];
+      for (const pair of proposal.bias) {
+        const norm = normalizeBiasPair(pair);
+        if (!norm) return { ok: false, error: `올바르지 않은 bias 항목입니다: ${JSON.stringify(pair)}` };
+        normBias.push(norm);
+      }
+      char.bias = normBias;
+    }
+    if (Array.isArray(proposal.globalLore)) {
+      char.globalLore = proposal.globalLore.map(e => normalizeLorebookEntry(e || {}));
+    }
+    if (Array.isArray(proposal.customscript)) {
+      char.customscript = proposal.customscript.map(r => normalizeRegexEntry(r || {}));
+      for (let i = 0; i < char.customscript.length; i++) {
+        const check = previewRegexApplication(char.customscript[i], '');
+        if (!check.ok) {
+          return { ok: false, error: `캐릭터 정규식 #${i + 1} (${char.customscript[i].comment}): ${check.error}` };
+        }
+      }
+    }
+    const rawLua = String(proposal.luaCode ?? proposal.code ?? '');
+    if (rawLua.trim()) {
+      char.triggerscript = buildLuaTriggers(rawLua);
+    }
+
+    const metaChanges = [
+      { key: 'name', label: '캐릭터 이름', before: '(신규)', after: char.name },
+    ];
+    if (char.tags.length > 0) metaChanges.push({ key: 'tags', label: '태그', before: '(신규)', after: char.tags.join(', ') });
+    if (char.loreSettings) {
+      metaChanges.push({
+        key: 'loreSettings',
+        label: '로어북 설정',
+        before: '(신규)',
+        after: `예산 ${char.loreSettings.tokenBudget} · 깊이 ${char.loreSettings.scanDepth}`,
+      });
+    }
+    const extras = [
+      char.alternateGreetings.length > 0 ? `추가 첫 메시지 ${char.alternateGreetings.length}개` : null,
+      char.globalLore.length > 0 ? `로어북 ${char.globalLore.length}개` : null,
+      char.customscript.length > 0 ? `정규식 ${char.customscript.length}개` : null,
+      rawLua.trim() ? `Lua ${rawLua.length}자` : null,
+      char.bias.length > 0 ? `바이어스 ${char.bias.length}개` : null,
+    ].filter(Boolean);
+    if (extras.length > 0) {
+      metaChanges.push({ key: 'extras', label: '포함 항목', before: '(신규)', after: extras.join(' · ') });
+    }
+
+    const parts = [];
+    if (char.desc) parts.push(`[설명 (Description)]\n${char.desc}`);
+    if (char.firstMessage) parts.push(`[첫 메시지]\n${char.firstMessage}`);
+    if (char.personality) parts.push(`[성격]\n${char.personality}`);
+    if (char.scenario) parts.push(`[시나리오]\n${char.scenario}`);
+    if (char.systemPrompt) parts.push(`[시스템 프롬프트]\n${char.systemPrompt}`);
+    if (char.defaultVariables) parts.push(`[기본 변수]\n${char.defaultVariables}`);
+    if (char.globalLore.length > 0) {
+      parts.push(`[로어북 ${char.globalLore.length}개]\n` + char.globalLore.map(l => `- ${l.comment} (${l.key || '항상 활성'})`).join('\n'));
+    }
+
+    return {
+      ok: true,
+      character: char,
+      metaChanges,
+      summaryText: parts.join('\n\n') || `(새 캐릭터 "${char.name}")`,
     };
   }
 
@@ -2219,7 +2514,30 @@ class HostAdapter {
       }
     }
 
-    if (proposal.action === 'upsert_regex' && proposal.regexIndex !== undefined && proposal.regexIndex !== null) {
+    if (proposal.action === 'delete_greeting') {
+      const { char } = await this.readActiveCharacter();
+      if (!char) return '선택된 캐릭터가 없습니다.';
+      if (char.type === 'group') {
+        return '그룹 채팅에는 첫 메시지 구조가 없어 삭제할 수 없습니다.';
+      }
+      const list = Array.isArray(char.alternateGreetings) ? char.alternateGreetings : [];
+      if (!Number.isInteger(proposal.greetingIndex) || proposal.greetingIndex < 0 || proposal.greetingIndex >= list.length) {
+        return `삭제할 추가 첫 메시지 ${formatBadIndex(proposal.greetingIndex)}을(를) 찾을 수 없습니다. (현재 ${list.length}개 · 기본 첫 메시지는 삭제 불가)`;
+      }
+    }
+
+    if (proposal.action === 'delete_persona') {
+      const { personas, permissionDenied } = await this.readPersonas();
+      if (permissionDenied) return DB_PERMISSION_ERROR;
+      if (personas.length <= 1) {
+        return '마지막 남은 페르소나는 삭제할 수 없습니다. (최소 1개 유지 필요)';
+      }
+      if (!Number.isInteger(proposal.personaIndex) || !personas[proposal.personaIndex]) {
+        return `삭제할 페르소나 ${formatBadIndex(proposal.personaIndex)}을(를) 찾을 수 없습니다. (등록된 페르소나 ${personas.length}개)`;
+      }
+    }
+
+    if ((proposal.action === 'upsert_regex' && proposal.regexIndex !== undefined && proposal.regexIndex !== null) || proposal.action === 'delete_regex') {
       const scope = proposal.scope || (target?.targetKind === 'module_regex' ? 'module' : 'character');
       let list = [];
       if (scope === 'module') {
@@ -2243,7 +2561,26 @@ class HostAdapter {
         list = Array.isArray(char?.customscript) ? char.customscript : [];
       }
       if (!Number.isInteger(proposal.regexIndex) || !list[proposal.regexIndex]) {
-        return `수정할 정규식 스크립트 ${formatBadIndex(proposal.regexIndex)}을(를) 찾을 수 없습니다. (현재 ${list.length}개) 새로 만들려면 regexIndex를 빼 주세요.`;
+        const verb = proposal.action === 'delete_regex' ? '삭제할' : '수정할';
+        const suffix = proposal.action === 'delete_regex' ? '' : ' 새로 만들려면 regexIndex를 빼 주세요.';
+        return `${verb} 정규식 스크립트 ${formatBadIndex(proposal.regexIndex)}을(를) 찾을 수 없습니다. (현재 ${list.length}개)${suffix}`;
+      }
+    }
+
+    if (proposal.action === 'delete_lorebook') {
+      const scope = this._loreScopeOf(proposal, target);
+      const loaded = await this._loadLorebookForPreview(scope, proposal, target);
+      if (!loaded.ok) return loaded.error;
+      const idx = proposal.loreIndex;
+      if (!Number.isInteger(idx) || !loaded.list[idx]) {
+        return `삭제할 ${loaded.scopeLabel} ${formatBadIndex(idx)}을(를) 찾을 수 없습니다. (현재 ${loaded.list.length}개)`;
+      }
+      const entry = loaded.list[idx];
+      if (entry.mode === 'folder' && entry.key) {
+        const childCount = loaded.list.filter(e => e && e !== entry && e.folder === entry.key).length;
+        if (childCount > 0) {
+          return `폴더 "${entry.comment || '(이름 없음)'}" 안에 로어북 ${childCount}개가 남아 있어 바로 삭제할 수 없습니다. 먼저 항목을 최상위나 다른 폴더로 옮겨 주세요.`;
+        }
       }
     }
 
@@ -2260,6 +2597,20 @@ class HostAdapter {
     if (res && res.target && validateAllowedFieldKey(res.target.targetKind, res.target.fieldKey)) {
       const { fieldKey: _stale, ...rest } = res.target;
       res.target = rest;
+    }
+    const skipAutoCbs = new Set(['upsert_regex', 'create_module', 'create_character', 'port_from_character']);
+    if (
+      res?.ok &&
+      typeof res.after === 'string' &&
+      !skipAutoCbs.has(proposal?.action) &&
+      !proposal?.action?.startsWith('delete_') &&
+      hasCbsSyntax(res.after) &&
+      typeof this.api?.parseRisuChat === 'function'
+    ) {
+      const sim = await this.simulateRisuChat(res.after, { processRegex: false });
+      if (sim.ok) {
+        res.cbsPreview = sim;
+      }
     }
     return res;
   }
@@ -2599,6 +2950,50 @@ class HostAdapter {
       if (snap.moduleUncertain) return { ok: false, error: MODULE_UNCERTAIN_ERROR, label: snap.label, target: snap.target };
       const existing = idx !== null ? snap.entry : null;
       const nextEntry = normalizeRegexEntry(proposal, existing);
+
+      // Pick the newest matching (or newest non-empty) active chat message as default test sample
+      let sampleText = '';
+      let sampleSource = '';
+      try {
+        const { chat } = await this.readActiveChat();
+        if (chat && !isColdStoredChat(chat) && Array.isArray(chat.message)) {
+          const msgs = chat.message.filter(m => typeof m?.data === 'string' && m.data.trim());
+          const syntaxCheck = previewRegexApplication(nextEntry, '');
+          if (syntaxCheck.ok) {
+            for (let i = msgs.length - 1; i >= Math.max(0, msgs.length - 12); i--) {
+              const probe = previewRegexApplication(nextEntry, msgs[i].data);
+              if (probe.ok && probe.matched) {
+                sampleText = msgs[i].data;
+                sampleSource = '최근 채팅 일치 메시지';
+                break;
+              }
+            }
+            if (!sampleText && msgs.length > 0) {
+              sampleText = msgs[msgs.length - 1].data;
+              sampleSource = '최근 채팅 마지막 메시지';
+            }
+          }
+        }
+      } catch {}
+
+      const regexPreview = previewRegexApplication(nextEntry, sampleText);
+      if (!regexPreview.ok) {
+        return { ok: false, error: regexPreview.error, label: snap.label, target: snap.target };
+      }
+      regexPreview.sampleSource = sampleSource;
+      regexPreview.entry = { in: nextEntry.in, out: nextEntry.out, flag: nextEntry.flag, ableFlag: nextEntry.ableFlag, type: nextEntry.type };
+
+      // If regex output matched (or contains CBS) and host exposes parseRisuChat, evaluate CBS safely with runVar: false
+      if (typeof this.api?.parseRisuChat === 'function') {
+        const cbsInput = regexPreview.matched ? regexPreview.after : (hasCbsSyntax(nextEntry.out) ? nextEntry.out : '');
+        if (cbsInput) {
+          const sim = await this.simulateRisuChat(cbsInput, { processRegex: false });
+          if (sim.ok) {
+            regexPreview.cbsOutput = sim.output;
+          }
+        }
+      }
+
       const metaChanges = existing
         ? computeMetaChanges(existing, nextEntry, REGEX_META_SPECS)
         : REGEX_META_SPECS.map(([key, label]) => ({
@@ -2612,6 +3007,7 @@ class HostAdapter {
         before: existing ? String(existing.out ?? '') : '',
         after: String(nextEntry.out ?? ''),
         metaChanges,
+        regexPreview,
         label: existing ? `${snap.label} 수정` : (proposal.title || `새 정규식 (${nextEntry.comment})`),
         target: snap.target,
         hostBinding: snap.hostBinding || null,
@@ -2788,6 +3184,304 @@ class HostAdapter {
       };
     }
 
+    if (proposal.action === 'update_chat_vars') {
+      const { chat, char, charIndex, chatIndex } = await this.readActiveChat();
+      if (!char || !chat) return { ok: false, error: '활성 채팅을 찾을 수 없습니다.' };
+      if (isColdStoredChat(chat)) {
+        return { ok: false, error: '현재 채팅이 콜드 스토리지에 보관 중입니다. 채팅을 다시 열어 주세요.' };
+      }
+      const plan = planChatVarsUpdate(chat.scriptstate, proposal);
+      if (!plan.ok) return { ok: false, error: plan.error };
+      const labelName = chatName(chat, chatIndex ?? 0);
+      return {
+        ok: true,
+        before: plan.before,
+        after: plan.after,
+        metaChanges: plan.metaChanges,
+        label: `채팅 변수 편집 (${labelName} · ${plan.changedCount}건)`,
+        target: { targetKind: 'chat_note', fieldKey: 'note' },
+        hostBinding: { charIndex, chatIndex, ...getCharIdentity(char) },
+        ...(plan.removedCount > 0 ? { warning: `기존 채팅 변수 ${plan.removedCount}개를 삭제합니다. 적용 후에도 되돌리기로 복구할 수 있습니다.` } : {}),
+      };
+    }
+
+    if (proposal.action === 'delete_lorebook') {
+      const scope = this._loreScopeOf(proposal, target);
+      const loaded = await this._loadLorebookForPreview(scope, proposal, target);
+      if (!loaded.ok) return { ok: false, error: loaded.error, label: loaded.label, target: loaded.target };
+      const idx = proposal.loreIndex;
+      const entry = loaded.list[idx];
+      if (!entry) return { ok: false, error: `삭제할 ${loaded.scopeLabel} #${idx + 1}을(를) 찾을 수 없습니다.` };
+      const entryTitle = entry.comment || `#${idx + 1}`;
+      return {
+        ok: true,
+        isDelete: true,
+        before: String(entry.content ?? ''),
+        after: '',
+        metaChanges: [
+          { key: 'comment', label: '삭제 항목', before: `${entryTitle}${entry.mode === 'folder' ? ' (빈 폴더)' : ''}`, after: '(삭제됨)' },
+          ...(entry.key ? [{ key: 'key', label: '활성화 키', before: String(entry.key), after: '(삭제됨)' }] : []),
+        ],
+        label: `${loaded.scopeLabel} 삭제 (#${idx + 1} · ${entryTitle})`,
+        target: { ...loaded.target, loreIndex: idx },
+        hostBinding: loaded.hostBinding,
+        warning: `이 작업은 ${loaded.scopeLabel} "${entryTitle}" 항목을 삭제합니다. 적용 시 확인 창이 뜨며, 적용 후에도 되돌리기로 복구할 수 있습니다.`,
+      };
+    }
+
+    if (proposal.action === 'delete_regex') {
+      const scope = proposal.scope || (target.targetKind === 'module_regex' ? 'module' : 'character');
+      const targetKind = scope === 'module' ? 'module_regex' : 'char_regex';
+      const idx = proposal.regexIndex;
+      const snap = await this.readTargetSnapshot({
+        targetKind,
+        regexIndex: idx,
+        moduleIndex: proposal.moduleIndex ?? target.moduleIndex,
+        moduleDomHints: proposal.moduleIndex === undefined ? target.moduleDomHints : undefined,
+      });
+      if (!snap.ok) return { ok: false, error: snap.reason };
+      if (snap.moduleUncertain) return { ok: false, error: MODULE_UNCERTAIN_ERROR, label: snap.label, target: snap.target };
+      const existing = snap.entry;
+      if (!existing) return { ok: false, error: `삭제할 정규식 #${idx + 1}을(를) 찾을 수 없습니다.` };
+      const name = existing.comment || `#${idx + 1}`;
+      return {
+        ok: true,
+        isDelete: true,
+        before: String(existing.out ?? ''),
+        after: '',
+        metaChanges: [
+          { key: 'comment', label: '삭제 정규식', before: name, after: '(삭제됨)' },
+          { key: 'type', label: '실행 시점', before: String(existing.type || 'editdisplay'), after: '(삭제됨)' },
+          { key: 'in', label: 'IN 패턴', before: String(existing.in || ''), after: '(삭제됨)' },
+        ],
+        label: `${snap.label} 삭제 (${name})`,
+        target: snap.target,
+        hostBinding: snap.hostBinding || null,
+        warning: `이 작업은 정규식 스크립트 "${name}"을(를) 삭제합니다. 적용 시 확인 창이 뜨며, 적용 후에도 되돌리기로 복구할 수 있습니다.`,
+      };
+    }
+
+    if (proposal.action === 'delete_persona') {
+      const { personas, selectedPersona, permissionDenied } = await this.readPersonas();
+      if (permissionDenied) return { ok: false, error: DB_PERMISSION_ERROR };
+      const idx = proposal.personaIndex;
+      const existing = personas[idx];
+      if (!existing) return { ok: false, error: `삭제할 페르소나 #${idx + 1}을(를) 찾을 수 없습니다.` };
+      const name = existing.name || `#${idx + 1}`;
+      const notes = [`페르소나 "${name}"을(를) 삭제합니다. 적용 시 확인 창이 뜨며, 적용 후에도 되돌리기로 복구할 수 있습니다.`];
+      if (idx === selectedPersona) {
+        notes.push('현재 선택된 전역 페르소나이므로 삭제 시 다른 페르소나가 대신 선택됩니다.');
+      }
+      return {
+        ok: true,
+        isDelete: true,
+        before: String(existing.personaPrompt ?? ''),
+        after: '',
+        metaChanges: [
+          { key: 'name', label: '삭제 페르소나', before: name, after: '(삭제됨)' },
+          ...(existing.note ? [{ key: 'note', label: '메모', before: String(existing.note), after: '(삭제됨)' }] : []),
+        ],
+        label: `페르소나 삭제 (#${idx + 1} · ${name})`,
+        target: { targetKind: 'persona', personaIndex: idx },
+        hostBinding: { personaId: existing.id || null },
+        warning: notes.join(' '),
+      };
+    }
+
+    if (proposal.action === 'delete_greeting') {
+      const { char, charIndex, chatIndex } = await this.readActiveCharacter();
+      if (!char) return { ok: false, error: '선택된 캐릭터가 없습니다.' };
+      const idx = proposal.greetingIndex;
+      const list = Array.isArray(char.alternateGreetings) ? char.alternateGreetings : [];
+      if (idx < 0 || idx >= list.length) {
+        return { ok: false, error: `삭제할 추가 첫 메시지 #${idx + 1}을(를) 찾을 수 없습니다.` };
+      }
+      const affectedChats = (Array.isArray(char.chats) ? char.chats : []).filter(c => c?.fmIndex === idx).length;
+      const notes = [`추가 첫 메시지 #${idx + 1}을(를) 삭제합니다. 적용 시 확인 창이 뜨며, 적용 후에도 되돌리기로 복구할 수 있습니다.`];
+      if (affectedChats > 0) {
+        notes.push(`이 추가 첫 메시지를 사용 중인 채팅 ${affectedChats}개는 기본 첫 메시지로 안전하게 전환됩니다.`);
+      }
+      return {
+        ok: true,
+        isDelete: true,
+        before: String(list[idx] ?? ''),
+        after: '',
+        metaChanges: [
+          { key: 'greetingIndex', label: '삭제 대상', before: `추가 첫 메시지 #${idx + 1}`, after: '(삭제됨)' },
+        ],
+        label: `추가 첫 메시지 #${idx + 1} 삭제`,
+        target: { targetKind: 'char_alt_greeting', greetingIndex: idx },
+        hostBinding: { charIndex, chatIndex, ...getCharIdentity(char) },
+        warning: notes.join(' '),
+      };
+    }
+
+    if (proposal.action === 'create_module') {
+      const { permissionDenied } = await this.readModules();
+      if (permissionDenied) return { ok: false, error: DB_PERMISSION_ERROR };
+      const built = this._buildNewModuleFromProposal(proposal);
+      if (!built.ok) return { ok: false, error: built.error };
+
+      let regexPreview = null;
+      if (built.firstRegex) {
+        let sampleText = '';
+        let sampleSource = '샘플 없음';
+        try {
+          const { chat, char } = await this.readActiveChat();
+          if (chat && !isColdStoredChat(chat)) {
+            const msgs = Array.isArray(chat.message) ? chat.message : [];
+            for (let i = msgs.length - 1; i >= 0; i--) {
+              const d = String(msgs[i]?.data ?? '');
+              if (!d.trim()) continue;
+              const probe = previewRegexApplication(built.firstRegex, d);
+              if (probe.ok && probe.matched) {
+                sampleText = d;
+                sampleSource = `현재 채팅 메시지 #${i + 1}`;
+                break;
+              }
+              if (!sampleText) {
+                sampleText = d;
+                sampleSource = `현재 채팅 최근 메시지 #${i + 1}`;
+              }
+            }
+            if (!sampleText && char?.firstMessage) {
+              sampleText = String(char.firstMessage);
+              sampleSource = '현재 캐릭터 첫 메시지';
+            }
+          }
+        } catch {}
+        const rp = previewRegexApplication(built.firstRegex, sampleText);
+        if (rp.ok) {
+          rp.sampleSource = sampleSource;
+          rp.entry = {
+            in: built.firstRegex.in,
+            out: built.firstRegex.out,
+            flag: built.firstRegex.flag,
+            ableFlag: built.firstRegex.ableFlag,
+            type: built.firstRegex.type,
+          };
+          if (typeof this.api?.parseRisuChat === 'function') {
+            const cbsInput = rp.matched ? rp.after : (hasCbsSyntax(built.firstRegex.out) ? built.firstRegex.out : '');
+            if (cbsInput) {
+              const sim = await this.simulateRisuChat(cbsInput, { processRegex: false });
+              if (sim.ok) rp.cbsOutput = sim.output;
+            }
+          }
+          regexPreview = rp;
+        }
+      }
+
+      const warnings = [];
+      if (built.module.lowLevelAccess) {
+        warnings.push('⚠️ 저수준 접근(lowLevelAccess)이 켜져 있습니다. 신뢰할 수 있는 Lua 코드인지 반드시 확인하세요.');
+      }
+      warnings.push('새 모듈이 DB에 생성됩니다. 아래 체크박스로 현재 채팅 또는 전역에 바로 활성화할 수 있습니다.');
+
+      return {
+        ok: true,
+        createsModule: true,
+        before: '',
+        after: built.summaryText,
+        metaChanges: built.metaChanges,
+        ...(regexPreview ? { regexPreview } : {}),
+        label: proposal.title || `새 모듈 생성 (${built.module.name})`,
+        target: { targetKind: 'general' },
+        hostBinding: null,
+        warning: warnings.join(' '),
+      };
+    }
+
+    if (proposal.action === 'create_character') {
+      const db = await this.readDbSubset(['characters']);
+      if (!db) return { ok: false, error: DB_PERMISSION_ERROR };
+      const built = this._buildNewCharacterFromProposal(proposal);
+      if (!built.ok) return { ok: false, error: built.error };
+      return {
+        ok: true,
+        before: '',
+        after: built.summaryText,
+        metaChanges: built.metaChanges,
+        label: proposal.title || `새 캐릭터 생성 (${built.character.name})`,
+        target: { targetKind: 'general' },
+        hostBinding: null,
+        warning: '현재 캐릭터는 바뀌지 않으며, 새 캐릭터 카드가 캐릭터 목록 끝에 추가됩니다. RisuAI 왼쪽 캐릭터 목록에서 새 캐릭터를 클릭해 대화를 시작할 수 있습니다.',
+      };
+    }
+
+    if (proposal.action === 'update_char_settings') {
+      const { char, charIndex } = await this.readActiveCharacter();
+      if (!char) return { ok: false, error: '선택된 캐릭터가 없습니다.' };
+      const plan = planCharSettingsUpdate(char, proposal);
+      if (!plan.ok) return { ok: false, error: plan.error };
+      return {
+        ok: true,
+        before: plan.before,
+        after: plan.after,
+        metaChanges: plan.metaChanges,
+        label: `캐릭터 고급 설정 (${char.name || '무제'})`,
+        target: { targetKind: 'char_field', fieldKey: 'desc' },
+        hostBinding: { charIndex, ...getCharIdentity(char) },
+      };
+    }
+
+    if (proposal.action === 'port_from_character') {
+      const { char: currentChar, charIndex: activeIndex } = await this.readActiveCharacter();
+      if (!currentChar) return { ok: false, error: '현재 선택된 캐릭터가 없습니다.' };
+      const { characters, permissionDenied } = await this.readCharacterCatalog();
+      if (permissionDenied) return { ok: false, error: DB_PERMISSION_ERROR };
+      const srcIdx = proposal.sourceCharIndex;
+      const sourceChar = Number.isInteger(srcIdx) ? characters[srcIdx] : null;
+      if (!sourceChar) {
+        return { ok: false, error: `원본 캐릭터 #${Number(srcIdx) + 1}을(를) 찾을 수 없습니다. (총 ${characters.length}개)` };
+      }
+      if (srcIdx === activeIndex || (sourceChar.chaId && sourceChar.chaId === currentChar.chaId)) {
+        return { ok: false, error: '원본 캐릭터가 현재 캐릭터와 같습니다. 다른 캐릭터를 sourceCharIndex로 지정해 주세요.' };
+      }
+      const plan = planCharacterPort(sourceChar, currentChar, {
+        items: proposal.items,
+        loreIndices: proposal.loreIndices,
+        regexIndices: proposal.regexIndices,
+        extractLua: extractLuaFromTriggers,
+        buildLuaTriggers,
+      });
+      if (!plan.ok) return { ok: false, error: plan.error };
+      const label = `캐릭터 "${sourceChar.name || `#${srcIdx + 1}`}" → 현재 캐릭터 "${currentChar.name || '무제'}" 포팅`;
+      if (!plan.changed) {
+        return {
+          ok: false,
+          label,
+          error: `포팅할 내용이 없습니다. ${plan.skipped.join(' ')}`,
+        };
+      }
+      const notes = [`원본 캐릭터는 바뀌지 않으며, 현재 캐릭터로 그대로 복사됩니다 (${plan.copied.join(', ')}).`, ...plan.skipped];
+      const destructiveWarning = plan.overwritesOtherTriggers
+        ? buildLuaDestructiveWarning(plan.otherTriggerCount)
+        : (plan.overwritesLua ? '현재 캐릭터에 이미 있는 Lua 트리거 스크립트를 원본 캐릭터의 Lua로 덮어씁니다.' : null);
+      return {
+        ok: true,
+        before: plan.before,
+        after: plan.after,
+        metaChanges: plan.metaChanges,
+        label,
+        target: { targetKind: 'general' },
+        hostBinding: {
+          charIndex: activeIndex,
+          ...getCharIdentity(currentChar),
+          sourceCharIndex: srcIdx,
+          sourceChaId: sourceChar.chaId || null,
+          sourceCharName: sourceChar.name || '',
+        },
+        warning: notes.join(' '),
+        ...(destructiveWarning ? {
+          destructiveWarning,
+          requiresConfirm: true,
+          confirmLabel: plan.overwritesOtherTriggers
+            ? '기존 V1/V2 트리거가 삭제되고 포팅된 Lua로 대체됨을 확인했습니다'
+            : '현재 캐릭터의 기존 Lua 스크립트를 덮어쓰는 것을 확인했습니다',
+        } : {}),
+      };
+    }
+
     if (proposal.action === 'update_config') {
       const cfg = await this.readAllowedConfig();
       if (!cfg) return { ok: false, error: DB_PERMISSION_ERROR };
@@ -2833,14 +3527,28 @@ class HostAdapter {
         return await this._applyUpdateLorebook(proposal, target, options);
       case 'organize_lorebook':
         return await this._applyOrganizeLorebook(proposal, target, options);
+      case 'delete_lorebook':
+        return await this._applyDeleteLorebook(proposal, target, options);
       case 'update_lua':
         return await this._applyUpdateLua(proposal, target, options);
       case 'upsert_regex':
         return await this._applyUpsertRegex(proposal, target, options);
+      case 'delete_regex':
+        return await this._applyDeleteRegex(proposal, target, options);
+      case 'create_module':
+        return await this._applyCreateModule(proposal, options);
       case 'create_persona':
         return await this._applyCreatePersona(proposal, options);
       case 'update_persona':
         return await this._applyUpdatePersona(proposal, target, options);
+      case 'delete_persona':
+        return await this._applyDeletePersona(proposal, options);
+      case 'create_character':
+        return await this._applyCreateCharacter(proposal);
+      case 'update_char_settings':
+        return await this._applyUpdateCharSettings(proposal, options);
+      case 'port_from_character':
+        return await this._applyPortFromCharacter(proposal, options);
       case 'update_config':
         return await this._applyUpdateConfig(proposal);
       case 'update_field':
@@ -2849,8 +3557,12 @@ class HostAdapter {
         return await this._applyUpdateGreeting(proposal, target, options);
       case 'create_greeting':
         return await this._applyCreateGreeting(proposal, target, options);
+      case 'delete_greeting':
+        return await this._applyDeleteGreeting(proposal, options);
       case 'import_chat':
         return await this._applyImportChat(proposal, options);
+      case 'update_chat_vars':
+        return await this._applyUpdateChatVars(proposal, options);
       default:
         throw new Error(`지원하지 않는 작업 종류입니다: ${proposal.action}`);
     }
@@ -3547,6 +4259,261 @@ class HostAdapter {
 
     const undoId = await this._commitDb(prev, next, `설정 변경 (${keys.join(', ')})`);
     return { ok: true, undoId, summary: `설정(${keys.join(', ')})을 적용했습니다.` };
+  }
+
+  async _applyUpdateChatVars(proposal, options = {}) {
+    const { char, charIndex, chatIndex, chat } = await this._requireSameActiveChat(options.hostBinding, '채팅 변수 편집');
+    if (isColdStoredChat(chat)) {
+      throw new Error('현재 채팅이 콜드 스토리지에 보관 중입니다. 채팅을 다시 열어 주세요.');
+    }
+    const plan = planChatVarsUpdate(chat.scriptstate, proposal);
+    if (!plan.ok) throw new Error(plan.error);
+
+    const nextChat = clone(chat);
+    nextChat.scriptstate = plan.nextState;
+    const undoId = await this._commitChat(chat, charIndex, chatIndex, nextChat, `채팅 변수 편집 (${plan.changedCount}건)`);
+    return {
+      ok: true,
+      undoId,
+      summary: `현재 채팅 변수 ${plan.changedCount}건을 반영했습니다.`,
+    };
+  }
+
+  async _applyDeleteLorebook(proposal, target, options = {}) {
+    const loreIndex = proposal.loreIndex;
+    const opened = await this._openScope(this._loreScopeOf(proposal, target), proposal, target, options, '로어북 삭제');
+    const list = this._scopeList(opened, 'lore');
+    const existing = list[loreIndex];
+    if (!existing) throw new Error(`${opened.name} 로어북 #${loreIndex + 1}을(를) 찾을 수 없습니다.`);
+    if (existing.mode === 'folder' && existing.key) {
+      const childCount = list.filter(e => e && e !== existing && e.folder === existing.key).length;
+      if (childCount > 0) {
+        throw new Error(`폴더 "${existing.comment || '(이름 없음)'}" 안에 로어북 ${childCount}개가 남아 있어 삭제할 수 없습니다.`);
+      }
+    }
+    const labelName = existing.comment || `#${loreIndex + 1}`;
+    list.splice(loreIndex, 1);
+    const undoId = await opened.commit(`${opened.name} 로어북 삭제 (${labelName})`);
+    return { ok: true, undoId, summary: `${opened.name} 로어북 "${labelName}"을(를) 삭제했습니다.` };
+  }
+
+  async _applyDeleteRegex(proposal, target, options = {}) {
+    const scope = proposal.scope || (target.targetKind === 'module_regex' ? 'module' : 'character');
+    const idx = proposal.regexIndex;
+    const opened = await this._openScope(scope, proposal, target, options, '정규식 삭제');
+    const list = this._scopeList(opened, 'regex');
+    const existing = list[idx];
+    if (!existing) throw new Error(`${opened.name} 정규식 #${idx + 1}을(를) 찾을 수 없습니다.`);
+    const labelName = existing.comment || `#${idx + 1}`;
+    list.splice(idx, 1);
+    const undoId = await opened.commit(`${opened.name} 정규식 삭제 (${labelName})`);
+    return { ok: true, undoId, summary: `${opened.name} 정규식 "${labelName}"을(를) 삭제했습니다.` };
+  }
+
+  async _applyDeletePersona(proposal, options = {}) {
+    const { personas, selectedPersona, permissionDenied } = await this.readPersonas();
+    if (permissionDenied) throw new Error(DB_PERMISSION_ERROR);
+    if (personas.length <= 1) throw new Error('마지막 남은 페르소나는 삭제할 수 없습니다.');
+    let idx = proposal.personaIndex;
+    if (options?.hostBinding?.personaId && personas[idx]?.id !== options.hostBinding.personaId) {
+      const byId = personas.findIndex(p => p && p.id === options.hostBinding.personaId);
+      if (byId === -1) throw new Error('삭제하려는 페르소나가 이미 변경되었거나 삭제되었습니다.');
+      idx = byId;
+    }
+    const existing = personas[idx];
+    if (!existing) throw new Error(`페르소나 #${idx + 1}을(를) 찾을 수 없습니다.`);
+
+    const name = existing.name || `#${idx + 1}`;
+    const nextPersonas = clone(personas);
+    nextPersonas.splice(idx, 1);
+
+    let nextSelected = selectedPersona;
+    if (nextSelected > idx) nextSelected -= 1;
+    else if (nextSelected >= nextPersonas.length) nextSelected = Math.max(0, nextPersonas.length - 1);
+
+    const prevDb = { personas, selectedPersona };
+    const nextDb = { personas: nextPersonas, selectedPersona: nextSelected };
+    const undoId = await this._commitDb(prevDb, nextDb, `페르소나 삭제 (${name})`);
+    return { ok: true, undoId, summary: `페르소나 "${name}"을(를) 삭제했습니다.` };
+  }
+
+  async _applyDeleteGreeting(proposal, options = {}) {
+    const { char, charIndex } = await this._requireSameActiveCharacter(options.hostBinding, '추가 첫 메시지 삭제');
+    if (char.type === 'group') throw new Error('그룹 채팅에는 첫 메시지 구조가 없습니다.');
+    const idx = proposal.greetingIndex;
+    const list = Array.isArray(char.alternateGreetings) ? char.alternateGreetings : [];
+    if (idx < 0 || idx >= list.length) {
+      throw new Error(`추가 첫 메시지 #${idx + 1}을(를) 찾을 수 없습니다.`);
+    }
+
+    const nextChar = clone(char);
+    nextChar.alternateGreetings.splice(idx, 1);
+    // Keep every chat's fmIndex pointing at the same greeting (or reset to default -1 if deleted)
+    if (Array.isArray(nextChar.chats)) {
+      for (const c of nextChar.chats) {
+        if (!c || !Number.isInteger(c.fmIndex)) continue;
+        if (c.fmIndex === idx) c.fmIndex = -1;
+        else if (c.fmIndex > idx) c.fmIndex -= 1;
+      }
+    }
+    const undoId = await this._commitCharacter(char, charIndex, nextChar, `추가 첫 메시지 #${idx + 1} 삭제`);
+    return { ok: true, undoId, summary: `추가 첫 메시지 #${idx + 1}을(를) 삭제했습니다.` };
+  }
+
+  async _applyCreateModule(proposal, options = {}) {
+    const { modules, enabledModules, permissionDenied } = await this.readModules();
+    if (permissionDenied) throw new Error(DB_PERMISSION_ERROR);
+    const built = this._buildNewModuleFromProposal(proposal, makeUuid());
+    if (!built.ok) throw new Error(built.error);
+
+    const mod = built.module;
+    const nextModules = clone(modules);
+    nextModules.push(mod);
+
+    const enableGlobally = Boolean(options.enableGlobally ?? proposal.enableGlobally);
+    const enableInCurrentChat = Boolean(options.enableInCurrentChat ?? proposal.enableInCurrentChat);
+    const enableInCurrentChar = Boolean(options.enableInCurrentChar ?? proposal.enableInCurrentChar);
+
+    const prevDb = { modules };
+    const nextDb = { modules: nextModules };
+    if (enableGlobally) {
+      const nextEnabled = Array.isArray(enabledModules) ? [...enabledModules] : [];
+      if (!nextEnabled.includes(mod.id)) nextEnabled.push(mod.id);
+      prevDb.enabledModules = enabledModules;
+      nextDb.enabledModules = nextEnabled;
+    }
+
+    const undoId = await this._commitDb(prevDb, nextDb, `새 모듈 생성 (${mod.name})`);
+    const activatedWhere = [];
+    if (enableGlobally) activatedWhere.push('전역');
+
+    if (enableInCurrentChat) {
+      try {
+        const { chat, charIndex, chatIndex } = await this.readActiveChat();
+        if (chat && !isColdStoredChat(chat)) {
+          const nextChat = clone(chat);
+          if (!Array.isArray(nextChat.modules)) nextChat.modules = [];
+          if (!nextChat.modules.includes(mod.id)) {
+            nextChat.modules.push(mod.id);
+            await this._commitChat(chat, charIndex, chatIndex, nextChat, '', { appendTo: undoId });
+          }
+          activatedWhere.push('현재 채팅');
+        }
+      } catch {}
+    }
+
+    if (enableInCurrentChar) {
+      try {
+        const { char, charIndex } = await this.readActiveCharacter();
+        if (char) {
+          const nextChar = clone(char);
+          if (!Array.isArray(nextChar.modules)) nextChar.modules = [];
+          if (!nextChar.modules.includes(mod.id)) {
+            nextChar.modules.push(mod.id);
+            await this._commitCharacter(char, charIndex, nextChar, '', { appendTo: undoId });
+          }
+          activatedWhere.push('현재 캐릭터');
+        }
+      } catch {}
+    }
+
+    const suffix = activatedWhere.length > 0 ? ` (${activatedWhere.join(' · ')}에 즉시 활성화됨)` : '';
+    return {
+      ok: true,
+      undoId,
+      moduleId: mod.id,
+      summary: `새 모듈 "${mod.name}"을(를) 생성했습니다${suffix}.`,
+    };
+  }
+
+  async _applyCreateCharacter(proposal) {
+    const db = await this.readDbSubset(['characters', 'characterOrder']);
+    if (!db) throw new Error(DB_PERMISSION_ERROR);
+    const characters = Array.isArray(db.characters) ? db.characters : [];
+    const built = this._buildNewCharacterFromProposal(proposal, makeUuid());
+    if (!built.ok) throw new Error(built.error);
+
+    const newChar = built.character;
+    const nextCharacters = clone(characters);
+    nextCharacters.push(newChar);
+
+    const prevDb = { characters };
+    const nextDb = { characters: nextCharacters };
+    if (Array.isArray(db.characterOrder)) {
+      const nextOrder = clone(db.characterOrder);
+      nextOrder.push(newChar.chaId);
+      prevDb.characterOrder = db.characterOrder;
+      nextDb.characterOrder = nextOrder;
+    }
+
+    const undoId = await this._commitDb(prevDb, nextDb, `새 캐릭터 생성 (${newChar.name})`);
+    return {
+      ok: true,
+      undoId,
+      chaId: newChar.chaId,
+      charIndex: nextCharacters.length - 1,
+      summary: `새 캐릭터 "${newChar.name}"을(를) 생성했습니다. RisuAI 왼쪽 캐릭터 목록에서 선택해 대화를 시작할 수 있습니다.`,
+    };
+  }
+
+  async _applyUpdateCharSettings(proposal, options = {}) {
+    const { char, charIndex } = await this._requireSameActiveCharacter(options.hostBinding, '캐릭터 고급 설정 수정');
+    const plan = planCharSettingsUpdate(char, proposal);
+    if (!plan.ok) throw new Error(plan.error);
+
+    const nextChar = clone(char);
+    Object.assign(nextChar, plan.nextPatch);
+    const undoId = await this._commitCharacter(char, charIndex, nextChar, `캐릭터 고급 설정 수정 (${char.name || '무제'})`);
+    return {
+      ok: true,
+      undoId,
+      summary: `캐릭터 "${char.name || '무제'}"의 고급 설정(${Object.keys(plan.nextPatch).join(', ')})을 저장했습니다.`,
+    };
+  }
+
+  async _applyPortFromCharacter(proposal, options = {}) {
+    const { char: currentChar, charIndex: activeIndex } = await this._requireSameActiveCharacter(options.hostBinding, '캐릭터 포팅');
+    const { characters, permissionDenied } = await this.readCharacterCatalog();
+    if (permissionDenied) throw new Error(DB_PERMISSION_ERROR);
+
+    let srcIdx = proposal.sourceCharIndex;
+    const binding = options?.hostBinding || null;
+    if (binding?.sourceChaId && characters[srcIdx]?.chaId !== binding.sourceChaId) {
+      const byId = characters.findIndex(c => c && c.chaId === binding.sourceChaId);
+      if (byId === -1) throw new Error('원본 캐릭터를 찾을 수 없습니다. (삭제되었거나 목록이 바뀌었습니다)');
+      srcIdx = byId;
+    }
+    const sourceChar = Number.isInteger(srcIdx) ? characters[srcIdx] : null;
+    if (!sourceChar) throw new Error(`원본 캐릭터 #${Number(srcIdx) + 1}을(를) 찾을 수 없습니다.`);
+    if (srcIdx === activeIndex || (sourceChar.chaId && sourceChar.chaId === currentChar.chaId)) {
+      throw new Error('원본 캐릭터가 현재 캐릭터와 같습니다.');
+    }
+
+    const plan = planCharacterPort(sourceChar, currentChar, {
+      items: proposal.items,
+      loreIndices: proposal.loreIndices,
+      regexIndices: proposal.regexIndices,
+      extractLua: extractLuaFromTriggers,
+      buildLuaTriggers,
+    });
+    if (!plan.ok) throw new Error(plan.error);
+    if (!plan.changed) throw new Error(`포팅할 내용이 없습니다. ${plan.skipped.join(' ')}`);
+
+    if ((plan.overwritesLua || plan.overwritesOtherTriggers) && options.requireDestructiveConfirm && !options.destructiveConfirmed) {
+      throw new Error('기존 Lua/트리거를 덮어쓰는 포팅입니다. 확인 체크 후 다시 적용해 주세요.');
+    }
+
+    const undoId = await this._commitCharacter(
+      currentChar,
+      activeIndex,
+      plan.next,
+      `캐릭터 포팅 (${sourceChar.name || `#${srcIdx + 1}`} → ${currentChar.name || '무제'})`
+    );
+    return {
+      ok: true,
+      undoId,
+      summary: `"${sourceChar.name || `#${srcIdx + 1}`}"에서 ${plan.copied.join(', ')}을(를) 현재 캐릭터로 포팅했습니다.`,
+    };
   }
 }
 

@@ -2,7 +2,7 @@ import { VERSION, STORAGE_KEY, PRESET_STORAGE_KEY, UNDO_STORAGE_KEY, DEFAULT_MAX
 import { STYLES } from './style.js';
 import { FocusTracker, normalizeChipPos, MIN_DOCK_VIEWPORT_PX } from './focus-detector.js';
 import { HostAdapter, resolveModuleIndex, summarizeLoreList } from './host-adapter.js';
-import { callRisuModel, parseAssistantReply, buildConversationMessages, findUnknownProposalKeys } from './llm.js';
+import { callRisuModel, parseAssistantReply, buildConversationMessages, findUnknownProposalKeys, DELETE_ACTIONS } from './llm.js';
 import { buildDiffPreview } from './text-edits.js';
 import { getQuickPromptsForContext } from './knowledge.js';
 import { newPresetState, validatePresetState, assembleRisuHelperMessages } from './preset-engine.js';
@@ -10,7 +10,8 @@ import { renderPresetPanel } from './preset-ui.js';
 import { renderMarkdown } from './markdown.js';
 import { planGreetingContext, wantsGreetingText } from './greetings.js';
 import { planFieldContext, mentionedFields, AUTHOR_NOTE_FIELD } from './fields.js';
-import { summarizeChatList, mentionedChatIndex } from './chat-transfer.js';
+import { summarizeChatList, mentionedChatIndex, isColdStoredChat } from './chat-transfer.js';
+import { summarizeChatVariables, previewRegexApplication, hasCbsSyntax } from './runtime-tools.js';
 
 const DEFAULT_SETTINGS = {
   modelMode: 'model',
@@ -37,15 +38,24 @@ const ACTION_LABELS = {
   create_lorebook: '새 로어북 생성',
   update_lorebook: '로어북 수정',
   organize_lorebook: '로어북 폴더 정리',
+  delete_lorebook: '로어북 삭제',
   update_lua: 'Lua 스크립트 수정',
   upsert_regex: '정규식 저장',
+  delete_regex: '정규식 삭제',
   create_persona: '새 페르소나 생성',
   update_persona: '페르소나 수정',
+  delete_persona: '페르소나 삭제',
   update_config: '설정 변경',
   update_field: '캐릭터 필드 수정',
   update_greeting: '첫 메시지 수정',
   create_greeting: '추가 첫 메시지 생성',
+  delete_greeting: '추가 첫 메시지 삭제',
   import_chat: '채팅 이사',
+  update_chat_vars: '채팅 변수 편집',
+  create_module: '새 모듈 생성',
+  create_character: '새 캐릭터 생성',
+  update_char_settings: '캐릭터 고급 설정',
+  port_from_character: '캐릭터 교차 포팅',
 };
 
 function h(doc, tag, props = {}, ...children) {
@@ -114,10 +124,13 @@ class RisuHelperApp {
     this.chatList = [];
     this.referenceChat = null;
     this.referenceInfo = null;
+    // Manual opt-in 1-shot fetch log diagnostic attachment (never populated automatically).
+    this.attachedFetchLog = null;
     this.registeredIds = [];
     this.viewportHandler = null;
     this._lastLiveFocusSig = '';
     this._liveRefreshSeq = 0;
+    this._cardSeq = 0;
   }
 
   _focusSignature(ctx) {
@@ -403,6 +416,24 @@ class RisuHelperApp {
   /** Applies every applicable proposal of one reply as a single undo unit. */
   async applyAllProposals(msg) {
     if (this.busy || this.applyingGroup) return;
+    const initialTargets = this.applicableProposals(msg);
+    if (initialTargets.length === 0) return;
+    const deleteTargets = initialTargets.filter(item => DELETE_ACTIONS.has(item.proposal?.action));
+    const confirmedDeletes = new Set();
+    if (deleteTargets.length > 0) {
+      const names = deleteTargets.slice(0, 3).map(i => i.proposal?.title || i.preview?.label || i.proposal?.action).join(', ');
+      const suffix = deleteTargets.length > 3 ? ` 외 ${deleteTargets.length - 3}건` : '';
+      const confirmed = await this.askConfirm({
+        title: '삭제가 포함된 묶음을 적용할까요?',
+        message: `선택된 ${initialTargets.length}건 중 삭제 작업 ${deleteTargets.length}건(${names}${suffix})이 포함되어 있습니다.`,
+        detail: '실제 RisuAI 데이터에서 항목이 제거됩니다. 적용 직후에는 "묶음 되돌리기"로 복구할 수 있습니다.',
+        confirmLabel: '예, 모두 적용합니다',
+        tone: 'danger',
+      });
+      if (!confirmed || this.busy || this.applyingGroup) return;
+      for (const item of deleteTargets) confirmedDeletes.add(item);
+    }
+
     this.applyingGroup = true;
     const attempted = new Set();
     try {
@@ -411,7 +442,7 @@ class RisuHelperApp {
           const next = this.applicableProposals(msg).find(item => !attempted.has(item));
           if (!next) break;
           attempted.add(next);
-          await this.applyProposalItem(next);
+          await this.applyProposalItem(next, { skipDeleteConfirm: confirmedDeletes.has(next) });
         }
       });
       const appliedCount = [...attempted].filter(item => item.applied).length;
@@ -639,6 +670,7 @@ class RisuHelperApp {
 
   async close() {
     this._closeConfirm(false, { render: false });
+    this.attachedFetchLog = null;
     this.menuOpen = false;
     this.isOpen = false;
     this.tracker.onPanelClose();
@@ -750,6 +782,22 @@ class RisuHelperApp {
   }
 
   /**
+   * Explicitly reads and attaches the newest sanitized LLM fetch log (1-shot).
+   * Must ONLY be triggered by user click — never called automatically.
+   */
+  async attachLatestFetchLog() {
+    const res = await this.adapter.readLatestFetchLog({ index: 0 });
+    if (!res.ok) {
+      this.showToast(res.reason || '최근 요청 로그를 불러오지 못했습니다.');
+      return false;
+    }
+    this.attachedFetchLog = res.log;
+    this.menuOpen = false;
+    this.showToast(`🔍 최근 요청 로그(HTTP ${res.log.status ?? '?'})를 첨부했습니다. 다음 1회 전송 후 자동 해제됩니다.`);
+    return true;
+  }
+
+  /**
    * In free talk the expanded item of an open module editor is not a target, but the stale
    * tempModule warning still has to work: read what the DB holds for that item so it can be
    * compared with what the editor shows.
@@ -833,7 +881,10 @@ class RisuHelperApp {
     // chat/greeting screen for first messages), otherwise short previews when char summary is on.
     const wantGreetingText = wantsGreetingText(ctx, userInput);
     const wantFields = mentionedFields(userInput);
-    if (this.settings.includeCharSummary || this.settings.includeLoreSummary || wantGreetingText || wantFields.length > 0) {
+    const wantChatVars = /변수|scriptstate|호감도|affection|\bhp\b|\bmp\b|스탯|상태값|플래그|카운터|\bvar\b|getvar|setvar|초기화/i.test(String(userInput || ''));
+    const wantCharRegex = ctx.screen === 'scripts' || ctx.targetKind === 'char_regex' || /정규식|regex|customscript|상태창|hud/i.test(String(userInput || ''));
+    const wantCharSettings = /로어북\s*(?:설정|예산|토큰|깊이)|토큰\s*예산|tokenBudget|스캔\s*깊이|scanDepth|재귀\s*스캔|recursiveScanning|전체\s*단어|fullWordMatching|바이어스|로짓|bias|태그|tags/i.test(String(userInput || ''));
+    if (this.settings.includeCharSummary || this.settings.includeLoreSummary || wantGreetingText || wantFields.length > 0 || wantChatVars || wantCharRegex || wantCharSettings) {
       try {
         const { char } = await this.adapter.readActiveCharacter();
         if (char) {
@@ -864,6 +915,15 @@ class RisuHelperApp {
             if (fieldPlan.fields.length > 0) extra.fields = fieldPlan.fields;
             extra.fieldsShownFull = fieldPlan.shownFull;
           }
+          if (this.settings.includeCharSummary || wantChatVars) {
+            const chat = await getActiveChat();
+            if (chat && !isColdStoredChat(chat)) {
+              const cv = summarizeChatVariables(chat);
+              if (cv.variables.length > 0 || wantChatVars) {
+                extra.chatVariables = { ...cv, includeEmpty: wantChatVars };
+              }
+            }
+          }
           if (this.settings.includeCharSummary) {
             extra.charSummary = {
               name: char.name || '',
@@ -871,6 +931,21 @@ class RisuHelperApp {
               regexCount: char.customscript?.length ?? 0,
               hasLua: char.triggerscript?.[0]?.effect?.[0]?.type === 'triggerlua',
             };
+          }
+          if (wantCharSettings) {
+            extra.charSettings = {
+              loreSettings: char.loreSettings || null,
+              bias: Array.isArray(char.bias) ? char.bias.slice(0, 60) : [],
+              tags: Array.isArray(char.tags) ? char.tags.slice(0, 40) : [],
+            };
+          }
+          if (wantCharRegex && Array.isArray(char.customscript) && char.customscript.length > 0) {
+            extra.charRegexSummary = char.customscript.slice(0, 60).map((r, i) => ({
+              index: i,
+              comment: r?.comment || '',
+              type: r?.type || 'editdisplay',
+              in: String(r?.in ?? '').slice(0, 80),
+            }));
           }
           if (this.settings.includeLoreSummary && Array.isArray(char.globalLore)) {
             const summarized = summarizeLoreList(char.globalLore);
@@ -1026,6 +1101,19 @@ class RisuHelperApp {
         if (cfg) extra.configSummary = cfg;
       } catch {}
     }
+
+    if (/포팅|다른\s*캐릭터|캐릭터\s*목록|교차\s*포팅|port_from_character/i.test(String(userInput || ''))) {
+      try {
+        const res = await this.adapter.readCharacterCatalog();
+        if (!res.permissionDenied && res.catalog.length > 0) {
+          extra.characterCatalog = res.catalog;
+        }
+      } catch {}
+    }
+
+    if (this.attachedFetchLog) {
+      extra.attachedFetchLog = this.attachedFetchLog;
+    }
     return extra;
   }
 
@@ -1147,6 +1235,10 @@ class RisuHelperApp {
       if (assembled.issues && assembled.issues.length > 0) {
         throw new Error('프리셋 요청 점검에서 중단되었습니다:\n- ' + assembled.issues.join('\n- '));
       }
+      // 1-shot diagnostic log attachment: consume immediately once the request is actually sent
+      if (this.attachedFetchLog) {
+        this.attachedFetchLog = null;
+      }
 
       const rawReply = await callRisuModel(
         this.api,
@@ -1170,6 +1262,7 @@ class RisuHelperApp {
       for (const prop of parsed.proposals) {
         const preview = await this.adapter.previewProposal(prop, pinnedCtx);
         assistantMsg.proposals.push({
+          cardKey: `card-${++this._cardSeq}`,
           proposal: prop,
           preview,
           pinnedTarget: preview.target ? JSON.parse(JSON.stringify(preview.target)) : pinnedCtx,
@@ -1178,6 +1271,8 @@ class RisuHelperApp {
           undoId: null,
           bindToCurrentChat: Boolean(prop.bindToCurrentChat),
           useInCurrentChat: Boolean(prop.useInCurrentChat),
+          enableInCurrentChat: Boolean(prop.enableInCurrentChat),
+          enableGlobally: Boolean(prop.enableGlobally),
           destructiveConfirmed: false,
           statusMessage: '',
           unknownKeys: findUnknownProposalKeys(prop),
@@ -1313,13 +1408,26 @@ class RisuHelperApp {
     }
   }
 
-  async applyProposalItem(item) {
+  async applyProposalItem(item, { skipDeleteConfirm = false } = {}) {
+    if (DELETE_ACTIONS.has(item.proposal?.action) && !skipDeleteConfirm) {
+      const confirmed = await this.askConfirm({
+        title: '항목을 삭제할까요?',
+        message: `${this._quoteLabel(item.proposal?.title || item.preview?.label)} 삭제 제안을 적용합니다.`,
+        detail: '실제 RisuAI 데이터에서 항목이 제거됩니다. 적용 직후에는 "되돌리기"로 복구할 수 있습니다.',
+        confirmLabel: '예, 삭제합니다',
+        tone: 'danger',
+      });
+      if (!confirmed || item.applied) return;
+    }
+
     const pinnedTarget = item.pinnedTarget || item.preview?.target;
     const hostBinding = item.hostBinding || item.preview?.hostBinding || null;
     try {
       const res = await this.adapter.applyProposal(item.proposal, pinnedTarget, {
         bindToCurrentChat: item.bindToCurrentChat,
         useInCurrentChat: item.useInCurrentChat,
+        enableInCurrentChat: item.enableInCurrentChat,
+        enableGlobally: item.enableGlobally,
         hostBinding,
         requireDestructiveConfirm: Boolean(item.preview?.requiresConfirm),
         destructiveConfirmed: Boolean(item.destructiveConfirmed),
@@ -1577,11 +1685,29 @@ class RisuHelperApp {
     this.render();
   }
 
+  _formatRegexPreviewLines(rp) {
+    if (!rp) return '';
+    if (!rp.ok) return `오류: ${rp.error || '실행 실패'}`;
+    const lines = [`플래그: /${rp.flags || 'g'} · 매칭: ${rp.matchCount || 0}건${rp.sampleSource ? ` (${rp.sampleSource})` : ''}`];
+    if (rp.before) {
+      lines.push(`[입력 샘플]\n${rp.before}`);
+      lines.push(`[치환 결과]\n${rp.after}`);
+    } else {
+      lines.push('위 입력칸에 테스트 문장을 넣고 "실행 테스트"를 눌러 보세요.');
+    }
+    if (rp.cbsOutput !== undefined) {
+      lines.push(`[CBS 실행 미리보기 · 변수 미변경]\n${rp.cbsOutput}`);
+    }
+    return lines.join('\n\n');
+  }
+
   renderProposalCard(item) {
     const doc = this.doc;
     const { proposal, preview } = item;
     const isChatInputDraft = (item.pinnedTarget?.targetKind || preview.target?.targetKind) === 'chat_input' && proposal.action === 'replace_text';
+    const isDelete = DELETE_ACTIONS.has(proposal.action) || Boolean(preview.isDelete);
     const actionLabel = isChatInputDraft ? '유저 대필' : (ACTION_LABELS[proposal.action] || proposal.action);
+    const cardKey = item.cardKey || `card-${proposal.action}`;
     const bodyChildren = [];
 
     if (preview.label) {
@@ -1640,6 +1766,69 @@ class RisuHelperApp {
         }
       }
       bodyChildren.push(diffEl);
+
+      if (preview.regexPreview && preview.regexPreview.entry) {
+        const liveRp = item._regexLive || preview.regexPreview;
+        const summaryText = liveRp.before
+          ? `🧪 정규식 실행 결과 미리보기 (${liveRp.matched ? `매칭 ${liveRp.matchCount}건` : '현재 샘플 미매칭'} · ${liveRp.sampleSource || '샘플'})`
+          : '🧪 정규식 실행 결과 미리보기 (샘플 문장을 넣어 직접 테스트)';
+        const summaryEl = h(doc, 'summary', {}, summaryText);
+        const preEl = h(doc, 'pre', { class: 'rh-preview-pre' }, this._formatRegexPreviewLines(liveRp));
+        const sampleInput = h(doc, 'input', {
+          class: 'rh-input',
+          type: 'text',
+          style: 'flex:1;min-width:140px;',
+          placeholder: '테스트할 채팅 문장을 입력하세요',
+          value: liveRp.before || '',
+        });
+        const runRegexTest = async () => {
+          const sample = String(sampleInput.value ?? '');
+          const nextRp = previewRegexApplication(preview.regexPreview.entry, sample);
+          nextRp.sampleSource = '직접 입력';
+          nextRp.entry = preview.regexPreview.entry;
+          if (nextRp.ok && typeof this.api?.parseRisuChat === 'function') {
+            const cbsInput = nextRp.matched
+              ? nextRp.after
+              : (hasCbsSyntax(preview.regexPreview.entry.out) ? preview.regexPreview.entry.out : '');
+            if (cbsInput) {
+              const sim = await this.adapter.simulateRisuChat(cbsInput, { processRegex: false });
+              if (sim.ok) nextRp.cbsOutput = sim.output;
+            }
+          }
+          item._regexLive = nextRp;
+          summaryEl.textContent = nextRp.before
+            ? `🧪 정규식 실행 결과 미리보기 (${nextRp.matched ? `매칭 ${nextRp.matchCount}건` : '현재 샘플 미매칭'} · 직접 입력)`
+            : '🧪 정규식 실행 결과 미리보기 (샘플 문장을 넣어 직접 테스트)';
+          preEl.textContent = this._formatRegexPreviewLines(nextRp);
+        };
+        sampleInput.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            runRegexTest();
+          }
+        });
+        bodyChildren.push(
+          h(doc, 'details', { class: 'rh-preview-details', 'data-rh-details-key': `${cardKey}-regex` },
+            summaryEl,
+            h(doc, 'div', { class: 'rh-row', style: 'margin-top:6px;' },
+              sampleInput,
+              h(doc, 'button', { class: 'rh-btn', type: 'button', onclick: () => runRegexTest() }, '실행 테스트')
+            ),
+            preEl
+          )
+        );
+      }
+
+      if (preview.cbsPreview && preview.cbsPreview.ok) {
+        const cbsBody = preview.cbsPreview.output +
+          (preview.cbsPreview.truncated ? '\n\n... (앞 2,000자까지만 시뮬레이션됨)' : '');
+        bodyChildren.push(
+          h(doc, 'details', { class: 'rh-preview-details', 'data-rh-details-key': `${cardKey}-cbs` },
+            h(doc, 'summary', {}, '🧪 CBS 실행 결과 미리보기 (현재 채팅 기준 · 변수 미변경)'),
+            h(doc, 'pre', { class: 'rh-preview-pre' }, cbsBody || '(빈 출력)')
+          )
+        );
+      }
     }
 
     if (item.statusMessage) {
@@ -1679,6 +1868,26 @@ class RisuHelperApp {
             onchange: (e) => { item.useInCurrentChat = Boolean(e.target.checked); },
           }),
           '현재 채팅에서 바로 사용 (이 채팅의 첫 메시지를 새 항목으로 전환)'
+        )
+      );
+    }
+    if (preview.ok && preview.createsModule && !item.applied) {
+      leftControls.push(
+        h(doc, 'label', { style: 'font-size:11.5px;display:inline-flex;align-items:center;gap:4px;cursor:pointer;' },
+          h(doc, 'input', {
+            type: 'checkbox',
+            checked: item.enableInCurrentChat,
+            onchange: (e) => { item.enableInCurrentChat = Boolean(e.target.checked); },
+          }),
+          '현재 채팅에 바로 켜기'
+        ),
+        h(doc, 'label', { style: 'font-size:11.5px;display:inline-flex;align-items:center;gap:4px;cursor:pointer;' },
+          h(doc, 'input', {
+            type: 'checkbox',
+            checked: item.enableGlobally,
+            onchange: (e) => { item.enableGlobally = Boolean(e.target.checked); },
+          }),
+          '전역 활성화'
         )
       );
     }
@@ -1758,10 +1967,10 @@ class RisuHelperApp {
     } else {
       rightControls.push(
         h(doc, 'button', {
-          class: 'rh-btn primary',
+          class: isDelete ? 'rh-btn danger' : 'rh-btn primary',
           disabled: Boolean(preview.requiresConfirm && !item.destructiveConfirmed),
           onclick: () => this.applyProposalItem(item),
-        }, isChatInputDraft ? '💬 채팅에 추가' : '적용')
+        }, isChatInputDraft ? '💬 채팅에 추가' : (isDelete ? '삭제 적용' : '적용'))
       );
       if (isChatInputDraft && typeof this.api.sendChat === 'function') {
         rightControls.push(
@@ -1777,7 +1986,7 @@ class RisuHelperApp {
     return h(doc, 'div', { class: 'rh-proposal' },
       h(doc, 'div', { class: 'rh-proposal-head' },
         h(doc, 'span', { class: 'rh-proposal-title' }, proposal.title || preview.label || actionLabel),
-        h(doc, 'span', { class: 'rh-pill' }, actionLabel)
+        h(doc, 'span', { class: `rh-pill${isDelete ? ' danger' : ''}` }, actionLabel)
       ),
       h(doc, 'div', { class: 'rh-proposal-body' }, ...bodyChildren),
       h(doc, 'div', { class: 'rh-proposal-foot' },
@@ -2180,7 +2389,19 @@ class RisuHelperApp {
             await this.refreshContextSnapshot({ forceChatList: true });
             this.showToast(this.detectedContext ? `감지됨: ${this.detectedContext.labelText}` : '현재 포커스된 입력칸이 없습니다.');
           },
-        }, '커서 재감지')
+        }, '커서 재감지'),
+        typeof this.api?.getFetchLogs === 'function' && h(doc, 'button', {
+          class: `rh-btn${this.attachedFetchLog ? ' primary' : ''}`,
+          title: 'RisuAI의 가장 최근 LLM 요청/응답 로그 1건을 민감정보 마스킹 후 다음 질문에 1회만 첨부합니다 (자동 전송 안 함)',
+          onclick: async () => {
+            if (this.attachedFetchLog) {
+              this.attachedFetchLog = null;
+              this.showToast('첨부된 요청 로그를 해제했습니다.');
+            } else {
+              await this.attachLatestFetchLog();
+            }
+          },
+        }, this.attachedFetchLog ? '🔍 요청 로그 해제' : '🔍 최근 요청 로그 첨부')
       ),
       h(doc, 'div', { class: 'rh-row', style: 'justify-content:space-between;' },
         h(doc, 'span', { class: 'rh-menu-section-label' }, '전송 모드'),
@@ -2416,6 +2637,24 @@ class RisuHelperApp {
             title: '참조 채팅 연결을 해제합니다',
             onclick: () => {
               this.setReferenceChat(null);
+              this.render();
+            },
+          }, '해제')
+        )
+      );
+    }
+
+    if (this.attachedFetchLog) {
+      const log = this.attachedFetchLog;
+      const logLabel = `HTTP ${log.status ?? '?'}${log.url ? ` · ${log.url}` : ''}`;
+      contextBarChildren.push(
+        h(doc, 'div', { class: 'rh-ref-bar' },
+          h(doc, 'span', {}, `🔍 요청 로그 첨부됨 (1회 전송 후 자동 해제): ${logLabel}`),
+          h(doc, 'button', {
+            class: 'rh-btn ghost',
+            title: '첨부된 요청 로그를 해제합니다',
+            onclick: () => {
+              this.attachedFetchLog = null;
               this.render();
             },
           }, '해제')

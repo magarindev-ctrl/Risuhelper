@@ -23,7 +23,7 @@ function createMemoryStorage(initial = {}) {
  * @param {Function} opts.runLLMModel
  * @param {object} [opts.storage] shared pluginStorage (to simulate a reload)
  */
-async function bootBundle({ state, runLLMModel, storage = createMemoryStorage(), sendChat = null }) {
+async function bootBundle({ state, runLLMModel, storage = createMemoryStorage(), sendChat = null, extraApi = {} }) {
   const code = fs.readFileSync(BUNDLE_PATH, 'utf8');
   const doc = createMockDocument();
   const registeredButtons = [];
@@ -39,11 +39,12 @@ async function bootBundle({ state, runLLMModel, storage = createMemoryStorage(),
     async hideContainer() {},
     async getCharacter() { return structuredClone(state.character); },
     async setCharacter(c) { state.character = structuredClone(c); },
-    async getCurrentCharacterIndex() { return 0; },
+    async getCurrentCharacterIndex() { return Number.isInteger(state.charIndex) ? state.charIndex : 0; },
     async getCurrentChatIndex() { return Number.isInteger(state.chatIndex) ? state.chatIndex : 0; },
     async getRootDocument() { return null; },
     runLLMModel,
     ...(typeof sendChat === 'function' ? { sendChat } : {}),
+    ...extraApi,
   };
   const sandbox = {
     risuai, document: doc, console, setTimeout, clearTimeout, TextEncoder, TextDecoder, Uint8Array, Int32Array,

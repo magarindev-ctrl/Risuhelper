@@ -931,13 +931,278 @@ const EVAL_SCENARIOS = [
       return issues;
     },
   },
+
+  // 21. v0.5.0: Direct chat variable editing
+  {
+    id: 'chat-vars-update',
+    category: '채팅 변수',
+    title: '현재 채팅 변수(scriptstate) 수정 및 삭제 (update_chat_vars)',
+    prompt: '현재 채팅 변수에서 호감도(affection)를 50으로 올리고 hp를 80으로 바꿔 줘.',
+    expectMode: 'apply',
+    setup() {
+      return {
+        character: baseCharacter(),
+        db: baseDb(),
+        context: { screen: 'chat', targetKind: 'general', freeTalk: true, labelText: '자유대화', screenHint: '채팅 화면' },
+      };
+    },
+    goldenReply: '현재 채팅 변수를 수정하겠습니다.\n' + proposalFence({
+      action: 'update_chat_vars',
+      title: '호감도 50, HP 80 변경',
+      set: { affection: '50', hp: '80' },
+    }),
+    check({ proposals, state }) {
+      const issues = [];
+      if (!proposals.some(p => p.proposal.action === 'update_chat_vars')) {
+        issues.push(`update_chat_vars 기대, 실제: ${proposals.map(p => p.proposal.action).join(', ')}`);
+      }
+      const ss = state.character.chats[0].scriptstate || {};
+      if (String(ss.$affection) !== '50') issues.push(`$affection=50 기대, 실제: ${JSON.stringify(ss.$affection)}`);
+      if (String(ss.$hp) !== '80') issues.push(`$hp=80 기대, 실제: ${JSON.stringify(ss.$hp)}`);
+      return issues;
+    },
+  },
+
+  // 22. v0.5.0: Safe lorebook deletion
+  {
+    id: 'lorebook-delete-safe',
+    category: '삭제 · 안전 가드',
+    title: '캐릭터 로어북 특정 항목 삭제 (delete_lorebook)',
+    prompt: '캐릭터 로어북에서 "은빛 단검" 항목만 삭제해 줘.',
+    expectMode: 'apply',
+    setup() {
+      return {
+        character: baseCharacter(),
+        db: baseDb(),
+        context: { screen: 'lorebook', targetKind: 'char_lorebook', loreScope: 'character', loreIndex: null, labelText: '캐릭터 로어북' },
+      };
+    },
+    goldenReply: '은빛 단검 항목을 삭제합니다.\n' + proposalFence({
+      action: 'delete_lorebook',
+      title: '은빛 단검 로어북 삭제',
+      scope: 'character',
+      loreIndex: 3,
+    }),
+    check({ proposals, state }) {
+      const issues = [];
+      if (!proposals.some(p => p.proposal.action === 'delete_lorebook')) {
+        issues.push(`delete_lorebook 기대, 실제: ${proposals.map(p => p.proposal.action).join(', ')}`);
+      }
+      if (state.character.globalLore.length !== 3) {
+        issues.push(`로어북 3개 남아야 함, 실제: ${state.character.globalLore.length}개`);
+      }
+      if (state.character.globalLore.some(e => e.comment === '은빛 단검')) {
+        issues.push('"은빛 단검" 항목이 삭제되지 않음');
+      }
+      return issues;
+    },
+  },
+
+  // 23. v0.5.0: Full module package creation + immediate chat enable
+  {
+    id: 'module-create-full',
+    category: '모듈 신규 생성',
+    title: 'RPG 상태창 모듈(정규식+Lua+토글+임베딩) 통째로 생성 후 현재 채팅 활성화 (create_module)',
+    prompt: 'RPG 상태창 모듈 하나 새로 만들어서(정규식+Lua+토글+임베딩) 지금 채팅에 바로 켜줘. 모듈 이름은 "RPG 상태창"으로 해 줘.',
+    expectMode: 'apply',
+    setup() {
+      return {
+        character: baseCharacter(),
+        db: baseDb(),
+        context: { screen: 'chat', targetKind: 'general', freeTalk: true, labelText: '자유대화', screenHint: '채팅 화면' },
+      };
+    },
+    goldenReply: 'RPG 상태창 모듈을 패키지로 생성하고 현재 채팅에 활성화합니다.\n' + proposalFence({
+      action: 'create_module',
+      title: 'RPG 상태창 모듈 생성',
+      name: 'RPG 상태창',
+      description: 'HP/호감도 상태창 표시 모듈',
+      namespace: 'rpg-status-hud',
+      customModuleToggle: 'hud_on=상태창 표시=select=켜기,끄기',
+      backgroundEmbedding: '<style>.rpg-hud{padding:8px;border:1px solid #5c8dff;border-radius:8px;}</style>',
+      luaCode: 'function onOutput(triggerId)\n  local hp = getChatVar(triggerId, "hp")\n  if not hp then setChatVar(triggerId, "hp", "100") end\nend',
+      regex: [
+        { comment: '상태창 HTML', in: '\\[HP:(\\d+)\\]', out: '<div class="rpg-hud">HP: $1</div>', type: 'editdisplay', flag: 'g', ableFlag: true },
+      ],
+      lorebook: [
+        { comment: '상태창 출력 규칙', key: '', alwaysActive: true, insertorder: 100, content: '매 응답 끝에 [HP:숫자]를 출력한다.' },
+      ],
+      enableInCurrentChat: true,
+      enableGlobally: false,
+    }),
+    check({ proposals, state }) {
+      const issues = [];
+      if (!proposals.some(p => p.proposal.action === 'create_module')) {
+        issues.push(`create_module 기대, 실제: ${proposals.map(p => p.proposal.action).join(', ')}`);
+      }
+      if (state.db.modules.length !== 3) {
+        issues.push(`새 모듈 추가 실패 (모듈 수=${state.db.modules.length})`);
+        return issues;
+      }
+      const mod = state.db.modules[2];
+      if (!mod.name) issues.push('모듈 name 비어 있음');
+      if (!Array.isArray(mod.regex) || mod.regex.length === 0) issues.push('모듈 정규식 누락');
+      if (!Array.isArray(mod.trigger) || mod.trigger[0]?.effect?.[0]?.type !== 'triggerlua') issues.push('모듈 Lua 트리거 누락');
+      if (!mod.customModuleToggle) issues.push('모듈 커스텀 토글 누락');
+      if (!mod.backgroundEmbedding) issues.push('모듈 백그라운드 임베딩 누락');
+      const chatMods = state.character.chats[0].modules || [];
+      if (!chatMods.includes(mod.id)) issues.push('새 모듈이 현재 채팅(chat.modules)에 활성화되지 않음');
+      return issues;
+    },
+  },
+
+  // 24. v0.5.0: New character card creation
+  {
+    id: 'character-create-card',
+    category: '캐릭터 생성 · 포팅',
+    title: '새 캐릭터 카드 원클릭 생성 (create_character)',
+    prompt: '왕국 근위대 기사 "세라"라는 새 캐릭터 카드를 만들어 줘. 설명, 첫 메시지, 판타지 태그를 포함해 줘.',
+    expectMode: 'apply',
+    setup() {
+      const character = baseCharacter();
+      const db = baseDb();
+      db.characters = [deepClone(character)];
+      db.characterOrder = [character.chaId];
+      return {
+        character,
+        db,
+        context: { screen: 'chat', targetKind: 'general', freeTalk: true, labelText: '자유대화', screenHint: '채팅 화면' },
+      };
+    },
+    goldenReply: '새 캐릭터 "세라" 카드를 생성합니다.\n' + proposalFence({
+      action: 'create_character',
+      title: '새 캐릭터 세라 생성',
+      name: '세라',
+      desc: '왕국 근위대 소속의 성실한 여기사. 은빛 갑옷과 긴 청록색 머리카락이 특징이다.',
+      firstMessage: '세라가 검자루에 손을 얹은 채 정중히 경례했다. "근위대 소속 세라입니다. 오늘의 임무를 말씀해 주십시오."',
+      tags: ['판타지', '기사'],
+    }),
+    check({ proposals, state }) {
+      const issues = [];
+      if (!proposals.some(p => p.proposal.action === 'create_character')) {
+        issues.push(`create_character 기대, 실제: ${proposals.map(p => p.proposal.action).join(', ')}`);
+      }
+      if (!Array.isArray(state.db.characters) || state.db.characters.length !== 2) {
+        issues.push(`새 캐릭터 추가 실패 (길이=${state.db.characters?.length})`);
+        return issues;
+      }
+      const created = state.db.characters[1];
+      if (!/세라/.test(created.name || '')) issues.push(`이름에 "세라" 누락: ${created.name}`);
+      if (!created.desc?.trim()) issues.push('desc 누락');
+      if (!created.firstMessage?.trim()) issues.push('firstMessage 누락');
+      if (!state.db.characterOrder?.includes(created.chaId)) issues.push('characterOrder에 새 chaId 미등록');
+      return issues;
+    },
+  },
+
+  // 25. v0.5.0: Character advanced tuning (loreSettings + bias + tags)
+  {
+    id: 'char-settings-tune',
+    category: '캐릭터 생성 · 포팅',
+    title: '로어북 토큰 예산·스캔 깊이·로짓 바이어스 튜닝 (update_char_settings)',
+    prompt: '현재 캐릭터의 로어북 토큰 예산을 1600, 스캔 깊이를 6으로 올리고, "갑자기" 단어에 -20 로짓 바이어스를 추가해 줘.',
+    expectMode: 'apply',
+    setup() {
+      const character = baseCharacter();
+      character.loreSettings = { tokenBudget: 800, scanDepth: 2, recursiveScanning: false, fullWordMatching: false };
+      character.bias = [];
+      return {
+        character,
+        db: baseDb(),
+        context: { screen: 'character', targetKind: 'general', freeTalk: true, labelText: '자유대화', screenHint: '캐릭터 설정' },
+      };
+    },
+    goldenReply: '로어북 예산·스캔 깊이와 로짓 바이어스를 조정합니다.\n' + proposalFence({
+      action: 'update_char_settings',
+      title: '로어북 예산 1600 · 스캔 깊이 6 · 바이어스 추가',
+      loreSettings: { tokenBudget: 1600, scanDepth: 6 },
+      addBias: [['갑자기', -20]],
+    }),
+    check({ proposals, state }) {
+      const issues = [];
+      if (!proposals.some(p => p.proposal.action === 'update_char_settings')) {
+        issues.push(`update_char_settings 기대, 실제: ${proposals.map(p => p.proposal.action).join(', ')}`);
+      }
+      if (state.character.loreSettings?.tokenBudget !== 1600) {
+        issues.push(`tokenBudget 1600 기대, 실제: ${state.character.loreSettings?.tokenBudget}`);
+      }
+      if (state.character.loreSettings?.scanDepth !== 6) {
+        issues.push(`scanDepth 6 기대, 실제: ${state.character.loreSettings?.scanDepth}`);
+      }
+      const hasBias = (state.character.bias || []).some(([w, v]) => w === '갑자기' && v === -20);
+      if (!hasBias) issues.push(`bias ["갑자기", -20] 미반영: ${JSON.stringify(state.character.bias)}`);
+      return issues;
+    },
+  },
+
+  // 26. v0.5.0: Cross-character porting
+  {
+    id: 'char-port-cross',
+    category: '캐릭터 생성 · 포팅',
+    title: '다른 캐릭터의 로어북·정규식을 현재 캐릭터로 교차 포팅 (port_from_character)',
+    prompt: '다른 캐릭터 "마법사 카엘"의 로어북과 정규식을 현재 캐릭터로 포팅해 줘.',
+    expectMode: 'apply',
+    setup() {
+      const character = baseCharacter();
+      const sourceChar = {
+        type: 'character',
+        chaId: 'eval-char-source',
+        name: '마법사 카엘',
+        desc: '화염 마법사',
+        firstMessage: '불꽃이 타오른다.',
+        globalLore: [
+          { comment: '화염 마법 체계', key: '화염', secondkey: '', selective: false, alwaysActive: false, insertorder: 100, mode: 'normal', content: '마나를 연소해 화염을 일으킨다.' },
+        ],
+        customscript: [
+          { comment: '화염 효과', in: '\\*불꽃\\*', out: '<span class="fire">🔥</span>', type: 'editdisplay', flag: 'g', ableFlag: true },
+        ],
+        triggerscript: [],
+        chats: [{ id: 'src-chat-0', name: 'Chat 1', message: [], note: '', localLore: [] }],
+        chatPage: 0,
+      };
+      const db = baseDb();
+      db.characters = [deepClone(character), sourceChar];
+      db.characterOrder = [character.chaId, sourceChar.chaId];
+      return {
+        character,
+        db,
+        context: { screen: 'chat', targetKind: 'general', freeTalk: true, labelText: '자유대화', screenHint: '채팅 화면' },
+      };
+    },
+    goldenReply: '마법사 카엘의 로어북과 정규식을 현재 캐릭터로 포팅합니다.\n' + proposalFence({
+      action: 'port_from_character',
+      title: '마법사 카엘 로어북·정규식 포팅',
+      sourceCharIndex: 1,
+      items: ['lorebook', 'regex'],
+    }),
+    check({ proposals, state }) {
+      const issues = [];
+      if (!proposals.some(p => p.proposal.action === 'port_from_character' && p.proposal.sourceCharIndex === 1)) {
+        issues.push(`port_from_character(sourceCharIndex:1) 기대, 실제: ${proposals.map(p => p.proposal.action).join(', ')}`);
+      }
+      if (!state.character.globalLore.some(e => e.comment === '화염 마법 체계')) {
+        issues.push('화염 마법 체계 로어북이 포팅되지 않음');
+      }
+      if (!state.character.customscript.some(r => r.comment === '화염 효과')) {
+        issues.push('화염 효과 정규식이 포팅되지 않음');
+      }
+      return issues;
+    },
+  },
 ];
+
+const deepClone = (v) => (typeof structuredClone === 'function' ? structuredClone(v) : JSON.parse(JSON.stringify(v)));
 
 function createScenarioHost(setupRes, callModelFn) {
   const state = {
-    character: structuredClone(setupRes.character),
-    db: structuredClone(setupRes.db),
+    character: deepClone(setupRes.character),
+    db: deepClone(setupRes.db),
     chatIndex: Number.isInteger(setupRes.chatIndex) ? setupRes.chatIndex : (setupRes.character.chatPage || 0),
+  };
+  const syncActiveIntoDb = () => {
+    if (Array.isArray(state.db.characters) && state.db.characters[0]) {
+      state.db.characters[0] = deepClone(state.character);
+    }
   };
   const storage = createMemoryStorage();
   const capturedRequests = [];
@@ -945,38 +1210,50 @@ function createScenarioHost(setupRes, callModelFn) {
   const api = {
     pluginStorage: storage,
     async getColorScheme() { return { scheme: { type: 'dark' } }; },
-    async getCharacter() { return structuredClone(state.character); },
-    async setCharacter(c) { state.character = structuredClone(c); },
+    async getCharacter() { return deepClone(state.character); },
+    async setCharacter(c) {
+      state.character = deepClone(c);
+      syncActiveIntoDb();
+    },
     async getCurrentCharacterIndex() { return 0; },
     async getCurrentChatIndex() { return state.chatIndex; },
     async getChatFromIndex(_charIdx, chatIdx) {
       const chat = state.character.chats?.[chatIdx];
-      return chat ? structuredClone(chat) : null;
+      return chat ? deepClone(chat) : null;
     },
     async setChatToIndex(_charIdx, chatIdx, chat) {
       if (state.character.chats?.[chatIdx]) {
-        state.character.chats[chatIdx] = structuredClone(chat);
+        state.character.chats[chatIdx] = deepClone(chat);
+        syncActiveIntoDb();
       }
     },
     async getDatabase(includeOnly = 'all') {
-      if (includeOnly === 'all') return structuredClone(state.db);
+      if (includeOnly === 'all') return deepClone(state.db);
       const out = {};
       for (const k of includeOnly) {
-        if (Object.hasOwn(state.db, k)) out[k] = structuredClone(state.db[k]);
+        if (Object.hasOwn(state.db, k)) out[k] = deepClone(state.db[k]);
       }
       return out;
     },
     async setDatabase(next) {
       for (const [k, v] of Object.entries(next || {})) {
         if (k === 'plugins') continue;
-        state.db[k] = structuredClone(v);
+        state.db[k] = deepClone(v);
+      }
+      if (Array.isArray(next?.characters) && state.db.characters[0]) {
+        state.character = deepClone(state.db.characters[0]);
       }
     },
     async setDatabaseLite(next) {
       for (const [k, v] of Object.entries(next || {})) {
         if (k === 'plugins') continue;
-        state.db[k] = structuredClone(v);
+        state.db[k] = deepClone(v);
       }
+    },
+    async parseRisuChat(text) {
+      return String(text ?? '')
+        .replace(/\{\{char\}\}/g, state.character?.name || '')
+        .replace(/\{\{user\}\}/g, '유저');
     },
     async runLLMModel({ messages }) {
       capturedRequests.push(messages);
@@ -1054,13 +1331,13 @@ async function runEvalScenario(scenario, { callModel = null, dryRun = false, use
   };
 
   const { state, api, capturedRequests } = createScenarioHost(setupRes, invokeModel);
-  const initialSnapshot = structuredClone({ character: state.character, db: state.db });
+  const initialSnapshot = deepClone({ character: state.character, db: state.db });
   const app = new RisuHelperApp(api, createMockDocument());
   if (setupRes.maxContentChars) {
     app.settings.maxContentChars = setupRes.maxContentChars;
     app.adapter.maxContentChars = setupRes.maxContentChars;
   }
-  app.detectedContext = structuredClone(setupRes.context);
+  app.detectedContext = deepClone(setupRes.context);
   app.manualTarget = null;
   await app.refreshContextSnapshot({ forceChatList: true });
 
@@ -1155,7 +1432,7 @@ async function runEvalScenario(scenario, { callModel = null, dryRun = false, use
           const toApply = scenario.expectMode === 'apply_first' ? [proposals[0]] : proposals;
           for (const item of toApply) {
             if (item.preview?.requiresConfirm) item.destructiveConfirmed = true;
-            await app.applyProposalItem(item);
+            await app.applyProposalItem(item, { skipDeleteConfirm: true });
             if (!item.applied) {
               result.failureCategory ||= 'applyFailed';
               result.issues.push(`적용 실패(${item.proposal?.action}): ${item.statusMessage}`);

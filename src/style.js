@@ -405,6 +405,12 @@ html, body {
   color: var(--rh-accent);
 }
 
+.rh-pill.danger {
+  background: var(--rh-err-bg);
+  border-color: var(--rh-err-border);
+  color: var(--rh-err-text);
+}
+
 .rh-checks {
   display: flex;
   align-items: center;

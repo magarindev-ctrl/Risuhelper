@@ -6,7 +6,7 @@
 // still holds the value RisuHelper wrote, so later edits by the user are reported as conflicts
 // instead of being overwritten.
 
-const ID_KEYS = ['id', 'chatId'];
+const ID_KEYS = ['id', 'chatId', 'chaId'];
 const ANCHOR_KEYS = ['comment', 'key', 'name', 'title'];
 const BAD_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 

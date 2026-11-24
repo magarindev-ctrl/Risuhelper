@@ -6,10 +6,10 @@ import assert from 'node:assert/strict';
 import { EVAL_SCENARIOS, runEvalScenario, hasUnclosedProposalFence, formatUndoConflict } from '../tools/eval-scenarios.mjs';
 import { DEFAULT_MAX_TOKENS, parseArgs, summarizeResults, renderMarkdownReport } from '../tools/eval-real-model.mjs';
 
-test('eval harness defines 20 unique scenarios and every scenario passes with its golden reply (including undo)', async () => {
-  assert.equal(EVAL_SCENARIOS.length, 20);
+test('eval harness defines 26 unique scenarios and every scenario passes with its golden reply (including undo)', async () => {
+  assert.equal(EVAL_SCENARIOS.length, 26);
   const ids = new Set(EVAL_SCENARIOS.map(s => s.id));
-  assert.equal(ids.size, 20, 'all scenario IDs must be unique');
+  assert.equal(ids.size, 26, 'all scenario IDs must be unique');
 
   const results = [];
   for (const sc of EVAL_SCENARIOS) {
@@ -20,11 +20,11 @@ test('eval harness defines 20 unique scenarios and every scenario passes with it
   }
 
   const summary = summarizeResults(results, { mode: 'golden', provider: 'golden', model: '', maxTokens: DEFAULT_MAX_TOKENS, runs: 1, timestamp: '2026-01-01T00:00:00Z' });
-  assert.equal(summary.passed, 20);
-  assert.equal(summary.total, 20);
+  assert.equal(summary.passed, 26);
+  assert.equal(summary.total, 26);
   assert.equal(summary.passRate, 100);
   const md = renderMarkdownReport(results, summary);
-  assert.match(md, /20 \/ 20 \(100%\)/);
+  assert.match(md, /26 \/ 26 \(100%\)/);
 });
 
 test('eval harness catches over-eager edits, preview errors (real error text), truncation, empty replies, parse errors, unknown keys, and undo conflict formatting', async () => {
@@ -131,3 +131,122 @@ test('eval CLI defaults maxTokens to 8192 and supports --runs multi-run consiste
   assert.match(md, /시나리오별 일관성 \(2회 반복\)/);
   assert.match(md, /\| `focused-desc-patch` \| 포커스 · 부분 편집 \| 1\/2 \|/);
 });
+
+test('dist/risuhelper-eval.js boots in a Plugin v3 sandbox, runs all 20 scenarios via runLLMModel without touching real host data, and renders copyable Markdown report', async () => {
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const vm = await import('node:vm');
+  const { fileURLToPath } = await import('node:url');
+  const { createMockDocument } = await import('./helpers/mock-document.mjs');
+
+  const evalBundlePath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'dist', 'risuhelper-eval.js');
+  const code = fs.readFileSync(evalBundlePath, 'utf8');
+
+  const headerLines = code.split('\n').filter(l => l.startsWith('//@'));
+  assert.ok(Buffer.byteLength(headerLines.join('\n') + '\n', 'utf8') <= 500);
+  assert.ok(headerLines.some(l => l === '//@name risuhelper-eval'));
+  assert.ok(headerLines.some(l => l === '//@api 3.0'));
+
+  const doc = createMockDocument();
+  const registeredButtons = [];
+  const unregisteredIds = [];
+  let unloadFn = null;
+  let shown = false;
+  const calledModes = [];
+  const forbiddenTouch = (name) => () => { throw new Error(`Evaluator plugin must never call host.${name}`); };
+
+  // Match each scenario by user prompt and return its golden reply in RisuAI { type: 'success', result } format
+  const goldenByPrompt = new Map(EVAL_SCENARIOS.map(s => [s.prompt, s.goldenReply]));
+  const risuai = {
+    async getColorScheme() { return { scheme: { type: 'dark' } }; },
+    async getRuntimeInfo() { return { apiVersion: '3.0', platform: 'web', saveMethod: 'local' }; },
+    async registerButton(meta, cb) { registeredButtons.push({ meta, cb }); return { id: meta.id }; },
+    async registerSetting(_n, cb, _i, _t, id) { registeredButtons.push({ meta: { id, location: 'setting' }, cb }); return { id }; },
+    async unregisterUIPart(id) { unregisteredIds.push(id); },
+    async onUnload(fn) { unloadFn = fn; },
+    async showContainer() { shown = true; },
+    async hideContainer() { shown = false; },
+    async runLLMModel({ mode, messages }) {
+      calledModes.push(mode);
+      const userPrompt = messages[messages.length - 1]?.content || '';
+      const reply = goldenByPrompt.get(userPrompt);
+      assert.ok(reply, `unexpected prompt: ${userPrompt}`);
+      return { type: 'success', result: reply };
+    },
+    getCharacter: forbiddenTouch('getCharacter'),
+    setCharacter: forbiddenTouch('setCharacter'),
+    getDatabase: forbiddenTouch('getDatabase'),
+    setDatabase: forbiddenTouch('setDatabase'),
+    setDatabaseLite: forbiddenTouch('setDatabaseLite'),
+    setChatToIndex: forbiddenTouch('setChatToIndex'),
+    sendChat: forbiddenTouch('sendChat'),
+    getRootDocument: forbiddenTouch('getRootDocument'),
+  };
+
+  const sandbox = {
+    risuai,
+    Risuai: risuai,
+    document: doc,
+    console,
+    setTimeout,
+    clearTimeout,
+    TextEncoder,
+    TextDecoder,
+    Uint8Array,
+    Int32Array,
+    DataView,
+    URL,
+    Blob,
+    atob,
+    crypto,
+    DecompressionStream,
+    ReadableStream,
+    structuredClone,
+  };
+  sandbox.globalThis = sandbox;
+  vm.runInNewContext(code, sandbox, { filename: 'dist/risuhelper-eval.js' });
+  await new Promise(r => setTimeout(r, 30));
+
+  assert.equal(registeredButtons.length, 2);
+  await registeredButtons[0].cb(); // open modal
+  assert.equal(shown, true);
+
+  const findAll = (pred) => {
+    const out = [];
+    const walk = (n) => {
+      if (pred(n)) out.push(n);
+      for (const c of n.children || []) walk(c);
+    };
+    walk(doc.body);
+    return out;
+  };
+
+  // Switch model mode select to 'submodel'
+  const selects = findAll(n => n.tagName === 'SELECT');
+  selects[0].value = 'submodel';
+  for (const fn of selects[0].listeners.get('change') || []) fn({ target: selects[0] });
+
+  // Click '▶ 20문항 평가 시작'
+  const startBtn = findAll(n => n.tagName === 'BUTTON' && n.textContent.includes('평가 시작'))[0];
+  assert.ok(startBtn);
+  startBtn.click();
+
+  // Wait for all 26 virtual-host runs to complete
+  const started = Date.now();
+  while (Date.now() - started < 8000) {
+    if (doc.querySelector('.rhe-textarea')?.value) break;
+    await new Promise(r => setTimeout(r, 25));
+  }
+
+  assert.equal(calledModes.length, 26);
+  assert.ok(calledModes.every(m => m === 'submodel'));
+  const report = doc.querySelector('.rhe-textarea')?.value || '';
+  assert.match(report, /26 \/ 26 \(100%\)/);
+  assert.match(report, /modelMode=submodel/);
+  assert.match(report, /platform=web\/local/);
+
+  // Clean unload unregisters both UI parts
+  await unloadFn();
+  assert.equal(unregisteredIds.length, 2);
+});
+
