@@ -62,6 +62,7 @@ function createMockDocument() {
   const documentElement = new MockElement('html');
   documentElement.appendChild(head);
   documentElement.appendChild(body);
+  const docListeners = new Map();
 
   return {
     head,
@@ -70,6 +71,21 @@ function createMockDocument() {
     defaultView: null,
     createElement(tag) { return new MockElement(tag); },
     createTextNode(text) { return { textContent: String(text), children: [] }; },
+    addEventListener(type, fn) {
+      if (!docListeners.has(type)) docListeners.set(type, []);
+      docListeners.get(type).push(fn);
+    },
+    removeEventListener(type, fn) {
+      const list = docListeners.get(type);
+      if (!list) return;
+      const idx = list.indexOf(fn);
+      if (idx >= 0) list.splice(idx, 1);
+    },
+    dispatchEvent(type, event = {}) {
+      for (const fn of [...(docListeners.get(type) || [])]) {
+        fn({ stopPropagation() {}, preventDefault() {}, ...event });
+      }
+    },
     getElementById(id) {
       const walk = (node) => {
         for (const c of node.children || []) {

@@ -566,3 +566,33 @@ test('the confirmation popup survives panel re-renders and clicking outside it c
   assert.deepEqual(state.character.globalLore.map(e => e.comment), ['기존', 'A', 'B']);
   assert.equal(ui.buttons(/^되돌리기 \(1\)$/).length, 1);
 });
+
+test('undoing every card in a group individually clears the group undo and group commit buttons', async () => {
+  const { state, ui } = await bootWithAppliedGroup();
+  assert.equal(ui.buttons(/^묶음 되돌리기$/).length, 1);
+  assert.equal(ui.buttons(/^✓ 묶음 확정$/).length, 1);
+
+  await ui.clickConfirm(/^되돌리기$/, 0);
+  assert.equal(ui.buttons(/^묶음 되돌리기$/).length, 1, 'group controls remain while one card is still applied');
+
+  await ui.clickConfirm(/^되돌리기$/, 0);
+  assert.deepEqual(state.character.globalLore.map(e => e.comment), ['기존']);
+  assert.equal(ui.buttons(/^묶음 되돌리기$/).length, 0, 'no stale group undo button after last card is undone');
+  assert.equal(ui.buttons(/^✓ 묶음 확정$/).length, 0, 'no stale group commit button after last card is undone');
+  assert.equal(ui.buttons(/^되돌리기/).length, 0);
+});
+
+test('pressing Escape cancels an open confirmation popup without modifying data or undo history', async () => {
+  const { state, storage, ui } = await bootWithAppliedGroup();
+
+  await ui.click(/^✓ 변경 확정$/);
+  assert.ok(ui.dialog());
+
+  ui.doc.dispatchEvent('keydown', { key: 'Escape' });
+  await ui.tick(40);
+  assert.equal(ui.dialog(), null, 'Escape closes the confirmation popup');
+  assert.equal(undoRecordCount(storage), 2, 'undo history stays intact after Escape');
+  assert.deepEqual(state.character.globalLore.map(e => e.comment), ['기존', 'A', 'B']);
+  assert.equal(ui.buttons(/^되돌리기 \(1\)$/).length, 1);
+});
+

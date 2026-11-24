@@ -12057,7 +12057,18 @@ class RisuHelperApp {
   askConfirm({ title, message, detail = '', confirmLabel = '확인', tone = 'danger' }) {
     this._closeConfirm(false);
     return new Promise(resolve => {
-      this.confirmDialog = { title, message, detail, confirmLabel, tone, resolve };
+      let onKeyDown = null;
+      if (typeof this.doc.addEventListener === 'function') {
+        onKeyDown = (e) => {
+          if (e?.key === 'Escape') {
+            e.preventDefault?.();
+            e.stopPropagation?.();
+            this._closeConfirm(false);
+          }
+        };
+        this.doc.addEventListener('keydown', onKeyDown);
+      }
+      this.confirmDialog = { title, message, detail, confirmLabel, tone, resolve, onKeyDown };
       this.render();
     });
   }
@@ -12066,6 +12077,9 @@ class RisuHelperApp {
     const dialog = this.confirmDialog;
     if (!dialog) return;
     this.confirmDialog = null;
+    if (dialog.onKeyDown && typeof this.doc.removeEventListener === 'function') {
+      this.doc.removeEventListener('keydown', dialog.onKeyDown);
+    }
     if (render) this.render();
     dialog.resolve(Boolean(result));
   }
@@ -12100,14 +12114,14 @@ class RisuHelperApp {
 
   /** Global undo (header button): reverts the most recent change or group after confirmation. */
   async undoLatest() {
-    if (this.adapter.undoUnitCount() === 0) return;
+    if (this.applyingGroup || this.adapter.undoUnitCount() === 0) return;
     const confirmed = await this.askConfirm({
       title: '변경을 되돌릴까요?',
       message: `가장 최근 변경을 되돌립니다: ${this.adapter.peekUndoLabel()}`,
       detail: '적용 전 상태로 돌아갑니다. 적용 이후 직접 고친 부분은 덮어쓰지 않습니다.',
       confirmLabel: '예, 되돌립니다',
     });
-    if (!confirmed) return;
+    if (!confirmed || this.applyingGroup || this.adapter.undoUnitCount() === 0) return;
     try {
       const res = await this.adapter.undo();
       this.syncAppliedCards();
@@ -12121,15 +12135,20 @@ class RisuHelperApp {
   }
 
   async undoProposalGroup(msg) {
-    if (!msg.groupId) return;
+    if (!msg.groupId || this.applyingGroup) return;
     const count = this.adapter.undoStack.filter(r => r.groupId === msg.groupId).length;
+    if (count === 0) {
+      msg.groupId = null;
+      this.render();
+      return;
+    }
     const confirmed = await this.askConfirm({
       title: '묶음 변경을 되돌릴까요?',
       message: `이 답변에서 적용한 변경 ${count}건을 한꺼번에 되돌립니다.`,
       detail: '적용 전 상태로 돌아갑니다. 적용 이후 직접 고친 부분은 덮어쓰지 않습니다.',
       confirmLabel: '예, 되돌립니다',
     });
-    if (!confirmed || !msg.groupId) return;
+    if (!confirmed || !msg.groupId || this.applyingGroup) return;
     try {
       const res = await this.adapter.undoGroup(msg.groupId);
       this.syncAppliedCards();
@@ -12899,19 +12918,20 @@ class RisuHelperApp {
   }
 
   async undoProposalItem(item) {
-    if (!item.undoId) return;
+    if (!item.undoId || this.applyingGroup) return;
     const confirmed = await this.askConfirm({
       title: '변경을 되돌릴까요?',
       message: `${this._quoteLabel(item.proposal?.title || item.preview?.label)} 변경을 되돌립니다.`,
       detail: '적용 전 상태로 돌아갑니다. 적용 이후 직접 고친 부분은 덮어쓰지 않습니다.',
       confirmLabel: '예, 되돌립니다',
     });
-    if (!confirmed || !item.undoId) return;
+    if (!confirmed || !item.undoId || this.applyingGroup) return;
     try {
       const res = await this.adapter.undo(item.undoId);
       item.applied = false;
       item.undoId = null;
       item.statusMessage = `되돌림 완료 (${res.label})`;
+      this.syncAppliedCards();
       await this.refreshContextSnapshot();
 
       if (item.moduleDbSaved) {
@@ -14073,6 +14093,7 @@ class RisuHelperApp {
   }
 
   async destroy() {
+    this._closeConfirm(false, { render: false });
     clearTimeout(this.toastTimer);
     if (this._undoSaveTimer) {
       await this.flushUndoState();
