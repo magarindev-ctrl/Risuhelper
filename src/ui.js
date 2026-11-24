@@ -93,6 +93,7 @@ class RisuHelperApp {
     this.isOpen = false;
     this.isDocked = false;
     this.syncPanelMode();
+    this.menuOpen = false;
     this.settingsOpen = false;
     this.presetPanelOpen = false;
     this.presetState = newPresetState();
@@ -638,6 +639,7 @@ class RisuHelperApp {
 
   async close() {
     this._closeConfirm(false, { render: false });
+    this.menuOpen = false;
     this.isOpen = false;
     this.tracker.onPanelClose();
     if (this.isDocked) {
@@ -1460,8 +1462,13 @@ class RisuHelperApp {
   }
 
   buildTargetPickerOptions() {
+    const autoLabel = this.detectedContext
+      ? (this.detectedContext.freeTalk && this.detectedContext.screenHint
+          ? `${this.detectedContext.labelText} · ${this.detectedContext.screenHint}`
+          : this.detectedContext.labelText)
+      : '자유대화';
     const opts = [
-      { value: 'auto', label: `📍 자동감지: ${this.detectedContext ? this.detectedContext.labelText : '자유대화'}` },
+      { value: 'auto', label: `📍 자동감지: ${autoLabel}` },
       { value: 'chat_input:', label: '채팅 · 입력창 (유저 대필)' },
       { value: 'char_field:desc', label: '캐릭터 · 설명 (Description)' },
       { value: 'char_field:additionalText', label: '캐릭터 · 추가 디스크립션' },
@@ -2119,54 +2126,33 @@ class RisuHelperApp {
     );
   }
 
-  render() {
+  renderMenuPanel(ctx, flavor) {
     const doc = this.doc;
-    this._streamingBody = null;
-    const prevInput = doc.querySelector('.rh-composer-input')?.value ?? '';
-    const prevPresetScroll = doc.querySelector('.rh-preset-body')?.scrollTop ?? null;
-    const prevChatScroll = doc.querySelector('.rh-chat')?.scrollTop ?? null;
-    const prevDetailsOpen = new Map();
-    if (typeof doc.querySelectorAll === 'function') {
-      for (const el of doc.querySelectorAll('details[data-rh-details-key]')) {
-        const key = el.getAttribute('data-rh-details-key');
-        if (key) prevDetailsOpen.set(key, Boolean(el.open));
-      }
-    }
-    doc.body.textContent = '';
+    const otherChats = this.chatList.filter(c => !c.current);
+    const refIndex = this.referenceChat?.index ?? null;
+    const statusText = this.isDocked
+      ? `RisuHelper v${VERSION} · 실시간 도킹 · ${flavor.name}`
+      : `RisuHelper v${VERSION} · ${flavor.name} · ${this.tracker.enabled ? '커서 자동감지 활성' : '수동 대상 모드'}`;
 
-    const ctx = this.getEffectiveContext();
-    const flavor = this.adapter.detectHostFlavor();
-    const pickerOpts = this.buildTargetPickerOptions();
-    const subPicker = this.renderSubItemPicker(ctx);
-    const quickPrompts = getQuickPromptsForContext(ctx);
-
-    const subtitleEl = this.isDocked
-      ? h(doc, 'div', { class: 'rh-subtitle' },
-          h(doc, 'span', { class: 'rh-live-dot' }),
-          `실시간 도킹 · ${flavor.name}`
-        )
-      : h(doc, 'div', { class: 'rh-subtitle' }, `${flavor.name} · ${this.tracker.enabled ? '커서 자동감지 활성' : '수동 대상 모드'}`);
-
-    const header = h(doc, 'header', { class: 'rh-header' },
-      h(doc, 'div', { class: 'rh-header-top' },
-        h(doc, 'div', { class: 'rh-brand' },
-          h(doc, 'div', { class: 'rh-logo' }, 'RH'),
-          h(doc, 'div', { class: 'rh-title-wrap' },
-            h(doc, 'div', { class: 'rh-title' }, `RisuHelper v${VERSION}`),
-            subtitleEl
-          )
+    const children = [
+      h(doc, 'div', { class: 'rh-row', style: 'justify-content:space-between;' },
+        h(doc, 'div', { class: 'rh-subtitle', style: 'display:flex;align-items:center;' },
+          this.isDocked && h(doc, 'span', { class: 'rh-live-dot' }),
+          statusText
         ),
-        h(doc, 'button', {
-          class: 'rh-btn',
-          onclick: () => this.close(),
-        }, '닫기')
+        h(doc, 'span', { class: 'rh-pill' },
+          this.presetState.mode === 'preset'
+            ? (this.presetState.preset ? `프리셋: ${this.presetState.preset.name}` : '프리셋 미설정')
+            : `모델: ${this.settings.modelMode}`
+        )
       ),
       h(doc, 'div', { class: 'rh-actions' },
         h(doc, 'button', {
-          class: `rh-btn${this.presetPanelOpen ? ' primary' : ' ghost'}`,
+          class: `rh-btn${this.presetPanelOpen ? ' primary' : ''}`,
           onclick: async () => {
             this.presetPanelOpen = !this.presetPanelOpen;
             if (this.presetPanelOpen) {
+              this.menuOpen = false;
               this.settingsOpen = false;
               if (this.presetState.pane === 'preview') await this.refreshPresetPreview();
             }
@@ -2174,47 +2160,30 @@ class RisuHelperApp {
           },
         }, this.presetState.mode === 'preset' ? '프리셋 · 적용' : '프리셋 · 직접'),
         h(doc, 'button', {
-          class: `rh-btn${this.settingsOpen ? ' primary' : ' ghost'}`,
-          onclick: () => {
-            this.settingsOpen = !this.settingsOpen;
-            if (this.settingsOpen) this.presetPanelOpen = false;
-            this.render();
-          },
-        }, '설정'),
-        h(doc, 'button', {
-          class: `rh-btn${this.isDocked ? ' primary' : ' ghost rh-hide-mobile'}`,
+          class: `rh-btn${this.isDocked ? ' primary' : ' rh-hide-mobile'}`,
           onclick: () => this.toggleDockMode(),
         }, this.isDocked ? '📌 도킹 해제' : '📌 오른쪽 도킹'),
-        h(doc, 'button', {
-          class: 'rh-btn ghost',
-          onclick: () => {
-            this.messages = [];
-            this.render();
-          },
-        }, '대화 비우기'),
         !this.isDocked && h(doc, 'button', {
-          class: 'rh-btn ghost rh-hide-mobile',
+          class: 'rh-btn rh-hide-mobile',
           onclick: async () => {
             this.settings.wideMode = !this.settings.wideMode;
             await this.saveSettings();
             this.render();
           },
         }, this.settings.wideMode ? '좁게' : '넓게'),
-        this.adapter.undoUnitCount() > 0 && h(doc, 'button', {
+        h(doc, 'button', {
           class: 'rh-btn',
-          title: `다음에 되돌릴 변경: ${this.adapter.peekUndoLabel()}`,
-          onclick: () => this.undoLatest(),
-        }, `되돌리기 (${this.adapter.undoUnitCount()})`),
-        this.adapter.undoUnitCount() > 0 && h(doc, 'button', {
-          class: 'rh-btn ok',
-          title: '적용한 변경을 모두 확정하고 되돌리기 기록을 비웁니다 (실수 롤백 방지)',
-          onclick: () => this.commitUndoHistory(),
-        }, '✓ 변경 확정')
-      )
-    );
-
-    const contextBarChildren = [
+          onclick: async () => {
+            if (!this.tracker.enabled) await this.tracker.start();
+            await this.tracker.scanNow({ force: true });
+            this.manualTarget = null;
+            await this.refreshContextSnapshot({ forceChatList: true });
+            this.showToast(this.detectedContext ? `감지됨: ${this.detectedContext.labelText}` : '현재 포커스된 입력칸이 없습니다.');
+          },
+        }, '커서 재감지')
+      ),
       h(doc, 'div', { class: 'rh-row', style: 'justify-content:space-between;' },
+        h(doc, 'span', { class: 'rh-menu-section-label' }, '전송 모드'),
         h(doc, 'div', { class: 'rh-seg' },
           h(doc, 'button', {
             class: `rh-seg-btn${this.presetState.mode === 'direct' ? ' active' : ''}`,
@@ -2230,6 +2199,7 @@ class RisuHelperApp {
               this.presetState.mode = 'preset';
               await this.savePresetState();
               if (!this.presetState.preset) {
+                this.menuOpen = false;
                 this.presetPanelOpen = true;
                 this.showToast('프리셋 파일을 먼저 가져오세요.');
               } else {
@@ -2237,41 +2207,8 @@ class RisuHelperApp {
               }
             },
           }, '프리셋 적용')
-        ),
-        h(doc, 'span', { class: 'rh-pill' },
-          this.presetState.mode === 'preset'
-            ? (this.presetState.preset ? `프리셋: ${this.presetState.preset.name}` : '프리셋 미설정')
-            : `모델: ${this.settings.modelMode}`
         )
       ),
-      h(doc, 'div', { class: 'rh-row' },
-        h(doc, 'select', {
-          class: 'rh-select',
-          onchange: (e) => this.onSelectTarget(e.target.value),
-        },
-          ...pickerOpts.map(o => h(doc, 'option', { value: o.value, selected: o.value === this.currentPickerValue() }, o.label))
-        ),
-        h(doc, 'button', {
-          class: 'rh-btn',
-          onclick: async () => {
-            if (!this.tracker.enabled) await this.tracker.start();
-            await this.tracker.scanNow({ force: true });
-            this.manualTarget = null;
-            await this.refreshContextSnapshot({ forceChatList: true });
-            this.showToast(this.detectedContext ? `감지됨: ${this.detectedContext.labelText}` : '현재 포커스된 입력칸이 없습니다.');
-          },
-        }, '커서 재감지')
-      ),
-    ];
-
-    if (subPicker) {
-      const rows = Array.isArray(subPicker) ? subPicker : [subPicker];
-      for (const pickerEl of rows) {
-        if (pickerEl) contextBarChildren.push(h(doc, 'div', { class: 'rh-row' }, pickerEl));
-      }
-    }
-
-    contextBarChildren.push(
       h(doc, 'div', { class: 'rh-checks' },
         h(doc, 'label', {},
           h(doc, 'input', {
@@ -2297,13 +2234,11 @@ class RisuHelperApp {
           }),
           '현재 설정값 참고'
         )
-      )
-    );
+      ),
+    ];
 
-    const otherChats = this.chatList.filter(c => !c.current);
     if (this.chatList.length > 1 && otherChats.length > 0) {
-      const refIndex = this.referenceChat?.index ?? null;
-      contextBarChildren.push(
+      children.push(
         h(doc, 'div', { class: 'rh-row' },
           h(doc, 'select', {
             class: 'rh-select rh-ref-chat',
@@ -2333,16 +2268,16 @@ class RisuHelperApp {
               : '') +
             ' 다 쓰면 "없음"으로 되돌리세요.';
         }
-        contextBarChildren.push(
+        children.push(
           h(doc, 'div', { class: info?.error || info?.omitted > 0 ? 'rh-banner' : '', style: info?.error || info?.omitted > 0 ? '' : 'font-size:11.5px;color:var(--rh-muted);' }, line)
         );
       }
     }
 
     if (ctx.freeTalk) {
-      contextBarChildren.push(
-        h(doc, 'div', { style: 'font-size:11.5px;color:var(--rh-muted);' },
-          '자유대화 — 입력칸을 선택하지 않은 상태입니다. 무엇을 고칠지 말로 요청하면 됩니다. 특정 칸만 다루려면 그 칸을 클릭하거나 위에서 대상을 고르세요.' +
+      children.push(
+        h(doc, 'div', { style: 'font-size:11px;color:var(--rh-muted);line-height:1.4;' },
+          '자유대화 — 입력칸을 선택하지 않은 상태입니다. 무엇을 고칠지 말로 요청하거나, 특정 칸을 클릭·선택해 편집하세요.' +
           (ctx.screenHint ? ` (화면 힌트: ${ctx.screenHint})` : ''))
       );
     } else if (ctx.targetKind === 'chat_input' && this.activeSnapshot?.ok && this.activeSnapshot.chatContext) {
@@ -2350,9 +2285,141 @@ class RisuHelperApp {
       const turnSummary = cc.messageCount > 0
         ? `현재 채팅 최근 ${cc.transcript.length}/${cc.messageCount}개 메시지(${cc.transcriptChars.toLocaleString()}자)${cc.omittedMessages > 0 ? (cc.memorySummaries.length > 0 ? ' + 기존 메모리 요약' : ' · 앞부분 생략') : ''}`
         : '현재 채팅 첫 메시지 기준';
+      children.push(
+        h(doc, 'div', { style: 'font-size:11px;color:var(--rh-muted);line-height:1.4;' },
+          `💬 유저 대필 모드 — ${turnSummary}를 참고해 다음 유저 응답을 작성합니다. (미전송 초안은 여기에 붙여넣어 다듬기를 요청하세요)`)
+      );
+    }
+
+    return h(doc, 'div', { class: 'rh-menu-panel' }, ...children);
+  }
+
+  render() {
+    const doc = this.doc;
+    this._streamingBody = null;
+    const prevInput = doc.querySelector('.rh-composer-input')?.value ?? '';
+    const prevPresetScroll = doc.querySelector('.rh-preset-body')?.scrollTop ?? null;
+    const prevChatScroll = doc.querySelector('.rh-chat')?.scrollTop ?? null;
+    const prevDetailsOpen = new Map();
+    if (typeof doc.querySelectorAll === 'function') {
+      for (const el of doc.querySelectorAll('details[data-rh-details-key]')) {
+        const key = el.getAttribute('data-rh-details-key');
+        if (key) prevDetailsOpen.set(key, Boolean(el.open));
+      }
+    }
+    doc.body.textContent = '';
+
+    const ctx = this.getEffectiveContext();
+    const flavor = this.adapter.detectHostFlavor();
+    const pickerOpts = this.buildTargetPickerOptions();
+    const subPicker = this.renderSubItemPicker(ctx);
+    const quickPrompts = getQuickPromptsForContext(ctx);
+
+    const statusTooltip = this.isDocked
+      ? `RisuHelper v${VERSION} · 실시간 도킹 · ${flavor.name}`
+      : `RisuHelper v${VERSION} · ${flavor.name} · ${this.tracker.enabled ? '커서 자동감지 활성' : '수동 대상 모드'}`;
+    const hasUndo = this.adapter.undoUnitCount() > 0;
+
+    const header = h(doc, 'header', { class: 'rh-header' },
+      h(doc, 'div', { class: 'rh-header-top' },
+        h(doc, 'div', { class: 'rh-brand', title: statusTooltip },
+          h(doc, 'button', {
+            class: `rh-btn rh-menu-btn${this.menuOpen ? ' primary' : ' ghost'}`,
+            'aria-label': '메뉴',
+            title: '메뉴 (프리셋 · 도킹 · 커서 재감지 · 참고 옵션 · 참조 채팅)',
+            onclick: () => {
+              this.menuOpen = !this.menuOpen;
+              if (this.menuOpen) {
+                this.settingsOpen = false;
+                this.presetPanelOpen = false;
+              }
+              this.render();
+            },
+          }, '☰'),
+          h(doc, 'div', { class: 'rh-logo' }, 'RH'),
+          h(doc, 'div', { class: 'rh-title-wrap' },
+            this.isDocked && h(doc, 'span', { class: 'rh-live-dot', style: 'margin-right:0;' }),
+            h(doc, 'div', { class: 'rh-title' }, 'RisuHelper')
+          )
+        ),
+        h(doc, 'div', { class: 'rh-header-controls' },
+          h(doc, 'button', {
+            class: `rh-btn${this.settingsOpen ? ' primary' : ' ghost'}`,
+            onclick: () => {
+              this.settingsOpen = !this.settingsOpen;
+              if (this.settingsOpen) {
+                this.menuOpen = false;
+                this.presetPanelOpen = false;
+              }
+              this.render();
+            },
+          }, '설정'),
+          h(doc, 'button', {
+            class: 'rh-btn ghost',
+            onclick: () => {
+              this.messages = [];
+              this.render();
+            },
+          }, '대화 비우기'),
+          h(doc, 'button', {
+            class: 'rh-btn',
+            onclick: () => this.close(),
+          }, '닫기')
+        )
+      ),
+      hasUndo && h(doc, 'div', { class: 'rh-actions' },
+        h(doc, 'button', {
+          class: 'rh-btn',
+          title: `다음에 되돌릴 변경: ${this.adapter.peekUndoLabel()}`,
+          onclick: () => this.undoLatest(),
+        }, `되돌리기 (${this.adapter.undoUnitCount()})`),
+        h(doc, 'button', {
+          class: 'rh-btn ok',
+          title: '적용한 변경을 모두 확정하고 되돌리기 기록을 비웁니다 (실수 롤백 방지)',
+          onclick: () => this.commitUndoHistory(),
+        }, '✓ 변경 확정')
+      )
+    );
+
+    const contextBarChildren = [
+      h(doc, 'div', { class: 'rh-row' },
+        h(doc, 'select', {
+          class: 'rh-select rh-target-select',
+          onchange: (e) => this.onSelectTarget(e.target.value),
+        },
+          ...pickerOpts.map(o => h(doc, 'option', { value: o.value, selected: o.value === this.currentPickerValue() }, o.label))
+        )
+      ),
+    ];
+
+    if (subPicker) {
+      const rows = Array.isArray(subPicker) ? subPicker : [subPicker];
+      for (const pickerEl of rows) {
+        if (pickerEl) contextBarChildren.push(h(doc, 'div', { class: 'rh-row' }, pickerEl));
+      }
+    }
+
+    // When a reference chat is attached, show a slim 1-line dismissible indicator even while the menu is closed.
+    if (this.referenceChat) {
+      const refIdx = this.referenceChat.index;
+      const info = this.referenceInfo?.index === refIdx ? this.referenceInfo : null;
+      const refDetail = info?.error
+        ? `오류: ${info.error}`
+        : info
+          ? `메시지 ${info.sent}/${info.messageCount}개${info.omitted > 0 ? (info.hasMemory ? ' · 메모리 보충' : ' · 일부 생략') : ''}`
+          : '요청 시 함께 전송';
       contextBarChildren.push(
-        h(doc, 'div', { style: 'font-size:11.5px;color:var(--rh-muted);' },
-          `💬 유저 대필 모드 — ${turnSummary}를 참고해 다음 유저 응답을 작성합니다. (본체 입력칸의 미전송 초안은 API 제한으로 읽지 못하므로, 초안을 다듬을 땐 여기에 붙여넣어 요청하세요)`)
+        h(doc, 'div', { class: info?.error ? 'rh-banner error' : 'rh-ref-bar' },
+          h(doc, 'span', {}, `📎 참조 채팅: ${refIdx + 1}번 · ${this.referenceChat.name} (${refDetail})`),
+          h(doc, 'button', {
+            class: 'rh-btn ghost',
+            title: '참조 채팅 연결을 해제합니다',
+            onclick: () => {
+              this.setReferenceChat(null);
+              this.render();
+            },
+          }, '해제')
+        )
       );
     }
 
@@ -2593,9 +2660,10 @@ class RisuHelperApp {
       onclick: (e) => e.stopPropagation(),
     },
       header,
+      h(doc, 'div', { class: 'rh-context-bar' }, ...contextBarChildren),
+      this.menuOpen && this.renderMenuPanel(ctx, flavor),
       this.presetPanelOpen && renderPresetPanel(this),
       this.settingsOpen && this.renderSettingsPanel(),
-      h(doc, 'div', { class: 'rh-context-bar' }, ...contextBarChildren),
       chatEl,
       composer,
       this.confirmDialog && this.renderConfirmDialog()

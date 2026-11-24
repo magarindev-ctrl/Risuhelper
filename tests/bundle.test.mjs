@@ -299,16 +299,22 @@ test('dist/risuhelper.js preserves preset panel scrollTop on toggle click and re
     return out;
   };
 
-  // Verify responsive header has .rh-header-top with Close and .rh-actions with Clear Chat
+  // Verify compact single-line header keeps ☰, 설정, 대화 비우기, 닫기
   const headerTop = doc.querySelector('.rh-header-top');
   assert.ok(headerTop, 'header should have dedicated .rh-header-top row');
-  const actionsBar = doc.querySelector('.rh-actions');
-  assert.ok(actionsBar, 'header should have wrapping .rh-actions toolbar');
+  const headerControls = doc.querySelector('.rh-header-controls');
+  assert.ok(headerControls, 'header should have compact .rh-header-controls group');
+  assert.ok(findAll(n => n.tagName === 'BUTTON' && n.textContent === '☰').length === 1);
+  assert.ok(findAll(n => n.tagName === 'BUTTON' && n.textContent === '설정').length === 1);
   assert.ok(findAll(n => n.tagName === 'BUTTON' && n.textContent === '대화 비우기').length === 1);
   assert.ok(findAll(n => n.tagName === 'BUTTON' && n.textContent === '닫기').length === 1);
 
-  // Open preset panel -> toggles pane
+  // Open hamburger menu -> then open preset panel
+  const menuBtn = findAll(n => n.tagName === 'BUTTON' && n.textContent === '☰')[0];
+  menuBtn.click();
+  await new Promise(r => setTimeout(r, 20));
   const presetBtn = findAll(n => n.tagName === 'BUTTON' && n.textContent.startsWith('프리셋'))[0];
+  assert.ok(presetBtn, '프리셋 button should be inside ☰ menu');
   presetBtn.click();
   await new Promise(r => setTimeout(r, 20));
 
@@ -329,11 +335,18 @@ test('dist/risuhelper.js preserves preset panel scrollTop on toggle click and re
   const saved = JSON.parse(storage.get('risuhelper_preset_v1'));
   assert.equal(saved.values.toggle_t1, '1');
 
-  // Even a full re-render (e.g. clicking '넓게') preserves .rh-preset-body.scrollTop
-  const wideBtn = findAll(n => n.tagName === 'BUTTON' && (n.textContent === '넓게' || n.textContent === '좁게'))[0];
-  wideBtn.click();
+  // Even a full re-render (e.g. clicking '대화 비우기') preserves .rh-preset-body.scrollTop
+  const clearBtn = findAll(n => n.tagName === 'BUTTON' && n.textContent === '대화 비우기')[0];
+  clearBtn.click();
   await new Promise(r => setTimeout(r, 20));
   assert.equal(doc.querySelector('.rh-preset-body').scrollTop, 240);
+
+  // Clicking '접기' inside preset panel collapses it cleanly
+  const collapseBtn = findAll(n => n.tagName === 'BUTTON' && n.textContent === '접기')[0];
+  assert.ok(collapseBtn, 'preset panel should provide a 접기 button');
+  collapseBtn.click();
+  await new Promise(r => setTimeout(r, 20));
+  assert.equal(doc.querySelector('.rh-preset-body'), null);
 });
 
 test('dist/risuhelper.js supports opt-in PC right-side docking with live real-time DOM focus updates and clean restore', async () => {
@@ -798,8 +811,16 @@ test('dist/risuhelper.js treats an expanded module entry without a cursor as a f
   // Nothing has the cursor, so the expanded module entry is a hint, not the target: free talk.
   assert.equal(selects.length, 1, 'without a selected input only the target select is shown');
   const autoOpt = selects[0].children.find(o => o.value === 'auto');
-  assert.match(autoOpt.textContent, /자유대화/);
+  assert.match(autoOpt.textContent, /자유대화 · 모듈 로어북 #2/);
+
+  // Opening the hamburger menu also displays the full free-talk screen hint.
+  const menuBtn = (() => { let found = null; const w = (n) => { if (n.tagName === 'BUTTON' && n.textContent === '☰') found = n; for (const c of n.children || []) w(c); }; w(doc.body); return found; })();
+  assert.ok(menuBtn, 'hamburger menu button should exist');
+  menuBtn.click();
+  await new Promise(r => setTimeout(r, 20));
   assert.match(doc.body.textContent, /화면 힌트: 모듈 로어북 #2/);
+  menuBtn.click();
+  await new Promise(r => setTimeout(r, 20));
 
   // The model still learns which module is open and gets the expanded entry's real text,
   // so it can address it explicitly (scope module + moduleIndex + loreIndex).

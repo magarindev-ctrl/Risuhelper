@@ -82,11 +82,17 @@ test('the reference chat picker keeps a chat attached to every request until it 
   const prompts = [];
   const ui = await bootBundle({ state, runLLMModel: async ({ messages }) => { prompts.push(messages[0].content); return '네.'; } });
 
+  await ui.click('☰');
   await ui.selectByClass('rh-ref-chat', '0');
   await ui.send('여기까지 무슨 일이 있었는지 정리해줘');
   assert.match(prompts[0], /은빛-늑대/);
-  assert.match(ui.bodyText(), /메시지 2개 중 2개/, 'the panel says how much of the reference chat was sent');
+  assert.match(ui.bodyText(), /메시지 2개 중 2개/, 'the menu panel says how much of the reference chat was sent');
 
+  // Closing the menu still shows the slim 1-line reference bar with a quick detach button
+  await ui.click('☰');
+  assert.match(ui.bodyText(), /참조 채팅: 1번 · 1부 모험 \(메시지 2\/2개\)/);
+
+  await ui.click('☰');
   await ui.selectByClass('rh-ref-chat', '');
   await ui.send('고마워');
   assert.doesNotMatch(prompts[1], /은빛-늑대/);
@@ -99,6 +105,8 @@ test('a chat named in the request stays selected as the reference for follow-up 
   await ui.send('1번 채팅 내용 알려줘');
   await ui.send('그럼 그걸 세 줄로 줄여줘');
   assert.match(prompts[1], /은빛-늑대/, 'the follow-up still carries the reference chat');
+  assert.match(ui.bodyText(), /참조 채팅: 1번 · 1부 모험/, 'slim reference bar shows attached chat even while menu is closed');
+  await ui.click('☰');
   const picker = ui.findAll(n => n.tagName === 'SELECT' && /rh-ref-chat/.test(n.className || ''))[0];
   assert.ok(picker.children.some(o => o.selected && o.value === '0'), 'the picker shows which chat is attached');
 });
@@ -111,6 +119,7 @@ test('a character with a single chat shows no reference picker and no chat list'
   const prompts = [];
   const ui = await bootBundle({ state, runLLMModel: async ({ messages }) => { prompts.push(messages[0].content); return '네.'; } });
   await ui.send('안녕');
+  await ui.click('☰');
   assert.equal(ui.findAll(n => n.tagName === 'SELECT' && /rh-ref-chat/.test(n.className || '')).length, 0);
   assert.doesNotMatch(prompts[0], /"chatIndex"/);
 });
@@ -134,6 +143,7 @@ test('a cold-stored source chat is clearly labeled and rejected until opened in 
   const reply = proposalBlock({ action: 'import_chat', title: '콜드 이사', sourceChatIndex: 0, items: ['variables'] });
   const ui = await bootBundle({ state, runLLMModel: async () => reply });
 
+  await ui.click('☰');
   const picker = ui.findAll(n => n.tagName === 'SELECT' && /rh-ref-chat/.test(n.className || ''))[0];
   assert.ok(picker.children.some(o => /콜드 스토리지 보관 중/.test(o.textContent)));
 
@@ -152,6 +162,7 @@ test('switching chats and reopening the panel immediately refreshes the referenc
     const picker = ui.findAll(n => n.tagName === 'SELECT' && /rh-ref-chat/.test(n.className || ''))[0];
     return picker ? picker.children.map(o => o.textContent) : [];
   };
+  await ui.click('☰');
   assert.ok(pickerOptions().some(t => t.includes('2부')), 'on Chat A, Chat B is selectable');
   assert.ok(!pickerOptions().some(t => t.includes('1부 모험')), 'on Chat A, Chat A is hidden');
 
@@ -159,6 +170,7 @@ test('switching chats and reopening the panel immediately refreshes the referenc
   state.chatIndex = 1;
   state.character.chatPage = 1;
   await ui.reopen();
+  await ui.click('☰');
   assert.ok(pickerOptions().some(t => t.includes('1부 모험')), 'after switching to Chat B, Chat A is immediately selectable');
   assert.ok(!pickerOptions().some(t => t.includes('2부')), 'after switching to Chat B, Chat B is no longer listed as reference');
 });

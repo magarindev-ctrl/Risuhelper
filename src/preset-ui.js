@@ -229,7 +229,15 @@ function renderPresetPanel(app) {
           state.selectedBlock = 0;
           await persistAndRender('프리셋을 제거하고 직접 보내기 모드로 전환했습니다.');
         },
-      }, '제거')
+      }, '제거'),
+      h(doc, 'button', {
+        class: 'rh-btn ghost',
+        title: '프리셋 패널 접기',
+        onclick: () => {
+          app.presetPanelOpen = false;
+          app.render();
+        },
+      }, '접기')
     )
   );
 

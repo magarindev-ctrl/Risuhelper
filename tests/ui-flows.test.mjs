@@ -284,6 +284,7 @@ test('free talk: mentioned field still ships and applies when includeCharSummary
   const reply = '고쳤습니다.\n' + proposalBlock({ action: 'update_field', title: '설명 전체 수정', field: 'desc', content: '완전히 새로운 설명' });
   const ui = await bootBundle({ state, runLLMModel: async ({ messages }) => { prompts.push(messages[0].content); return reply; } });
 
+  await ui.click('☰');
   const summaryLabel = ui.findAll(n => n.tagName === 'LABEL' && /캐릭터 요약 참고/.test(n.textContent))[0];
   const cb = summaryLabel.children.find(c => c.tagName === 'INPUT');
   cb.checked = false;
@@ -325,7 +326,10 @@ test('manual general target sets freeTalk banner, _focusSignature tracks screenH
   await app.onSelectTarget('general:');
   assert.equal(app.manualTarget.freeTalk, true);
   assert.equal(app.manualTarget.labelText, '자유대화');
+  app.menuOpen = true;
+  app.render();
   assert.match(app.doc.body.textContent, /입력칸을 선택하지 않은 상태/);
+  app.menuOpen = false;
 
   // 2. _focusSignature distinguishes screenHint changes within the same screen
   const sigA = app._focusSignature({ screen: 'settings', targetKind: 'general', freeTalk: true, labelText: '자유대화', screenHint: '설정 / 컨피그 (채팅 봇)' });
@@ -595,4 +599,68 @@ test('pressing Escape cancels an open confirmation popup without modifying data 
   assert.deepEqual(state.character.globalLore.map(e => e.comment), ['기존', 'A', 'B']);
   assert.equal(ui.buttons(/^되돌리기 \(1\)$/).length, 1);
 });
+
+test('compact top bar keeps only ☰, 설정, 대화 비우기, 닫기, and target select while moving secondary controls into ☰ menu', async () => {
+  const char = freshCharacter();
+  char.chats = [
+    { id: 'c1', name: '1부', note: '', message: [{ role: 'user', data: '안녕' }], localLore: [] },
+    { id: 'c2', name: '2부', note: '', message: [], localLore: [] },
+  ];
+  char.chatPage = 1;
+  const state = { character: char, chatIndex: 1 };
+  const ui = await bootBundle({ state, runLLMModel: async () => '네.' });
+
+  // Default closed-menu view maximizes chat space: only the 3 checked controls + 닫기 + ☰ + target select
+  assert.equal(ui.buttons('☰').length, 1);
+  assert.equal(ui.buttons('설정').length, 1);
+  assert.equal(ui.buttons('대화 비우기').length, 1);
+  assert.equal(ui.buttons('닫기').length, 1);
+  assert.equal(ui.findAll(n => n.tagName === 'SELECT' && /rh-target-select/.test(n.className || '')).length, 1);
+
+  assert.equal(ui.doc.querySelector('.rh-menu-panel'), null, 'hamburger menu starts collapsed');
+  assert.equal(ui.buttons(/^프리셋/).length, 0);
+  assert.equal(ui.buttons(/도킹/).length, 0);
+  assert.equal(ui.buttons('넓게').length, 0);
+  assert.equal(ui.buttons('커서 재감지').length, 0);
+  assert.equal(ui.buttons('직접 보내기').length, 0);
+  assert.equal(ui.buttons('프리셋 적용').length, 0);
+  assert.equal(ui.findAll(n => n.tagName === 'SELECT' && /rh-ref-chat/.test(n.className || '')).length, 0);
+  assert.doesNotMatch(ui.bodyText(), /캐릭터 요약 참고|로어북 목록 참고|현재 설정값 참고/);
+
+  // Clicking ☰ reveals all secondary controls inside .rh-menu-panel
+  await ui.click('☰');
+  assert.ok(ui.doc.querySelector('.rh-menu-panel'));
+  assert.equal(ui.buttons(/^프리셋 ·/).length, 1);
+  assert.equal(ui.buttons(/도킹/).length, 1);
+  assert.equal(ui.buttons('넓게').length, 1);
+  assert.equal(ui.buttons('커서 재감지').length, 1);
+  assert.equal(ui.buttons('직접 보내기').length, 1);
+  assert.equal(ui.buttons('프리셋 적용').length, 1);
+  assert.equal(ui.findAll(n => n.tagName === 'SELECT' && /rh-ref-chat/.test(n.className || '')).length, 1);
+  assert.match(ui.bodyText(), /캐릭터 요약 참고/);
+  assert.match(ui.bodyText(), /로어북 목록 참고/);
+  assert.match(ui.bodyText(), /현재 설정값 참고/);
+
+  // Attaching a reference chat shows a slim 1-line bar with 해제 even after collapsing ☰
+  await ui.selectByClass('rh-ref-chat', '0');
+  await ui.click('☰');
+  assert.equal(ui.doc.querySelector('.rh-menu-panel'), null);
+  assert.ok(ui.doc.querySelector('.rh-ref-bar'));
+  assert.match(ui.bodyText(), /참조 채팅: 1번 · 1부/);
+  await ui.click('해제');
+  assert.equal(ui.doc.querySelector('.rh-ref-bar'), null);
+
+  // Opening 설정 closes ☰ menu (mutually exclusive), and reopening the drawer starts with ☰ closed
+  await ui.click('☰');
+  assert.ok(ui.doc.querySelector('.rh-menu-panel'));
+  await ui.click('설정');
+  assert.equal(ui.doc.querySelector('.rh-menu-panel'), null);
+  assert.ok(ui.doc.querySelector('.rh-settings-panel'));
+  await ui.click('☰');
+  assert.ok(ui.doc.querySelector('.rh-menu-panel'));
+  assert.equal(ui.doc.querySelector('.rh-settings-panel'), null);
+  await ui.reopen();
+  assert.equal(ui.doc.querySelector('.rh-menu-panel'), null, 'reopening starts with compact view');
+});
+
 
