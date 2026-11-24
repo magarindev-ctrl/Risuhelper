@@ -1156,6 +1156,10 @@ test('dist/risuhelper.js rescues orphaned lorebooks in 1 click and organizes lor
   assert.ok(undoCardBtn);
   undoCardBtn.click();
   await new Promise(r => setTimeout(r, 30));
+  // Undo asks for confirmation first (in-panel popup)
+  assert.equal(Object.hasOwn(state.character.globalLore[0], 'folder'), true, 'nothing is undone before confirming');
+  findAll(n => n.tagName === 'BUTTON' && n.textContent === '예, 되돌립니다')[0].click();
+  await new Promise(r => setTimeout(r, 30));
 
   assert.equal(Object.hasOwn(state.character.globalLore[0], 'folder'), false);
   assert.equal(Object.hasOwn(state.character.globalLore[33], 'folder'), false);

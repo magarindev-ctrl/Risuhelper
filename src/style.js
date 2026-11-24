@@ -101,6 +101,7 @@ html, body {
 }
 
 .rh-drawer {
+  position: relative;
   width: min(520px, 96vw);
   height: 100%;
   background: var(--rh-panel);
@@ -1205,6 +1206,61 @@ html, body {
   color: var(--rh-diff-add-text);
   padding: 0 4px;
   border-radius: 4px;
+}
+
+.rh-modal-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 15;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: var(--rh-backdrop);
+  backdrop-filter: blur(2px);
+}
+
+.rh-modal {
+  width: min(360px, 100%);
+  max-height: 100%;
+  overflow: auto;
+  padding: 16px;
+  border-radius: 12px;
+  border: 1px solid var(--rh-border);
+  background: var(--rh-panel);
+  color: var(--rh-text);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+}
+
+.rh-modal-title {
+  font-size: 14px;
+  font-weight: 700;
+  margin-bottom: 8px;
+}
+
+.rh-modal-message {
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.rh-modal-detail {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--rh-muted);
+}
+
+.rh-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.rh-modal-actions .rh-btn {
+  min-height: 36px;
+  padding: 0 14px;
 }
 
 .rh-toast {

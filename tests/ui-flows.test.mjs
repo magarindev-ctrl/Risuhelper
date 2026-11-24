@@ -35,7 +35,7 @@ test('several proposals from one reply can be applied together and undone with o
   assert.deepEqual(state.character.globalLore.map(e => e.comment), ['기존', '추가 A', '추가 B']);
 
   assert.equal(ui.buttons(/^되돌리기 \(1\)$/).length, 1, 'the group must count as a single undo unit');
-  await ui.click(/^되돌리기 \(1\)$/);
+  await ui.clickConfirm(/^되돌리기 \(1\)$/);
   assert.equal(state.character.desc, '원본 설명');
   assert.deepEqual(state.character.globalLore.map(e => e.comment), ['기존']);
 });
@@ -52,7 +52,7 @@ test('undo history is still available after the plugin is reloaded', async () =>
 
   const reloaded = await bootBundle({ state, storage, runLLMModel: async () => '' });
   assert.equal(reloaded.buttons(/^되돌리기 \(1\)$/).length, 1, 'the reloaded panel must offer the stored undo');
-  await reloaded.click(/^되돌리기 \(1\)$/);
+  await reloaded.clickConfirm(/^되돌리기 \(1\)$/);
   assert.equal(state.character.desc, '원본 설명');
 });
 
@@ -128,7 +128,7 @@ test('unloading immediately after apply flushes pending Undo history to pluginSt
 
   const reloaded = await bootBundle({ state, storage, runLLMModel: async () => '' });
   assert.equal(reloaded.buttons(/^되돌리기 \(1\)$/).length, 1);
-  await reloaded.click(/^되돌리기 \(1\)$/);
+  await reloaded.clickConfirm(/^되돌리기 \(1\)$/);
   assert.equal(state.character.desc, '원본 설명');
 });
 
@@ -143,7 +143,7 @@ test('a conflict-skipped Undo keeps the card marked applied without falsely show
 
   // User edits desc afterwards -> Undo must refuse to overwrite and keep the card applied (not '되돌림 완료')
   state.character.desc = '사용자가 나중에 직접 고친 설명';
-  await ui.click(/^되돌리기$/);
+  await ui.clickConfirm(/^되돌리기$/);
 
   assert.equal(state.character.desc, '사용자가 나중에 직접 고친 설명');
   assert.match(ui.bodyText(), /이후 직접 수정되어 되돌리지 않음/);
@@ -387,7 +387,7 @@ test('committing changes clears undo buttons immediately, keeps applied data, an
   assert.equal(ui.buttons(/^✓ 확정$/).length, 2);
 
   // Commit all via the header button
-  await ui.click(/^✓ 변경 확정$/);
+  await ui.clickConfirm(/^✓ 변경 확정$/);
 
   // All undo & commit controls vanish; applied data and committed status remain; Apply does NOT come back
   assert.equal(ui.buttons(/^되돌리기/).length, 0);
@@ -432,12 +432,12 @@ test('committing a single card or a group locks only the chosen records while le
   assert.equal(ui.buttons(/^✓ 확정$/).length, 3);
 
   // Commit only card A (index 1, after the standalone desc card at index 0)
-  await ui.click(/^✓ 확정$/, 1);
+  await ui.clickConfirm(/^✓ 확정$/, 1);
   assert.equal(ui.buttons(/^✓ 확정$/).length, 2, 'desc card and card B remain uncommitted');
   assert.equal(ui.buttons(/^묶음 되돌리기$/).length, 1, 'group undo still covers uncommitted card B');
 
   // Undo the remaining group -> reverts B while leaving committed A and standalone desc intact
-  await ui.click(/^묶음 되돌리기$/);
+  await ui.clickConfirm(/^묶음 되돌리기$/);
   assert.deepEqual(state.character.globalLore.map(e => e.comment), ['기존', 'A']);
   assert.equal(state.character.desc, '확정 안 한 설명');
   assert.equal(ui.buttons(/^묶음 되돌리기$/).length, 0);
@@ -449,8 +449,120 @@ test('committing a single card or a group locks only the chosen records while le
   await ui.send('로어북 다시 추가해줘');
   await ui.click(/^모두 적용 \(2\)$/);
   assert.equal(ui.buttons(/^되돌리기 \(2\)$/).length, 1);
-  await ui.click(/^✓ 묶음 확정$/);
+  await ui.clickConfirm(/^✓ 묶음 확정$/);
   assert.equal(ui.buttons(/^✓ 묶음 확정$/).length, 0);
   assert.equal(ui.buttons(/^묶음 되돌리기$/).length, 0);
   assert.equal(ui.buttons(/^되돌리기 \(1\)$/).length, 1, 'group commit leaves standalone desc edit undoable');
+});
+
+// --- Confirmation popups: a single stray click must neither roll back nor finalise anything ---
+
+const twoLoreReply = [
+  proposalBlock({ action: 'create_lorebook', title: '항목 A', scope: 'character', comment: 'A', key: 'a', content: 'body A' }),
+  proposalBlock({ action: 'create_lorebook', title: '항목 B', scope: 'character', comment: 'B', key: 'b', content: 'body B' }),
+].join('\n');
+
+async function bootWithAppliedGroup(extra = {}) {
+  const state = { character: freshCharacter() };
+  const storage = createMemoryStorage();
+  const ui = await bootBundle({ state, storage, runLLMModel: async () => twoLoreReply, ...extra });
+  await ui.send('로어북 두 개 추가해줘');
+  await ui.click(/^모두 적용 \(2\)$/);
+  await ui.tick(200);
+  assert.deepEqual(state.character.globalLore.map(e => e.comment), ['기존', 'A', 'B']);
+  return { state, storage, ui };
+}
+
+const undoRecordCount = (storage) => JSON.parse(storage.data.risuhelper_undo_v1).records.length;
+
+test('the header undo button asks first: nothing is rolled back until the popup is confirmed', async () => {
+  const { state, ui } = await bootWithAppliedGroup();
+  assert.equal(ui.dialog(), null);
+
+  await ui.click(/^되돌리기 \(1\)$/);
+  assert.ok(ui.dialog(), 'a confirmation popup must open');
+  assert.match(ui.dialog().textContent, /되돌/);
+  assert.match(ui.dialog().textContent, /2건/, 'the popup must say what is about to be undone');
+  assert.deepEqual(state.character.globalLore.map(e => e.comment), ['기존', 'A', 'B'], 'no rollback before confirming');
+
+  await ui.answerDialog(false);
+  assert.equal(ui.dialog(), null, 'cancel closes the popup');
+  assert.deepEqual(state.character.globalLore.map(e => e.comment), ['기존', 'A', 'B'], 'cancel must not roll back');
+  assert.equal(ui.buttons(/^되돌리기 \(1\)$/).length, 1, 'the change stays undoable after cancelling');
+
+  await ui.click(/^되돌리기 \(1\)$/);
+  await ui.answerDialog(true);
+  assert.equal(ui.dialog(), null);
+  assert.deepEqual(state.character.globalLore.map(e => e.comment), ['기존']);
+});
+
+test('card and group undo buttons ask first and name what they undo', async () => {
+  const { state, ui } = await bootWithAppliedGroup();
+
+  await ui.click(/^되돌리기$/, 1);
+  assert.match(ui.dialog().textContent, /항목 B/, 'the popup names the card being undone');
+  assert.deepEqual(state.character.globalLore.map(e => e.comment), ['기존', 'A', 'B']);
+  await ui.answerDialog(false);
+  assert.deepEqual(state.character.globalLore.map(e => e.comment), ['기존', 'A', 'B']);
+
+  await ui.click(/^되돌리기$/, 1);
+  await ui.answerDialog(true);
+  assert.deepEqual(state.character.globalLore.map(e => e.comment), ['기존', 'A']);
+
+  await ui.click(/^묶음 되돌리기$/);
+  assert.ok(ui.dialog(), 'group undo must ask too');
+  assert.deepEqual(state.character.globalLore.map(e => e.comment), ['기존', 'A']);
+  await ui.answerDialog(true);
+  assert.deepEqual(state.character.globalLore.map(e => e.comment), ['기존']);
+});
+
+test('commit buttons ask first: undo history is only erased after the popup is confirmed', async () => {
+  const { state, storage, ui } = await bootWithAppliedGroup();
+  assert.equal(undoRecordCount(storage), 2);
+
+  // Header: commit everything
+  await ui.click(/^✓ 변경 확정$/);
+  assert.ok(ui.dialog(), 'a confirmation popup must open');
+  assert.match(ui.dialog().textContent, /되돌릴 수 없/, 'the popup must warn that this cannot be undone');
+  await ui.answerDialog(false);
+  await ui.tick(200);
+  assert.equal(undoRecordCount(storage), 2, 'cancel keeps the undo history');
+  assert.equal(ui.buttons(/^되돌리기 \(1\)$/).length, 1);
+  assert.doesNotMatch(ui.bodyText(), /확정됨/);
+
+  // Card: commit one
+  await ui.click(/^✓ 확정$/, 0);
+  assert.match(ui.dialog().textContent, /항목 A/, 'the popup names the card being committed');
+  await ui.answerDialog(false);
+  assert.equal(ui.buttons(/^✓ 확정$/).length, 2, 'cancel keeps the card uncommitted');
+  await ui.click(/^✓ 확정$/, 0);
+  await ui.answerDialog(true);
+  assert.equal(ui.buttons(/^✓ 확정$/).length, 1);
+
+  // Group: commit the rest
+  await ui.click(/^✓ 묶음 확정$/);
+  assert.ok(ui.dialog(), 'group commit must ask too');
+  assert.equal(ui.buttons(/^✓ 확정$/).length, 1);
+  await ui.answerDialog(true);
+  await ui.tick(200);
+  assert.equal(ui.buttons(/^✓ 확정$/).length, 0);
+  assert.equal(ui.buttons(/^되돌리기/).length, 0);
+  assert.equal(undoRecordCount(storage), 0);
+  assert.deepEqual(state.character.globalLore.map(e => e.comment), ['기존', 'A', 'B'], 'committing never touches the data');
+});
+
+test('the confirmation popup survives panel re-renders and clicking outside it cancels', async () => {
+  const { state, ui } = await bootWithAppliedGroup();
+
+  await ui.click(/^되돌리기 \(1\)$/);
+  assert.ok(ui.dialog());
+  await ui.tick(3000); // the "applied" toast expires and re-renders the panel meanwhile
+  assert.ok(ui.dialog(), 'a re-render must not drop the popup');
+
+  const backdrop = ui.findAll(n => String(n.className || '').split(/\s+/).includes('rh-modal-backdrop'))[0];
+  backdrop.click();
+  await ui.tick(40);
+  assert.equal(ui.dialog(), null, 'clicking outside the popup cancels');
+  assert.deepEqual(state.character.globalLore.map(e => e.comment), ['기존', 'A', 'B']);
+  assert.equal(ui.buttons(/^되돌리기 \(1\)$/).length, 1);
 });

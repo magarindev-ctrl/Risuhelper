@@ -82,6 +82,23 @@ async function bootBundle({ state, runLLMModel, storage = createMemoryStorage() 
     await tick(40);
   };
   const bodyText = () => doc.body.textContent;
+  /** The in-panel confirmation popup, or null while none is open. */
+  const dialog = () => findAll(n => String(n.className || '').split(/\s+/).includes('rh-modal'))[0] || null;
+  /** Answers the open confirmation popup: `true` presses the confirm button, `false` presses 취소. */
+  const answerDialog = async (accept = true) => {
+    const box = dialog();
+    if (!box) throw new Error('no confirmation popup is open');
+    const wanted = accept ? 'rh-modal-confirm' : 'rh-modal-cancel';
+    const btn = findAll(n => n.tagName === 'BUTTON' && String(n.className || '').split(/\s+/).includes(wanted))[0];
+    if (!btn) throw new Error(`popup button not found: ${wanted}`);
+    btn.click();
+    await tick(40);
+  };
+  /** Clicks a button that asks for confirmation first, then confirms. */
+  const clickConfirm = async (matcher, index = 0) => {
+    await click(matcher, index);
+    await answerDialog(true);
+  };
   /** Polls until `predicate()` is truthy (deterministic under load, unlike fixed sleeps). */
   const waitFor = async (predicate, label = 'condition', timeoutMs = 5000) => {
     const started = Date.now();
@@ -102,7 +119,7 @@ async function bootBundle({ state, runLLMModel, storage = createMemoryStorage() 
     }
   };
   const unload = async () => { if (unloadHandler) await unloadHandler(); };
-  return { doc, storage, findAll, buttons, selectTarget, send, click, bodyText, tick, waitFor, settle, unload };
+  return { doc, storage, findAll, buttons, selectTarget, send, click, clickConfirm, dialog, answerDialog, bodyText, tick, waitFor, settle, unload };
 }
 
 const proposalBlock = (obj) => '```risuhelper-proposal\n' + JSON.stringify(obj) + '\n```';

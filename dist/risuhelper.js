@@ -1,21 +1,21 @@
 //@name risuhelper
 //@display-name RisuHelper
 //@api 3.0
-//@version 0.4.7
+//@version 0.4.8
 //@update-url https://raw.githubusercontent.com/magarindev-ctrl/Risuhelper/main/dist/risuhelper.js
 //@link https://github.com/magarindev-ctrl/Risuhelper RisuHelper GitHub
 
 /*
- * RisuHelper v0.4.7 — RisuAI Plugin API v3
+ * RisuHelper v0.4.8 — RisuAI Plugin API v3
  * License: GPL-3.0-only
  * https://github.com/magarindev-ctrl/Risuhelper
  */
 (() => {
   'use strict';
-  const __RISUHELPER_VERSION__ = "0.4.7";
+  const __RISUHELPER_VERSION__ = "0.4.8";
   const __modules = {
   "src/version.js"(__require, __exports) {
-const VERSION = '0.4.7';
+const VERSION = '0.4.8';
 const PLUGIN_NAME = 'risuhelper';
 const STORAGE_KEY = 'risuhelper_state_v1';
 const PRESET_STORAGE_KEY = 'risuhelper_preset_v1';
@@ -241,6 +241,7 @@ html, body {
 }
 
 .rh-drawer {
+  position: relative;
   width: min(520px, 96vw);
   height: 100%;
   background: var(--rh-panel);
@@ -1345,6 +1346,61 @@ html, body {
   color: var(--rh-diff-add-text);
   padding: 0 4px;
   border-radius: 4px;
+}
+
+.rh-modal-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 15;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: var(--rh-backdrop);
+  backdrop-filter: blur(2px);
+}
+
+.rh-modal {
+  width: min(360px, 100%);
+  max-height: 100%;
+  overflow: auto;
+  padding: 16px;
+  border-radius: 12px;
+  border: 1px solid var(--rh-border);
+  background: var(--rh-panel);
+  color: var(--rh-text);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+}
+
+.rh-modal-title {
+  font-size: 14px;
+  font-weight: 700;
+  margin-bottom: 8px;
+}
+
+.rh-modal-message {
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.rh-modal-detail {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--rh-muted);
+}
+
+.rh-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.rh-modal-actions .rh-btn {
+  min-height: 36px;
+  padding: 0 14px;
 }
 
 .rh-toast {
@@ -11679,6 +11735,7 @@ class RisuHelperApp {
     this.toastTimer = null;
     this._undoSaveTimer = null;
     this.toastText = '';
+    this.confirmDialog = null;
     this.registeredIds = [];
     this.viewportHandler = null;
     this._lastLiveFocusSig = '';
@@ -11902,8 +11959,23 @@ class RisuHelperApp {
   }
 
   /** Commits applied changes by clearing Undo records (all, one group, or one card) without touching host data. */
-  async commitUndoHistory({ undoId = null, groupId = null } = {}) {
+  async commitUndoHistory({ undoId = null, groupId = null, label = '' } = {}) {
     if (this.applyingGroup) return;
+    const records = this.adapter.undoStack.filter(r => (undoId ? r.id === undoId : groupId ? r.groupId === groupId : true));
+    if (records.length === 0) return;
+    const what = undoId
+      ? `${this._quoteLabel(label || records[0].label)} 변경을 확정합니다.`
+      : groupId
+        ? `이 답변에서 적용한 변경 ${records.length}건을 확정합니다.`
+        : `적용한 변경 ${this.adapter.undoUnitCount()}건을 모두 확정합니다.`;
+    const confirmed = await this.askConfirm({
+      title: '변경을 확정할까요?',
+      message: what,
+      detail: '확정하면 되돌리기 기록이 지워져 더 이상 되돌릴 수 없습니다. 적용된 내용은 그대로 유지됩니다.',
+      confirmLabel: '예, 확정합니다',
+      tone: 'ok',
+    });
+    if (!confirmed || this.applyingGroup) return;
     const res = this.adapter.clearUndoHistory({ undoId, groupId });
     if (!res.clearedIds.length) return;
     this.markCommittedCards(res.clearedIds);
@@ -11977,8 +12049,87 @@ class RisuHelperApp {
     this.render();
   }
 
+  /**
+   * In-panel confirmation popup. Host dialogs can open behind the plugin's fullscreen frame and
+   * native confirm() is unreliable in app shells, so the question is asked inside the panel.
+   * Resolves true only when the confirm button is pressed.
+   */
+  askConfirm({ title, message, detail = '', confirmLabel = '확인', tone = 'danger' }) {
+    this._closeConfirm(false);
+    return new Promise(resolve => {
+      this.confirmDialog = { title, message, detail, confirmLabel, tone, resolve };
+      this.render();
+    });
+  }
+
+  _closeConfirm(result, { render = true } = {}) {
+    const dialog = this.confirmDialog;
+    if (!dialog) return;
+    this.confirmDialog = null;
+    if (render) this.render();
+    dialog.resolve(Boolean(result));
+  }
+
+  _quoteLabel(label) {
+    const text = String(label || '').trim();
+    if (!text) return '이';
+    return `"${text.length > 60 ? `${text.slice(0, 60)}…` : text}"`;
+  }
+
+  renderConfirmDialog() {
+    const doc = this.doc;
+    const dialog = this.confirmDialog;
+    return h(doc, 'div', {
+      class: 'rh-modal-backdrop',
+      onclick: (e) => { e.stopPropagation(); this._closeConfirm(false); },
+    },
+      h(doc, 'div', { class: 'rh-modal', role: 'alertdialog', onclick: (e) => e.stopPropagation() },
+        h(doc, 'div', { class: 'rh-modal-title' }, dialog.title),
+        h(doc, 'div', { class: 'rh-modal-message' }, dialog.message),
+        dialog.detail && h(doc, 'div', { class: 'rh-modal-detail' }, dialog.detail),
+        h(doc, 'div', { class: 'rh-modal-actions' },
+          h(doc, 'button', { class: 'rh-btn rh-modal-cancel', onclick: () => this._closeConfirm(false) }, '취소'),
+          h(doc, 'button', {
+            class: `rh-btn ${dialog.tone === 'ok' ? 'ok' : 'danger'} rh-modal-confirm`,
+            onclick: () => this._closeConfirm(true),
+          }, dialog.confirmLabel)
+        )
+      )
+    );
+  }
+
+  /** Global undo (header button): reverts the most recent change or group after confirmation. */
+  async undoLatest() {
+    if (this.adapter.undoUnitCount() === 0) return;
+    const confirmed = await this.askConfirm({
+      title: '변경을 되돌릴까요?',
+      message: `가장 최근 변경을 되돌립니다: ${this.adapter.peekUndoLabel()}`,
+      detail: '적용 전 상태로 돌아갑니다. 적용 이후 직접 고친 부분은 덮어쓰지 않습니다.',
+      confirmLabel: '예, 되돌립니다',
+    });
+    if (!confirmed) return;
+    try {
+      const res = await this.adapter.undo();
+      this.syncAppliedCards();
+      await this.refreshContextSnapshot();
+      this.showToast(this.describeUndoResult(res));
+    } catch (err) {
+      this.syncAppliedCards({ conflict: err?.code === 'UNDO_CONFLICT' });
+      this.showToast(err.message);
+    }
+    this.render();
+  }
+
   async undoProposalGroup(msg) {
     if (!msg.groupId) return;
+    const count = this.adapter.undoStack.filter(r => r.groupId === msg.groupId).length;
+    const confirmed = await this.askConfirm({
+      title: '묶음 변경을 되돌릴까요?',
+      message: `이 답변에서 적용한 변경 ${count}건을 한꺼번에 되돌립니다.`,
+      detail: '적용 전 상태로 돌아갑니다. 적용 이후 직접 고친 부분은 덮어쓰지 않습니다.',
+      confirmLabel: '예, 되돌립니다',
+    });
+    if (!confirmed || !msg.groupId) return;
     try {
       const res = await this.adapter.undoGroup(msg.groupId);
       this.syncAppliedCards();
@@ -12090,6 +12241,7 @@ class RisuHelperApp {
   }
 
   async close() {
+    this._closeConfirm(false, { render: false });
     this.isOpen = false;
     this.tracker.onPanelClose();
     if (this.isDocked) {
@@ -12748,6 +12900,13 @@ class RisuHelperApp {
 
   async undoProposalItem(item) {
     if (!item.undoId) return;
+    const confirmed = await this.askConfirm({
+      title: '변경을 되돌릴까요?',
+      message: `${this._quoteLabel(item.proposal?.title || item.preview?.label)} 변경을 되돌립니다.`,
+      detail: '적용 전 상태로 돌아갑니다. 적용 이후 직접 고친 부분은 덮어쓰지 않습니다.',
+      confirmLabel: '예, 되돌립니다',
+    });
+    if (!confirmed || !item.undoId) return;
     try {
       const res = await this.adapter.undo(item.undoId);
       item.applied = false;
@@ -13081,7 +13240,7 @@ class RisuHelperApp {
           h(doc, 'button', {
             class: 'rh-btn ok',
             title: '이 변경을 확정하고 되돌리기 단추를 제거합니다',
-            onclick: () => this.commitUndoHistory({ undoId: item.undoId }),
+            onclick: () => this.commitUndoHistory({ undoId: item.undoId, label: item.proposal?.title || item.preview?.label }),
           }, '✓ 확정'),
           h(doc, 'button', {
             class: 'rh-btn danger',
@@ -13535,18 +13694,7 @@ class RisuHelperApp {
         this.adapter.undoUnitCount() > 0 && h(doc, 'button', {
           class: 'rh-btn',
           title: `다음에 되돌릴 변경: ${this.adapter.peekUndoLabel()}`,
-          onclick: async () => {
-            try {
-              const res = await this.adapter.undo();
-              this.syncAppliedCards();
-              await this.refreshContextSnapshot();
-              this.showToast(this.describeUndoResult(res));
-            } catch (err) {
-              this.syncAppliedCards({ conflict: err?.code === 'UNDO_CONFLICT' });
-              this.showToast(err.message);
-            }
-            this.render();
-          },
+          onclick: () => this.undoLatest(),
         }, `되돌리기 (${this.adapter.undoUnitCount()})`),
         this.adapter.undoUnitCount() > 0 && h(doc, 'button', {
           class: 'rh-btn ok',
@@ -13890,7 +14038,8 @@ class RisuHelperApp {
       this.settingsOpen && this.renderSettingsPanel(),
       h(doc, 'div', { class: 'rh-context-bar' }, ...contextBarChildren),
       chatEl,
-      composer
+      composer,
+      this.confirmDialog && this.renderConfirmDialog()
     );
 
     const shell = h(doc, 'div', {
