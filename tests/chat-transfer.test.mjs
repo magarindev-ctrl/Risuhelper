@@ -194,3 +194,57 @@ test('a persona that no longer exists is not bound', () => {
   assert.equal(plan.next.bindedPersona, undefined);
   assert.equal(plan.skipped[0].item, 'persona');
 });
+
+test('mentioning the current chat name or number alongside a source chat still resolves the source chat', () => {
+  const chats = listChats({ chats: [{ name: '1부', message: [] }, { name: '새 채팅', message: [] }] }, 1);
+  assert.equal(mentionedChatIndex('1번 채팅에서 새 채팅으로 이사해줘', chats), 0);
+  assert.equal(mentionedChatIndex('1부에서 새 채팅으로 이사해줘', chats), 0);
+
+  const reversed = listChats({ chats: [{ name: 'A', message: [] }, { name: 'B', message: [] }] }, 0);
+  assert.equal(mentionedChatIndex('지금 1번 채팅으로 2번 채팅 변수 옮겨줘', reversed), 1);
+
+  // Overlapping longer current chat name still shadows the shorter non-current name
+  const overlap = listChats({ chats: [{ name: '모험', message: [] }, { name: '모험 2', message: [] }] }, 1);
+  assert.equal(mentionedChatIndex('모험 2에 대해 알려줘', overlap), null);
+});
+
+test('cold-stored chats are flagged in listChats and object scriptstate values format as JSON', () => {
+  const cold = {
+    id: 'cold-1',
+    name: '오래된 1부',
+    message: [{ role: 'char', data: '\uEF01COLDSTORAGE\uEF01a1b2c3d4-0000-0000-0000-000000000001' }],
+    scriptstate: {},
+    localLore: [],
+  };
+  const listed = listChats({ chats: [cold, { name: '새 채팅', message: [] }] }, 1);
+  assert.equal(listed[0].coldStored, true);
+  assert.equal(listed[0].messages, null);
+
+  const objSource = {
+    name: 'A',
+    message: [],
+    scriptstate: { inventory: { sword: 1, potion: 3 }, $hp: 80, $undef: undefined },
+    localLore: [{ mode: 'folder', key: 'f1', comment: '빈 폴더', content: '' }],
+    fmIndex: 5,
+  };
+  const ref = buildReferenceChat(objSource, { index: 0 });
+  assert.deepEqual(ref.variables, [
+    { name: 'inventory', value: '{"sword":1,"potion":3}' },
+    { name: 'hp', value: '80' },
+  ]);
+
+  const plan = planChatImport(objSource, { message: [] }, {
+    items: ['variables', 'localLore', 'greeting'],
+    alternateGreetingCount: 2,
+  });
+  assert.equal(plan.metaChanges.find(c => c.label === '변수 inventory')?.after, '{"sword":1,"potion":3}');
+  assert.deepEqual(plan.next.scriptstate.inventory, { sword: 1, potion: 3 });
+  assert.ok(plan.copied.includes('채팅 로어북 폴더 1개'), 'folder-only copy must not say 0개');
+  assert.equal(plan.next.fmIndex, undefined, 'out-of-range fmIndex must be skipped');
+  assert.ok(plan.skipped.some(s => s.item === 'greeting'));
+
+  const groupPlan = planChatImport({ ...objSource, fmIndex: -1 }, { message: [] }, { items: ['greeting'], isGroup: true });
+  assert.equal(groupPlan.changed, false);
+  assert.ok(groupPlan.skipped.some(s => s.item === 'greeting'));
+});
+

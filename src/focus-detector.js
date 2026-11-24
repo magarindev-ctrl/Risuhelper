@@ -447,6 +447,8 @@ function isWritableTarget(ctx) {
       return Number.isInteger(ctx.greetingIndex);
     case 'chat_message':
       return Number.isInteger(ctx.messageIndex);
+    case 'chat_input':
+      return true;
     default:
       return false;
   }
@@ -522,17 +524,22 @@ function classifyDomSignalsRaw(signals) {
   const normSettingId = String(settingId || '').trim().toLowerCase();
   const warnings = [];
 
-  // 0. Explicit chat input textarea (DefaultChatScreen.svelte: textarea.text-input-area / #messageInputTranslate)
+  // 0. Explicit chat input textarea (DefaultChatScreen.svelte: textarea.text-input-area / #messageInputTranslate,
+  //    plus PocketRisu/RisuBard fullscreen expanded chat input)
   // Checked first so random <h2> tags inside chat messages/sidebars never misclassify the chat composer.
-  if (isChatInput) {
+  const isFullscreenChatInput =
+    tag === 'textarea' &&
+    (labelIs(nearbyLabel, ['메세지 입력', '메시지 입력', 'message input']) ||
+      /(?:\(으\)|으)로\s*메[세시]지\s*보내기$|^message\s+.+\.\.\.$/i.test(String(placeholder || '').trim()));
+  if (isChatInput || isFullscreenChatInput) {
     return {
       detectedAt: Date.now(),
       screen: 'chat',
-      targetKind: 'general',
-      fieldKey: null,
+      targetKind: 'chat_input',
+      fieldKey: 'input',
       loreIndex: null,
       loreScope: null,
-      labelText: '채팅 입력 화면',
+      labelText: '채팅 입력창 (유저 대필)',
       placeholder,
       liveTextPreview,
       warnings,

@@ -8,18 +8,19 @@ import { listFixtures, loadFixture, buildFixtureDocument } from './helpers/fixtu
 
 const tick = (ms) => new Promise(r => setTimeout(r, ms));
 
-test('a focused editable field is a target; chat input, search boxes and unlabeled inputs are free talk', () => {
+test('a focused editable field or chat input is a target; search boxes and unlabeled inputs are free talk', () => {
   const desc = classifyDomSignals({ tag: 'textarea', nearbyLabel: '설명' });
   assert.equal(desc.targetKind, 'char_field');
   assert.equal(desc.freeTalk, undefined);
   assert.equal(isWritableTarget(desc), true);
 
   const chat = classifyDomSignals({ tag: 'textarea', isChatInput: true });
-  assert.equal(chat.freeTalk, true);
-  assert.equal(chat.targetKind, 'general');
-  assert.equal(chat.labelText, '자유대화');
-  assert.equal(chat.screen, 'chat', 'the screen stays available as a hint');
-  assert.match(chat.screenHint, /채팅/);
+  assert.equal(chat.freeTalk, undefined);
+  assert.equal(chat.targetKind, 'chat_input');
+  assert.equal(chat.fieldKey, 'input');
+  assert.equal(chat.labelText, '채팅 입력창 (유저 대필)');
+  assert.equal(chat.screen, 'chat');
+  assert.equal(isWritableTarget(chat), true);
 
   const search = classifyDomSignals({ tag: 'input', inputType: 'text', placeholder: '검색', headings: ['모듈'] });
   assert.equal(search.freeTalk, true);
@@ -111,7 +112,7 @@ test('with the panel docked, clicking away from the field switches to free talk 
   assert.equal(tracker.lastContext.freeTalk, true);
 });
 
-test('moving the cursor into the chat input is free talk at once, without waiting', async () => {
+test('moving the cursor into the chat input switches to chat_input at once, without waiting', async () => {
   const basic = fixtureDoc('upstream-ko-char-basic', c => c.expect.fieldKey === 'desc');
   const { tracker } = trackerOn(basic.root, 5000);
   await tracker.scanNow();
@@ -121,8 +122,9 @@ test('moving the cursor into the chat input is free talk at once, without waitin
   assert.ok(chatInput, 'fixture contains the chat input');
   basic.root.doc.focused = chatInput;
   await tracker.scanNow();
-  assert.equal(tracker.lastContext.freeTalk, true);
+  assert.equal(tracker.lastContext.targetKind, 'chat_input');
   assert.equal(tracker.lastContext.screen, 'chat');
+  assert.equal(tracker.lastContext.freeTalk, undefined);
 });
 
 test('a real focused field still resolves exactly as before on every recorded host screen', async () => {
@@ -143,7 +145,7 @@ test('onPanelOpen picks up a newly focused chat input or field immediately inste
   assert.ok(chatInput);
   basic.root.doc.focused = chatInput;
   await tracker.onPanelOpen('overlay');
-  assert.equal(tracker.lastContext.freeTalk, true, 'live focus in chat input must override stale desc');
+  assert.equal(tracker.lastContext.targetKind, 'chat_input', 'live focus in chat input must override stale desc');
   assert.equal(tracker.lastContext.screen, 'chat');
 });
 

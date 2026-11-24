@@ -13,7 +13,7 @@ import {
 import { applyTextEdits } from './text-edits.js';
 import { diffValues, revertOps } from './undo-journal.js';
 import { FREE_EDIT_FIELDS, AUTHOR_NOTE_FIELD, fieldLabel } from './fields.js';
-import { listChats, buildReferenceChat, planChatImport, chatName } from './chat-transfer.js';
+import { listChats, buildReferenceChat, planChatImport, chatName, isColdStoredChat } from './chat-transfer.js';
 
 const BAD_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 const DB_PERMISSION_ERROR =
@@ -112,6 +112,9 @@ function validateAllowedFieldKey(kind, fieldKey) {
   }
   if (kind === 'chat_message' && fieldKey !== 'data') {
     return `허용되지 않는 채팅 메시지 필드입니다: ${fieldKey}`;
+  }
+  if (kind === 'chat_input' && fieldKey !== 'input') {
+    return `허용되지 않는 채팅 입력창 필드입니다: ${fieldKey}`;
   }
   if (kind === 'config' && !ALLOWED_CONFIG_KEYS.includes(fieldKey)) {
     return `허용되지 않는 설정 키입니다: ${fieldKey}`;
@@ -1148,6 +1151,12 @@ class HostAdapter {
     try {
       const chat = await this._readChatAt(charIndex, index, char);
       if (!chat) return { ok: false, reason: `${index + 1}번 채팅을 읽지 못했습니다.` };
+      if (isColdStoredChat(chat)) {
+        return {
+          ok: false,
+          reason: `${index + 1}번 채팅 "${entry.name}"은(는) RisuAI 콜드 스토리지에 보관 중이라 내용을 읽을 수 없습니다. RisuAI에서 그 채팅을 한 번 열어 복원한 뒤, 다시 옮겨 받을 채팅으로 돌아와 시도해 주세요.`,
+        };
+      }
       const ref = buildReferenceChat(chat, { index, budget });
       ref.name = entry.name;
       return { ok: true, chat: ref, id: entry.id, charIndex, ...getCharIdentity(char) };
@@ -1186,6 +1195,12 @@ class HostAdapter {
 
     const source = await this._readChatAt(charIndex, sourceIndex, char);
     if (!source) throw new Error(`${sourceIndex + 1}번 채팅을 읽지 못했습니다.`);
+    if (isColdStoredChat(source)) {
+      throw new Error(
+        `${sourceIndex + 1}번 채팅 "${entry.name}"은(는) RisuAI 콜드 스토리지에 보관 중이라 변수·로어북이 비어 있습니다. ` +
+        'RisuAI에서 그 채팅을 한 번 열어 복원한 뒤, 다시 옮겨 받을 채팅으로 돌아와 이사해 주세요.'
+      );
+    }
     const current = await this._readChatAt(charIndex, activeIndex, char);
     if (!current) throw new Error('활성 채팅을 찾을 수 없습니다.');
 
@@ -1213,6 +1228,8 @@ class HostAdapter {
       variableKeys: proposal.variableKeys,
       personas,
       modules,
+      isGroup: char.type === 'group',
+      alternateGreetingCount: Array.isArray(char.alternateGreetings) ? char.alternateGreetings.length : null,
     });
     return {
       plan,
@@ -1444,6 +1461,40 @@ class HostAdapter {
         label: '작가의 노트 (현재 채팅)',
         content: String(chat.note ?? ''),
         charName: char?.name || '(이름 없음)',
+      };
+    }
+
+    if (t.targetKind === 'chat_input') {
+      const { chat, char, charIndex, chatIndex } = await this.readActiveChat();
+      if (!chat) return { ok: false, reason: '활성 채팅을 찾을 수 없습니다.', content: '' };
+      if (isColdStoredChat(chat)) {
+        return { ok: false, reason: '현재 채팅이 콜드 스토리지에 보관 중입니다. 채팅을 다시 열어 주세요.', content: '' };
+      }
+      const fmIndex = Number.isInteger(chat.fmIndex) ? chat.fmIndex : -1;
+      const activeGreeting = (fmIndex >= 0 && Array.isArray(char?.alternateGreetings) && char.alternateGreetings[fmIndex] !== undefined)
+        ? String(char.alternateGreetings[fmIndex] ?? '')
+        : String(char?.firstMessage ?? '');
+      const ref = buildReferenceChat(chat, { index: chatIndex, budget: this.maxContentChars });
+      return {
+        ok: true,
+        target: { ...t, targetKind: 'chat_input', fieldKey: 'input' },
+        hostBinding: { charIndex, chatIndex, ...getCharIdentity(char) },
+        label: `채팅 입력창 (${ref.name})`,
+        content: '',
+        charName: char?.name || '(이름 없음)',
+        chatContext: {
+          chatName: ref.name,
+          messageCount: ref.messageCount,
+          activeGreeting: activeGreeting.slice(0, 4000),
+          authorNote: ref.authorNote,
+          variables: ref.variables,
+          variablesOmitted: ref.variablesOmitted,
+          memorySummaries: ref.memorySummaries,
+          memoryTruncated: ref.memoryTruncated,
+          transcript: ref.transcript,
+          omittedMessages: ref.omittedMessages,
+          transcriptChars: ref.transcriptChars,
+        },
       };
     }
 
@@ -2283,6 +2334,29 @@ class HostAdapter {
           target: snap.target,
         };
       }
+      if (kind === 'chat_input') {
+        if (proposal.action === 'patch_text') {
+          return {
+            ok: false,
+            error: '채팅 입력창(유저 대필)에는 replace_text로 완성된 대필 문장 전체를 제안해 주세요.',
+            label: snap.label,
+            target: snap.target,
+          };
+        }
+        const draft = String(proposal.content ?? '');
+        if (!draft.trim()) {
+          return { ok: false, error: '대필할 메시지가 비어 있습니다.', label: snap.label, target: snap.target };
+        }
+        return {
+          ok: true,
+          before: '',
+          after: draft,
+          label: snap.label,
+          target: snap.target,
+          hostBinding: snap.hostBinding,
+          warning: 'Plugin v3 보안 제한으로 본체 입력칸에 초안을 직접 채울 수는 없습니다. 아래 "복사", "💬 채팅에 추가"(되돌리기 가능), 또는 "🚀 바로 전송"을 이용해 주세요.',
+        };
+      }
       if (kind === 'chat_message' && !Number.isInteger(snap.target?.messageIndex)) {
         return {
           ok: false,
@@ -2910,6 +2984,29 @@ class HostAdapter {
       });
     }
 
+    if (kind === 'chat_input') {
+      if (proposal.action !== 'replace_text') {
+        throw new Error('채팅 입력창(유저 대필)에는 replace_text로 완성된 대필 문장을 제안해 주세요.');
+      }
+      const draft = String(proposal.content ?? '');
+      if (!draft.trim()) throw new Error('추가할 대필 메시지가 비어 있습니다.');
+      const { chat, charIndex, chatIndex } = await this._requireSameActiveChat(options.hostBinding);
+      const nextChat = clone(chat);
+      if (!Array.isArray(nextChat.message)) nextChat.message = [];
+      nextChat.message.push({
+        role: 'user',
+        data: draft,
+        time: Date.now(),
+        chatId: makeUuid(),
+      });
+      const undoId = await this._commitChat(chat, charIndex, chatIndex, nextChat, '유저 대필 메시지 추가');
+      return {
+        ok: true,
+        undoId,
+        summary: '대필 내용을 현재 채팅의 유저 메시지로 추가했습니다. (되돌리기 가능 · RisuAI에서 수정하거나 이어서 응답을 생성할 수 있습니다)',
+      };
+    }
+
     if (kind === 'chat_note') {
       assertAllowedFieldKey('chat_note', target.fieldKey || 'note');
       return await writeSlot('chat', (root) => ({
@@ -3106,6 +3203,21 @@ class HostAdapter {
       undoId,
       summary: `${from}에서 현재 채팅으로 옮겼습니다: ${plan.copied.join(', ')}.`,
     };
+  }
+
+  /** Sends a drafted user reply directly via RisuAI's Plugin v3 sendChat() (appends user turn + triggers AI reply). */
+  async sendUserChatMessage(text, options = {}) {
+    if (typeof this.api?.sendChat !== 'function') {
+      throw new Error('이 RisuAI 버전은 바로 전송(sendChat)을 지원하지 않습니다. "복사" 또는 "💬 채팅에 추가"를 이용해 주세요.');
+    }
+    const draft = String(text ?? '').trim();
+    if (!draft) throw new Error('전송할 대필 메시지가 비어 있습니다.');
+    await this._requireSameActiveChat(options.hostBinding, '전송');
+    const ok = await this.api.sendChat(draft);
+    if (ok === false) {
+      throw new Error('전송 권한(sendChat)이 거부되었습니다. "복사" 또는 "💬 채팅에 추가"를 이용해 주세요.');
+    }
+    return { ok: true, summary: '대필 내용을 채팅으로 전송하고 캐릭터 응답 생성을 시작했습니다.' };
   }
 
   /**

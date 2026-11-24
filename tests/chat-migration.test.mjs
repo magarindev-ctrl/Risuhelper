@@ -127,3 +127,85 @@ test('importing over values the open chat already has needs the confirmation che
   assert.match(ui.bodyText(), /기존 값 1개를 덮어쓰는 것을 확인했습니다/);
   assert.equal(state.character.chats[1].note, 'B챗에서 쓰던 노트');
 });
+
+test('a cold-stored source chat is clearly labeled and rejected until opened in RisuAI', async () => {
+  const state = twoChatState();
+  state.character.chats[0].message = [{ role: 'char', data: '\uEF01COLDSTORAGE\uEF01a1b2c3d4-0000-0000-0000-000000000001' }];
+  const reply = proposalBlock({ action: 'import_chat', title: '콜드 이사', sourceChatIndex: 0, items: ['variables'] });
+  const ui = await bootBundle({ state, runLLMModel: async () => reply });
+
+  const picker = ui.findAll(n => n.tagName === 'SELECT' && /rh-ref-chat/.test(n.className || ''))[0];
+  assert.ok(picker.children.some(o => /콜드 스토리지 보관 중/.test(o.textContent)));
+
+  await ui.send('1번 채팅에서 변수 옮겨줘');
+  assert.match(ui.bodyText(), /콜드 스토리지/);
+  assert.equal(ui.buttons('적용').length, 0, 'cold-stored import must not be applicable');
+});
+
+test('switching chats and reopening the panel immediately refreshes the reference chat picker', async () => {
+  const state = twoChatState();
+  state.chatIndex = 0;
+  state.character.chatPage = 0;
+  const ui = await bootBundle({ state, runLLMModel: async () => '네.' });
+
+  const pickerOptions = () => {
+    const picker = ui.findAll(n => n.tagName === 'SELECT' && /rh-ref-chat/.test(n.className || ''))[0];
+    return picker ? picker.children.map(o => o.textContent) : [];
+  };
+  assert.ok(pickerOptions().some(t => t.includes('2부')), 'on Chat A, Chat B is selectable');
+  assert.ok(!pickerOptions().some(t => t.includes('1부 모험')), 'on Chat A, Chat A is hidden');
+
+  // Switch from Chat A to Chat B and reopen immediately (< 2s)
+  state.chatIndex = 1;
+  state.character.chatPage = 1;
+  await ui.reopen();
+  assert.ok(pickerOptions().some(t => t.includes('1부 모험')), 'after switching to Chat B, Chat A is immediately selectable');
+  assert.ok(!pickerOptions().some(t => t.includes('2부')), 'after switching to Chat B, Chat B is no longer listed as reference');
+});
+
+test('chat_input target sends active conversation context and lets the user add (undoable) or send a ghostwritten reply', async () => {
+  const state = twoChatState();
+  state.chatIndex = 0;
+  state.character.chatPage = 0;
+  const prompts = [];
+  const sentViaHost = [];
+  const twoChoicesReply = [
+    '두 가지 대필안을 준비했습니다.',
+    proposalBlock({ action: 'replace_text', title: '선택지 1 (부드럽게)', content: '조심스럽게 늑대에게 손을 내민다. "괜찮아, 해치지 않을게."' }),
+    proposalBlock({ action: 'replace_text', title: '선택지 2 (경계하며)', content: '검자루에 손을 올린 채 한 발 물러선다. "거기 멈춰."' }),
+  ].join('\n');
+
+  const ui = await bootBundle({
+    state,
+    runLLMModel: async ({ messages }) => { prompts.push(messages[0].content); return twoChoicesReply; },
+    sendChat: async (msg) => { sentViaHost.push(msg); return true; },
+  });
+
+  await ui.selectTarget('chat_input:');
+  await ui.send('다음 대사 대필해줘');
+  assert.match(prompts[0], /은빛-늑대/, 'active chat transcript reaches the model');
+  assert.match(prompts[0], /유저 대필/);
+  assert.equal(ui.buttons(/^모두 적용/).length, 0, 'Apply All is hidden for alternative chat_input draft choices');
+  assert.equal(ui.buttons(/^💬 채팅에 추가$/).length, 2);
+  assert.equal(ui.buttons(/^🚀 바로 전송$/).length, 2);
+
+  // Add choice 1 as an undoable user message
+  await ui.click(/^💬 채팅에 추가$/, 0);
+  assert.equal(state.character.chats[0].message.length, 3);
+  assert.equal(state.character.chats[0].message[2].role, 'user');
+  assert.match(state.character.chats[0].message[2].data, /손을 내민다/);
+
+  // Undo reverts the added user message cleanly
+  await ui.clickConfirm(/^되돌리기$/, 0);
+  assert.equal(state.character.chats[0].message.length, 2);
+
+  // Direct send via sendChat asks confirmation first: cancel sends nothing, confirm sends once
+  await ui.click(/^🚀 바로 전송$/, 1);
+  assert.ok(ui.dialog(), 'direct send asks for confirmation');
+  await ui.answerDialog(false);
+  assert.deepEqual(sentViaHost, []);
+
+  await ui.clickConfirm(/^🚀 바로 전송$/, 1);
+  assert.deepEqual(sentViaHost, ['검자루에 손을 올린 채 한 발 물러선다. "거기 멈춰."']);
+});
+

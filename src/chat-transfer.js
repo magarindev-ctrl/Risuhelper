@@ -24,6 +24,7 @@ const MAX_VARIABLE_VALUE_CHARS = 200;
 const MAX_REFERENCE_LORE = 80;
 const MAX_REFERENCE_NOTE_CHARS = 8000;
 const MAX_VARIABLE_ROWS = 40;
+const COLD_STORAGE_HEADER = '\uEF01COLDSTORAGE\uEF01';
 const BAD_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 
 function cloneJson(value) {
@@ -34,24 +35,46 @@ function sameJson(a, b) {
   return JSON.stringify(a) === JSON.stringify(b);
 }
 
+function isColdStoredChat(chat) {
+  return Boolean(
+    Array.isArray(chat?.message) &&
+    typeof chat.message[0]?.data === 'string' &&
+    chat.message[0].data.startsWith(COLD_STORAGE_HEADER)
+  );
+}
+
+function formatStateValue(value, maxChars = 0) {
+  let text;
+  if (value !== null && typeof value === 'object') {
+    try { text = JSON.stringify(value); } catch { text = String(value); }
+  } else {
+    text = String(value);
+  }
+  return maxChars > 0 && text.length > maxChars ? `${text.slice(0, maxChars)}…` : text;
+}
+
 function chatName(chat, index) {
   const name = String(chat?.name ?? '').trim();
   return name || `채팅 ${index + 1}`;
 }
 
 /**
- * @returns {Array<{ index: number, name: string, current: boolean, messages: number|null, id: string|null }>}
+ * @returns {Array<{ index: number, name: string, current: boolean, messages: number|null, coldStored: boolean, id: string|null }>}
  */
 function listChats(char, activeIndex) {
   const chats = Array.isArray(char?.chats) ? char.chats : [];
-  return chats.map((chat, index) => ({
-    index,
-    name: chatName(chat, index),
-    current: index === activeIndex,
-    // A chat the host has not loaded yet (PocketRisu placeholder) has no known size.
-    messages: !chat?._placeholder && Array.isArray(chat?.message) ? chat.message.length : null,
-    id: typeof chat?.id === 'string' && chat.id ? chat.id : null,
-  }));
+  return chats.map((chat, index) => {
+    const coldStored = isColdStoredChat(chat);
+    return {
+      index,
+      name: chatName(chat, index),
+      current: index === activeIndex,
+      // A chat the host has not loaded yet (PocketRisu placeholder or RisuAI cold storage) has no live size.
+      messages: !chat?._placeholder && !coldStored && Array.isArray(chat?.message) ? chat.message.length : null,
+      coldStored,
+      id: typeof chat?.id === 'string' && chat.id ? chat.id : null,
+    };
+  });
 }
 
 /** The chat list as the model sees it (bounded; the current chat is always kept). */
@@ -64,39 +87,61 @@ function summarizeChatList(chats) {
       chatIndex: c.index,
       name: c.name,
       ...(c.messages !== null ? { messages: c.messages } : {}),
+      ...(c.coldStored ? { coldStored: true } : {}),
       ...(c.current ? { current: true } : {}),
     })),
     total: chats.length,
   };
 }
 
-const CHAT_NUMBER_BEFORE = /(\d+)\s*번\s*째?\s*(?:채팅|챗|chat)/i;
-const CHAT_NUMBER_AFTER = /(?:채팅|챗|chat)\s*(?:#\s*(\d+)|(\d+)\s*번)/i;
+const CHAT_NUMBER_BEFORE = /(\d+)\s*번\s*째?\s*(?:채팅|챗|chat)/gi;
+const CHAT_NUMBER_AFTER = /(?:채팅|챗|chat)\s*(?:#\s*(\d+)|(\d+)\s*번)/gi;
 
 /**
- * Which other chat a request names: by its exact name (the longest matching name wins, and it
- * has to be unique) or by its number ("2번 채팅", "채팅 #2"). Returns null rather than guessing.
+ * Which other chat a request names: by its exact name (overlapping shorter names are shadowed by
+ * longer ones at the same position, and mentioning the current chat alongside a source chat does
+ * not hide the source) or by its number ("2번 채팅", "채팅 #2"). Returns null rather than guessing.
  */
 function mentionedChatIndex(userInput, chats) {
   const text = String(userInput ?? '').toLowerCase();
   if (!text || !Array.isArray(chats) || chats.length < 2) return null;
 
-  const named = chats
-    .map(c => ({ chat: c, name: c.name.toLowerCase() }))
-    .filter(c => c.name.length >= 2 && text.includes(c.name));
-  if (named.length > 0) {
-    const longest = Math.max(...named.map(c => c.name.length));
-    const best = named.filter(c => c.name.length === longest);
-    if (best.length === 1 && !best[0].chat.current) return best[0].chat.index;
-    return null;
+  const spans = [];
+  for (const chat of chats) {
+    const name = chat.name.toLowerCase();
+    if (name.length < 2) continue;
+    let pos = text.indexOf(name);
+    while (pos !== -1) {
+      spans.push({ chat, start: pos, end: pos + name.length });
+      pos = text.indexOf(name, pos + 1);
+    }
+  }
+  if (spans.length > 0) {
+    // A shorter name strictly covered by a longer matched name at the same position is shadowed
+    // (e.g. "모험 2" shadows "모험"), whereas separate mentions like "1부에서 새 채팅으로" stay independent.
+    const kept = spans.filter(s =>
+      !spans.some(other =>
+        other !== s &&
+        other.start <= s.start &&
+        other.end >= s.end &&
+        (other.end - other.start) > (s.end - s.start)
+      )
+    );
+    const otherIds = new Set(kept.filter(s => !s.chat.current).map(s => s.chat.index));
+    if (otherIds.size === 1) return [...otherIds][0];
+    if (otherIds.size > 1) return null;
+    // Only the current chat's name appeared (e.g. "1번 채팅에서 새 채팅으로"): fall through to number matching.
   }
 
-  const m = text.match(CHAT_NUMBER_BEFORE) || text.match(CHAT_NUMBER_AFTER);
-  if (m) {
-    const number = Number(m[1] ?? m[2]);
-    const hit = chats.find(c => c.index === number - 1);
-    if (hit && !hit.current) return hit.index;
+  const numbered = new Set();
+  for (const re of [CHAT_NUMBER_BEFORE, CHAT_NUMBER_AFTER]) {
+    for (const m of text.matchAll(re)) {
+      const number = Number(m[1] ?? m[2]);
+      const hit = chats.find(c => c.index === number - 1);
+      if (hit && !hit.current) numbered.add(hit.index);
+    }
   }
+  if (numbered.size === 1) return [...numbered][0];
   return null;
 }
 
@@ -142,14 +187,11 @@ function buildReferenceChat(chat, { index, budget = 60000 } = {}) {
   const omittedMessages = messages.length - transcript.length;
 
   const state = chat?.scriptstate && typeof chat.scriptstate === 'object' ? chat.scriptstate : {};
-  const stateKeys = Object.keys(state).filter(k => !BAD_KEYS.has(k));
-  const variables = stateKeys.slice(0, MAX_REFERENCE_VARIABLES).map(key => {
-    const value = String(state[key]);
-    return {
-      name: variableName(key),
-      value: value.length > MAX_VARIABLE_VALUE_CHARS ? `${value.slice(0, MAX_VARIABLE_VALUE_CHARS)}…` : value,
-    };
-  });
+  const stateKeys = Object.keys(state).filter(k => !BAD_KEYS.has(k) && state[k] !== undefined);
+  const variables = stateKeys.slice(0, MAX_REFERENCE_VARIABLES).map(key => ({
+    name: variableName(key),
+    value: formatStateValue(state[key], MAX_VARIABLE_VALUE_CHARS),
+  }));
 
   const loreEntries = (Array.isArray(chat?.localLore) ? chat.localLore : []).filter(e => e?.mode !== 'folder');
   const note = String(chat?.note ?? '');
@@ -209,7 +251,14 @@ function greetingLabel(fmIndex) {
  * source has a different value for the same thing (`overwrites` counts variables and the note).
  * An item the source does not have is skipped, never used to blank the current chat.
  */
-function planChatImport(source, target, { items = [], variableKeys = null, personas = null, modules = null } = {}) {
+function planChatImport(source, target, {
+  items = [],
+  variableKeys = null,
+  personas = null,
+  modules = null,
+  isGroup = false,
+  alternateGreetingCount = null,
+} = {}) {
   const next = cloneJson(target) || {};
   const wanted = new Set(items);
   const metaChanges = [];
@@ -222,7 +271,7 @@ function planChatImport(source, target, { items = [], variableKeys = null, perso
 
   if (wanted.has('variables')) {
     const state = source?.scriptstate && typeof source.scriptstate === 'object' ? source.scriptstate : {};
-    let keys = Object.keys(state).filter(k => !BAD_KEYS.has(k));
+    let keys = Object.keys(state).filter(k => !BAD_KEYS.has(k) && state[k] !== undefined);
     if (Array.isArray(variableKeys) && variableKeys.length > 0) {
       const picked = [];
       for (const raw of variableKeys) {
@@ -238,10 +287,14 @@ function planChatImport(source, target, { items = [], variableKeys = null, perso
       const current = next.scriptstate && typeof next.scriptstate === 'object' ? next.scriptstate : {};
       const rows = [];
       for (const key of keys) {
-        const had = Object.hasOwn(current, key);
+        const had = Object.hasOwn(current, key) && current[key] !== undefined;
         if (had && sameJson(current[key], state[key])) continue;
         if (had) overwrites++;
-        rows.push({ label: `변수 ${variableName(key)}`, before: had ? String(current[key]) : '(없음)', after: String(state[key]) });
+        rows.push({
+          label: `변수 ${variableName(key)}`,
+          before: had ? formatStateValue(current[key], MAX_VARIABLE_VALUE_CHARS) : '(없음)',
+          after: formatStateValue(state[key], MAX_VARIABLE_VALUE_CHARS),
+        });
         current[key] = cloneJson(state[key]);
       }
       if (rows.length > 0) {
@@ -281,7 +334,9 @@ function planChatImport(source, target, { items = [], variableKeys = null, perso
         beforeParts.push(`[채팅 로어북]\n${current.map(loreLine).join('\n') || '(비어 있음)'}`);
         next.localLore = [...current, ...added.map(cloneJson)];
         afterParts.push(`[채팅 로어북]\n${next.localLore.map(loreLine).join('\n')}`);
-        copied.push(`채팅 로어북 ${added.filter(e => e?.mode !== 'folder').length}개`);
+        const entryCount = added.filter(e => e?.mode !== 'folder').length;
+        const folderCount = added.length - entryCount;
+        copied.push(entryCount > 0 ? `채팅 로어북 ${entryCount}개` : `채팅 로어북 폴더 ${folderCount}개`);
       }
     }
   }
@@ -321,8 +376,12 @@ function planChatImport(source, target, { items = [], variableKeys = null, perso
   }
 
   if (wanted.has('greeting')) {
-    if (!Number.isInteger(source?.fmIndex)) {
+    if (isGroup) {
+      skipped.push({ item: 'greeting', reason: '그룹 채팅에는 첫 메시지 번호가 없습니다.' });
+    } else if (!Number.isInteger(source?.fmIndex) || source.fmIndex < -1) {
       skipped.push({ item: 'greeting', reason: '원본 채팅에 첫 메시지 번호 정보가 없습니다.' });
+    } else if (Number.isInteger(alternateGreetingCount) && source.fmIndex >= alternateGreetingCount) {
+      skipped.push({ item: 'greeting', reason: '원본 채팅이 쓰던 추가 첫 메시지가 현재 캐릭터에 없습니다.' });
     } else {
       const currentIndex = Number.isInteger(next.fmIndex) ? next.fmIndex : -1;
       if (currentIndex !== source.fmIndex) {
@@ -353,6 +412,8 @@ export {
   buildReferenceChat,
   planChatImport,
   chatName,
+  isColdStoredChat,
+  COLD_STORAGE_HEADER,
   CHAT_TRANSFER_ITEMS,
   CHAT_TRANSFER_LABELS,
 };

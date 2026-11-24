@@ -156,6 +156,13 @@ function getQuickPromptsForContext(context) {
       { label: '모듈 작성 팁', prompt: 'RisuAI 모듈의 백그라운드 임베딩과 커스텀 토글 작성 시 주의할 점을 알려 줘.' },
     ];
   }
+  if (kind === 'chat_input') {
+    return [
+      { label: '다음 대사 대필', prompt: '직전 대화 흐름에 자연스럽게 이어지는 유저의 다음 대사와 행동을 대필해 줘.' },
+      { label: '선택지 3가지', prompt: '직전 상황에서 유저가 취할 수 있는 서로 다른 방향의 응답 3가지를 각각 제안 블록으로 대필해 줘.' },
+      { label: '묘사·감정 보강', prompt: '현재 장면 분위기에 맞게 유저의 시점과 내면 묘사가 풍부한 다음 턴 응답을 대필해 줘.' },
+    ];
+  }
   if (kind === 'chat_message') {
     return [
       { label: '문장 다듬기', prompt: '현재 선택된 채팅 메시지의 문맥과 캐릭터 말투를 살리면서 문장을 자연스럽게 다듬는 부분 수정안을 제안해 줘.' },

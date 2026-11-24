@@ -266,11 +266,18 @@ test('inspectFocusedElement detects DefaultChatScreen textarea.text-input-area e
   const focusedCtx = await inspectFocusedElement(rootDocFocused);
   assert.ok(focusedCtx);
   assert.equal(focusedCtx.screen, 'chat');
-  // The chat box is not an editable target: it is free talk, with the chat screen as a hint.
-  assert.equal(focusedCtx.labelText, '자유대화');
-  assert.equal(focusedCtx.freeTalk, true);
+  assert.equal(focusedCtx.targetKind, 'chat_input');
+  assert.equal(focusedCtx.fieldKey, 'input');
+  assert.equal(focusedCtx.labelText, '채팅 입력창 (유저 대필)');
+  assert.equal(focusedCtx.freeTalk, undefined);
 
-  // When nothing is focused (e.g. FAB tapped directly on chat screen), inspectVisibleScreen detects chat
+  // PocketRisu/RisuBard fullscreen chat input (no text-input-area class; identified by label/placeholder)
+  const fsCtx = classifyDomSignals({ tag: 'textarea', nearbyLabel: '메세지 입력', placeholder: '기사(으)로 메세지 보내기' });
+  assert.equal(fsCtx.targetKind, 'chat_input');
+  assert.equal(fsCtx.screen, 'chat');
+  assert.equal(fsCtx.freeTalk, undefined);
+
+  // When nothing is focused (e.g. FAB tapped directly on chat screen), inspectVisibleScreen detects chat as free talk
   const rootDocNoFocus = {
     async querySelector(sel) {
       if (sel.includes(':focus')) return null;
@@ -286,6 +293,7 @@ test('inspectFocusedElement detects DefaultChatScreen textarea.text-input-area e
   const screenCtx = await inspectVisibleScreen(rootDocNoFocus);
   assert.ok(screenCtx);
   assert.equal(screenCtx.screen, 'chat');
+  assert.equal(screenCtx.freeTalk, true);
 });
 
 function createInteractiveSafeNode({

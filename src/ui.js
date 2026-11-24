@@ -395,7 +395,7 @@ class RisuHelperApp {
 
   applicableProposals(msg) {
     return (msg.proposals || []).filter(item =>
-      item.preview?.ok && !item.applied && (!item.preview.requiresConfirm || item.destructiveConfirmed)
+      item.preview?.ok && !item.applied && !item.sent && (!item.preview.requiresConfirm || item.destructiveConfirmed)
     );
   }
 
@@ -626,7 +626,7 @@ class RisuHelperApp {
       }
     }
 
-    await this.refreshContextSnapshot();
+    await this.refreshContextSnapshot({ forceChatList: true });
     this.render();
   }
 
@@ -698,7 +698,7 @@ class RisuHelperApp {
     });
   }
 
-  async refreshContextSnapshot() {
+  async refreshContextSnapshot({ forceChatList = false } = {}) {
     const ctx = this.getEffectiveContext();
     try {
       this.activeSnapshot = await this.adapter.readTargetSnapshot(ctx);
@@ -706,7 +706,7 @@ class RisuHelperApp {
       this.activeSnapshot = { ok: false, reason: err.message, content: '' };
     }
     this.moduleHintSnapshot = await this._readModuleHintSnapshot(ctx);
-    await this.refreshChatList();
+    await this.refreshChatList({ force: forceChatList });
   }
 
   /** Reloads the active character's chat list and drops a reference chat that no longer exists. */
@@ -1090,10 +1090,9 @@ class RisuHelperApp {
     const trimmed = String(text || '').trim();
     if (!trimmed || this.busy) return;
 
-    await this.refreshContextSnapshot();
+    await this.refreshContextSnapshot({ forceChatList: true });
     // A chat named in the request ("2번 채팅", its exact name) becomes the reference chat and
     // stays attached for follow-ups until the picker is cleared.
-    await this.refreshChatList({ force: true });
     const namedChat = mentionedChatIndex(trimmed, this.chatList);
     if (namedChat !== null && namedChat !== this.referenceChat?.index) this.setReferenceChat(namedChat);
     const ctx = this.getEffectiveContext();
@@ -1405,6 +1404,33 @@ class RisuHelperApp {
     this.render();
   }
 
+  /** Sends a chat_input ghostwrite draft via Plugin v3 sendChat() after in-panel confirmation. */
+  async sendDraftProposalItem(item) {
+    if (!item?.preview?.ok || item.applied || item.sent) return;
+    const text = String(item.preview.after || '').trim();
+    if (!text) return;
+    const confirmed = await this.askConfirm({
+      title: '대필 내용을 바로 전송할까요?',
+      message: '현재 채팅에 유저 메시지로 전송하고 캐릭터의 다음 응답을 생성합니다.',
+      detail: '바로 전송 대신 먼저 확인·수정하고 싶다면 취소 후 "💬 채팅에 추가" 또는 "복사"를 사용해 주세요.',
+      confirmLabel: '예, 바로 전송합니다',
+      tone: 'ok',
+    });
+    if (!confirmed || item.applied || item.sent) return;
+    try {
+      const hostBinding = item.hostBinding || item.preview?.hostBinding || null;
+      const res = await this.adapter.sendUserChatMessage(text, { hostBinding });
+      item.sent = true;
+      item.statusMessage = res.summary;
+      await this.refreshContextSnapshot({ forceChatList: true });
+      this.showToast(res.summary);
+    } catch (err) {
+      item.statusMessage = `전송 실패: ${err.message}`;
+      this.showToast(`전송 실패: ${err.message}`);
+    }
+    this.render();
+  }
+
   async copyText(text) {
     try {
       if (this.doc.defaultView?.navigator?.clipboard?.writeText) {
@@ -1436,6 +1462,7 @@ class RisuHelperApp {
   buildTargetPickerOptions() {
     const opts = [
       { value: 'auto', label: `📍 자동감지: ${this.detectedContext ? this.detectedContext.labelText : '자유대화'}` },
+      { value: 'chat_input:', label: '채팅 · 입력창 (유저 대필)' },
       { value: 'char_field:desc', label: '캐릭터 · 설명 (Description)' },
       { value: 'char_field:additionalText', label: '캐릭터 · 추가 디스크립션' },
       { value: 'char_field:firstMessage', label: '캐릭터 · 첫 메시지 (First Message)' },
@@ -1489,6 +1516,7 @@ class RisuHelperApp {
         char_field: 'character',
         char_alt_greeting: 'character',
         chat_note: 'character',
+        chat_input: 'chat',
         chat_message: 'chat',
         char_lorebook: 'lorebook',
         chat_lorebook: 'lorebook',
@@ -1507,6 +1535,7 @@ class RisuHelperApp {
         targetKind: kind,
         fieldKey: field || (
           kind === 'chat_note' ? 'note' :
+          kind === 'chat_input' ? 'input' :
           kind === 'chat_message' ? 'data' :
           kind === 'char_alt_greeting' ? 'alternateGreetings' :
           kind === 'module_field' ? 'backgroundEmbedding' :
@@ -1519,19 +1548,21 @@ class RisuHelperApp {
         ...(kind === 'general' ? { freeTalk: true, screenHint: '' } : {}),
         labelText: kind === 'general'
           ? '자유대화'
-          : kind === 'char_field'
-            ? (CHAR_FIELD_META[field]?.label || field)
-            : kind === 'char_alt_greeting'
-              ? '캐릭터 · 추가 첫 메시지'
-              : kind === 'chat_note'
-                ? '작가의 노트 (현재 채팅)'
-                : kind === 'chat_message'
-                  ? '채팅 · 메시지 수정'
-                  : kind === 'module_field'
-                    ? (MODULE_FIELD_META[field]?.label || `모듈 · ${field}`)
-                    : kind === 'config' && field
-                      ? (CONFIG_FIELD_META[field]?.label || `설정 · ${field}`)
-                      : (SCREEN_LABELS[screenMap[kind]] || kind),
+          : kind === 'chat_input'
+            ? '채팅 입력창 (유저 대필)'
+            : kind === 'char_field'
+              ? (CHAR_FIELD_META[field]?.label || field)
+              : kind === 'char_alt_greeting'
+                ? '캐릭터 · 추가 첫 메시지'
+                : kind === 'chat_note'
+                  ? '작가의 노트 (현재 채팅)'
+                  : kind === 'chat_message'
+                    ? '채팅 · 메시지 수정'
+                    : kind === 'module_field'
+                      ? (MODULE_FIELD_META[field]?.label || `모듈 · ${field}`)
+                      : kind === 'config' && field
+                        ? (CONFIG_FIELD_META[field]?.label || `설정 · ${field}`)
+                        : (SCREEN_LABELS[screenMap[kind]] || kind),
         warnings: [],
       };
     }
@@ -1542,7 +1573,8 @@ class RisuHelperApp {
   renderProposalCard(item) {
     const doc = this.doc;
     const { proposal, preview } = item;
-    const actionLabel = ACTION_LABELS[proposal.action] || proposal.action;
+    const isChatInputDraft = (item.pinnedTarget?.targetKind || preview.target?.targetKind) === 'chat_input' && proposal.action === 'replace_text';
+    const actionLabel = isChatInputDraft ? '유저 대필' : (ACTION_LABELS[proposal.action] || proposal.action);
     const bodyChildren = [];
 
     if (preview.label) {
@@ -1604,7 +1636,7 @@ class RisuHelperApp {
     }
 
     if (item.statusMessage) {
-      const isFailure = item.statusMessage.startsWith('적용 실패');
+      const isFailure = item.statusMessage.startsWith('적용 실패') || item.statusMessage.startsWith('전송 실패');
       bodyChildren.push(
         h(doc, 'div', {
           style: `font-size:11.5px;color:${isFailure ? 'var(--rh-err-text)' : 'var(--rh-ok)'};font-weight:600;`,
@@ -1676,6 +1708,8 @@ class RisuHelperApp {
           onclick: () => this.sendMessage(`방금 제안한 "${proposal.title || actionLabel}" 적용 검증에서 다음 오류가 발생했어:\n${preview.error}\n현재 원문을 기준으로 정확한 수정안을 다시 제안해 줘.`),
         }, '자동 재요청')
       );
+    } else if (item.sent) {
+      // Already sent via sendChat; copy button remains available.
     } else if (item.applied) {
       const syncTarget = item.pinnedTarget || preview.target;
       if (item.moduleDbSaved && this.tracker?.enabled && this._isModuleDomFillable(syncTarget, proposal)) {
@@ -1720,8 +1754,17 @@ class RisuHelperApp {
           class: 'rh-btn primary',
           disabled: Boolean(preview.requiresConfirm && !item.destructiveConfirmed),
           onclick: () => this.applyProposalItem(item),
-        }, '적용')
+        }, isChatInputDraft ? '💬 채팅에 추가' : '적용')
       );
+      if (isChatInputDraft && typeof this.api.sendChat === 'function') {
+        rightControls.push(
+          h(doc, 'button', {
+            class: 'rh-btn ok',
+            title: '대필 내용을 현재 채팅에 유저 메시지로 전송하고 캐릭터의 다음 응답을 생성합니다',
+            onclick: () => this.sendDraftProposalItem(item),
+          }, '🚀 바로 전송')
+        );
+      }
     }
 
     return h(doc, 'div', { class: 'rh-proposal' },
@@ -2214,7 +2257,7 @@ class RisuHelperApp {
             if (!this.tracker.enabled) await this.tracker.start();
             await this.tracker.scanNow({ force: true });
             this.manualTarget = null;
-            await this.refreshContextSnapshot();
+            await this.refreshContextSnapshot({ forceChatList: true });
             this.showToast(this.detectedContext ? `감지됨: ${this.detectedContext.labelText}` : '현재 포커스된 입력칸이 없습니다.');
           },
         }, '커서 재감지')
@@ -2273,7 +2316,7 @@ class RisuHelperApp {
             h(doc, 'option', { value: '', selected: refIndex === null }, '참조 채팅: 없음 (다른 채팅에서 요약·이사할 때 선택)'),
             ...otherChats.map(c =>
               h(doc, 'option', { value: String(c.index), selected: c.index === refIndex },
-                `참조 채팅: ${c.index + 1}번 · ${c.name}${c.messages !== null ? ` (메시지 ${c.messages}개)` : ''}`)
+                `참조 채팅: ${c.index + 1}번 · ${c.name}${c.coldStored ? ' (콜드 스토리지 보관 중)' : c.messages !== null ? ` (메시지 ${c.messages}개)` : ''}`)
             )
           )
         )
@@ -2301,6 +2344,15 @@ class RisuHelperApp {
         h(doc, 'div', { style: 'font-size:11.5px;color:var(--rh-muted);' },
           '자유대화 — 입력칸을 선택하지 않은 상태입니다. 무엇을 고칠지 말로 요청하면 됩니다. 특정 칸만 다루려면 그 칸을 클릭하거나 위에서 대상을 고르세요.' +
           (ctx.screenHint ? ` (화면 힌트: ${ctx.screenHint})` : ''))
+      );
+    } else if (ctx.targetKind === 'chat_input' && this.activeSnapshot?.ok && this.activeSnapshot.chatContext) {
+      const cc = this.activeSnapshot.chatContext;
+      const turnSummary = cc.messageCount > 0
+        ? `현재 채팅 최근 ${cc.transcript.length}/${cc.messageCount}개 메시지(${cc.transcriptChars.toLocaleString()}자)${cc.omittedMessages > 0 ? (cc.memorySummaries.length > 0 ? ' + 기존 메모리 요약' : ' · 앞부분 생략') : ''}`
+        : '현재 채팅 첫 메시지 기준';
+      contextBarChildren.push(
+        h(doc, 'div', { style: 'font-size:11.5px;color:var(--rh-muted);' },
+          `💬 유저 대필 모드 — ${turnSummary}를 참고해 다음 유저 응답을 작성합니다. (본체 입력칸의 미전송 초안은 API 제한으로 읽지 못하므로, 초안을 다듬을 땐 여기에 붙여넣어 요청하세요)`)
       );
     }
 
@@ -2474,10 +2526,12 @@ class RisuHelperApp {
             msgWrap.appendChild(h(doc, 'div', { class: 'rh-banner error' }, `제안 블록 파싱 실패: ${err.error}`));
           }
           const applicable = this.applicableProposals(msg);
-          if (applicable.length >= 2 || msg.groupId) {
+          const showApplyAll = applicable.length >= 2 &&
+            !applicable.every(i => (i.pinnedTarget?.targetKind || i.preview?.target?.targetKind) === 'chat_input');
+          if (showApplyAll || msg.groupId) {
             msgWrap.appendChild(
               h(doc, 'div', { class: 'rh-row', style: 'gap:6px;flex-wrap:wrap;' },
-                applicable.length >= 2 && h(doc, 'button', {
+                showApplyAll && h(doc, 'button', {
                   class: 'rh-btn primary',
                   disabled: this.busy || this.applyingGroup,
                   onclick: () => this.applyAllProposals(msg),

@@ -23,7 +23,7 @@ function createMemoryStorage(initial = {}) {
  * @param {Function} opts.runLLMModel
  * @param {object} [opts.storage] shared pluginStorage (to simulate a reload)
  */
-async function bootBundle({ state, runLLMModel, storage = createMemoryStorage() }) {
+async function bootBundle({ state, runLLMModel, storage = createMemoryStorage(), sendChat = null }) {
   const code = fs.readFileSync(BUNDLE_PATH, 'utf8');
   const doc = createMockDocument();
   const registeredButtons = [];
@@ -43,6 +43,7 @@ async function bootBundle({ state, runLLMModel, storage = createMemoryStorage() 
     async getCurrentChatIndex() { return Number.isInteger(state.chatIndex) ? state.chatIndex : 0; },
     async getRootDocument() { return null; },
     runLLMModel,
+    ...(typeof sendChat === 'function' ? { sendChat } : {}),
   };
   const sandbox = {
     risuai, document: doc, console, setTimeout, clearTimeout, TextEncoder, TextDecoder, Uint8Array, Int32Array,
@@ -126,8 +127,15 @@ async function bootBundle({ state, runLLMModel, storage = createMemoryStorage() 
       if (cur !== last) { last = cur; quietSince = Date.now(); }
     }
   };
+  const reopen = async () => {
+    const closeBtn = buttons('닫기')[0];
+    if (closeBtn) closeBtn.click();
+    await tick(10);
+    registeredButtons[0].cb();
+    await tick(40);
+  };
   const unload = async () => { if (unloadHandler) await unloadHandler(); };
-  return { doc, storage, findAll, buttons, selectTarget, selectByClass, send, click, clickConfirm, dialog, answerDialog, bodyText, tick, waitFor, settle, unload };
+  return { doc, storage, findAll, buttons, selectTarget, selectByClass, send, click, clickConfirm, dialog, answerDialog, reopen, bodyText, tick, waitFor, settle, unload };
 }
 
 const proposalBlock = (obj) => '```risuhelper-proposal\n' + JSON.stringify(obj) + '\n```';
