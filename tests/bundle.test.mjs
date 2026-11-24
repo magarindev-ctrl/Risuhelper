@@ -80,12 +80,13 @@ test('dist/risuhelper.js boots cleanly in mock Plugin v3 sandbox, prevents prese
   vm.runInNewContext(code, sandbox, { filename: 'dist/risuhelper.js' });
   await new Promise(r => setTimeout(r, 30));
 
-  // Verify FAB, hamburger, and settings entry points registered
-  assert.equal(registeredButtons.length, 3);
+  // Verify hamburger and settings entry points registered (no fixed top-right action button)
+  assert.equal(registeredButtons.length, 2);
+  assert.equal(registeredButtons.some(b => b.meta?.location === 'action'), false);
   assert.equal(doc.documentElement.getAttribute('data-theme'), 'dark');
   assert.ok(doc.getElementById('risuhelper-styles'));
 
-  // Open drawer via registered FAB
+  // Open drawer via registered hamburger button
   registeredButtons[0].cb();
   await new Promise(r => setTimeout(r, 20));
   assert.equal(containerVisible, true);
@@ -110,7 +111,7 @@ test('dist/risuhelper.js boots cleanly in mock Plugin v3 sandbox, prevents prese
   // Verify clean unload unregisters all UI parts
   assert.equal(typeof unloadHandler, 'function');
   await unloadHandler();
-  assert.deepEqual(unregisteredIds.sort(), ['risuhelper-fab', 'risuhelper-ham', 'risuhelper-setting']);
+  assert.deepEqual(unregisteredIds.sort(), ['risuhelper-ham', 'risuhelper-setting']);
 });
 
 test('dist/risuhelper.js applies a proposal to its pinned target even if user switches target before clicking Apply', async () => {

@@ -1,21 +1,21 @@
 //@name risuhelper
 //@display-name RisuHelper
 //@api 3.0
-//@version 0.4.5
+//@version 0.4.6
 //@update-url https://raw.githubusercontent.com/magarindev-ctrl/Risuhelper/main/dist/risuhelper.js
 //@link https://github.com/magarindev-ctrl/Risuhelper RisuHelper GitHub
 
 /*
- * RisuHelper v0.4.5 — RisuAI Plugin API v3
+ * RisuHelper v0.4.6 — RisuAI Plugin API v3
  * License: GPL-3.0-only
  * https://github.com/magarindev-ctrl/Risuhelper
  */
 (() => {
   'use strict';
-  const __RISUHELPER_VERSION__ = "0.4.5";
+  const __RISUHELPER_VERSION__ = "0.4.6";
   const __modules = {
   "src/version.js"(__require, __exports) {
-const VERSION = '0.4.5';
+const VERSION = '0.4.6';
 const PLUGIN_NAME = 'risuhelper';
 const STORAGE_KEY = 'risuhelper_state_v1';
 const PRESET_STORAGE_KEY = 'risuhelper_preset_v1';
@@ -3067,6 +3067,8 @@ class FocusTracker {
 
       if (this.showFloatingChip && !this._isDocked) {
         await this.mountFloatingChip();
+      } else if (!this.showFloatingChip) {
+        await this._sweepOrphanChips();
       }
       this.scheduleScan();
       return true;
@@ -3643,17 +3645,41 @@ class FocusTracker {
     await this._refreshChipMetrics();
   }
 
-  async mountFloatingChip() {
-    if (!this.rootDoc || this.chipEl) return;
-    try {
-      const body = await this.rootDoc.querySelector('body');
-      if (!body) return;
-
-      // Remove any orphaned chip left behind from a prior plugin reload
+  async _sweepOrphanChips() {
+    if (!this.rootDoc) return;
+    let removedAny = false;
+    if (typeof this.rootDoc.querySelectorAll === 'function') {
+      try {
+        const nodes = await this.rootDoc.querySelectorAll(`[${CHIP_ATTR}="1"]`);
+        const len = nodes ? await nodes.length() : 0;
+        for (let i = 0; i < len; i++) {
+          const node = await nodes.at(i);
+          if (node) {
+            try {
+              await node.remove();
+              removedAny = true;
+            } catch (err) { noteDetectError(err); }
+          }
+        }
+      } catch (err) { noteDetectError(err); }
+    }
+    if (!removedAny && typeof this.rootDoc.querySelector === 'function') {
       try {
         const stale = await this.rootDoc.querySelector(`[${CHIP_ATTR}="1"]`);
         if (stale) await stale.remove();
       } catch (err) { noteDetectError(err); }
+    }
+  }
+
+  async mountFloatingChip() {
+    if (!this.rootDoc || this.chipEl || !this.showFloatingChip || this._isDocked) return;
+    try {
+      const body = await this.rootDoc.querySelector('body');
+      if (!body || !this.showFloatingChip || this._isDocked) return;
+
+      // Remove any orphaned chip left behind from a prior plugin reload
+      await this._sweepOrphanChips();
+      if (!this.showFloatingChip || this._isDocked || this.chipEl) return;
 
       // Use <div> instead of <button> so grabbing/dragging never steals :focus from the active editor
       const chip = await this.rootDoc.createElement('div');
@@ -3668,12 +3694,13 @@ class FocusTracker {
       }));
       await chip.setTextContent('⋮⋮ ✨ RisuHelper');
 
+      const attachedListeners = [];
       for (const downEvt of ['pointerdown', 'touchstart', 'mousedown']) {
         try {
           const downId = await chip.addEventListener(downEvt, (e) => {
             this._handleChipPointerDown(e);
           });
-          if (downId) this.chipListenerIds.push({ type: downEvt, id: downId });
+          if (downId) attachedListeners.push({ type: downEvt, id: downId });
         } catch (err) { noteDetectError(err); }
       }
 
@@ -3685,23 +3712,38 @@ class FocusTracker {
           }
           this.onChipClick(this.lastContext);
         });
-        if (clickId) this.chipListenerIds.push({ type: 'click', id: clickId });
+        if (clickId) attachedListeners.push({ type: 'click', id: clickId });
       } catch (err) { noteDetectError(err); }
+
+      if (!this.showFloatingChip || this._isDocked || this.chipEl) {
+        for (const entry of attachedListeners) {
+          try { await chip.removeEventListener(entry.type, entry.id); } catch (err) { noteDetectError(err); }
+        }
+        return;
+      }
 
       await body.appendChild(chip);
       this.chipEl = chip;
+      this.chipListenerIds = attachedListeners;
+      if (!this.showFloatingChip || this._isDocked) {
+        await this.unmountFloatingChip();
+        return;
+      }
       await this._refreshChipMetrics();
     } catch (err) { noteDetectError(err); }
   }
 
   async setChipVisible(visible) {
     this.showFloatingChip = Boolean(visible);
+    if (!this.showFloatingChip) {
+      this._chipHiddenForDock = false;
+      await this.unmountFloatingChip();
+      return;
+    }
     if (!this.rootDoc) return;
-    if (this.showFloatingChip && !this.chipEl && !this._isDocked) {
+    if (!this.chipEl && !this._isDocked) {
       await this.mountFloatingChip();
       if (this.lastContext) await this.updateChipLabel(this.lastContext);
-    } else if (!this.showFloatingChip && this.chipEl) {
-      await this.unmountFloatingChip();
     }
   }
 
@@ -3720,17 +3762,21 @@ class FocusTracker {
     this._dragHandled = false;
     this._pendingStyleUpdate = null;
     this._cachedChipRect = null;
-    if (!this.chipEl) return;
-    try {
-      for (const entry of this.chipListenerIds) {
-        try {
-          await this.chipEl.removeEventListener(entry.type, entry.id);
-        } catch (err) { noteDetectError(err); }
-      }
-      await this.chipEl.remove();
-    } catch (err) { noteDetectError(err); }
+    const chip = this.chipEl;
+    const listeners = this.chipListenerIds;
     this.chipEl = null;
     this.chipListenerIds = [];
+    if (chip) {
+      try {
+        for (const entry of listeners) {
+          try {
+            await chip.removeEventListener(entry.type, entry.id);
+          } catch (err) { noteDetectError(err); }
+        }
+        await chip.remove();
+      } catch (err) { noteDetectError(err); }
+    }
+    await this._sweepOrphanChips();
   }
 
   async syncModuleEditorDom(opts) {
@@ -11509,7 +11555,6 @@ const DEFAULT_SETTINGS = {
   maxHistoryTurns: 12,
   maxContentChars: DEFAULT_MAX_CONTENT_CHARS,
   showFloatingChip: true,
-  showHostActionButton: false,
   showDetectDiagnostics: false,
   autoFillModuleEditor: false,
   floatingChipPos: null,
@@ -11522,16 +11567,6 @@ const DEFAULT_SETTINGS = {
   includeConfigSummary: false,
   wideMode: false,
 };
-
-/**
- * The host renders `location: 'action'` buttons itself at a fixed top-right position on the chat
- * screen; a plugin cannot move them. Since it duplicates the draggable chip, it is only registered
- * when the user asks for it, or as the fallback entry point when the chip cannot be shown
- * (mainDom declined, or the chip switched off).
- */
-function shouldRegisterHostActionButton({ userEnabled = false, chipAvailable = false } = {}) {
-  return Boolean(userEnabled) || !chipAvailable;
-}
 
 const ACTION_LABELS = {
   patch_text: '부분 편집',
@@ -11610,7 +11645,6 @@ class RisuHelperApp {
     this._undoSaveTimer = null;
     this.toastText = '';
     this.registeredIds = [];
-    this.hostActionButtonId = null;
     this.viewportHandler = null;
     this._lastLiveFocusSig = '';
     this._liveRefreshSeq = 0;
@@ -11674,7 +11708,6 @@ class RisuHelperApp {
 
     const openHandler = () => { this.open(); };
 
-    this._openHandler = openHandler;
     if (typeof this.api.registerButton === 'function') {
       const ham = await this.api.registerButton(
         { name: 'RisuHelper', icon: '✨', iconType: 'html', location: 'hamburger', id: 'risuhelper-ham' },
@@ -11697,7 +11730,6 @@ class RisuHelperApp {
     this.tracker.diagnostics = Boolean(this.settings.showDetectDiagnostics);
     this.tracker.chipPos = normalizeChipPos(this.settings.floatingChipPos);
     const trackerStarted = await this.tracker.start().catch(() => false);
-    await this.syncHostActionButton();
     await this.adapter.probeHostFlavor(this.tracker.rootDoc).catch(() => {});
 
     // Optional PC auto-dock on startup (strictly opt-in via user settings)
@@ -11712,32 +11744,6 @@ class RisuHelperApp {
     }
 
     this.render();
-  }
-
-  async syncHostActionButton() {
-    if (typeof this.api.registerButton !== 'function') return;
-    const chipAvailable = Boolean(this.tracker?.enabled && this.settings.showFloatingChip);
-    const want = shouldRegisterHostActionButton({
-      userEnabled: this.settings.showHostActionButton,
-      chipAvailable,
-    });
-    if (want && !this.hostActionButtonId) {
-      try {
-        const fab = await this.api.registerButton(
-          { name: 'RisuHelper', icon: '✨', iconType: 'html', location: 'action', id: 'risuhelper-fab' },
-          this._openHandler || (() => { this.open(); })
-        );
-        this.hostActionButtonId = fab?.id || 'risuhelper-fab';
-        this.registeredIds.push(this.hostActionButtonId);
-      } catch {}
-    } else if (!want && this.hostActionButtonId) {
-      const id = this.hostActionButtonId;
-      this.hostActionButtonId = null;
-      this.registeredIds = this.registeredIds.filter(x => x !== id);
-      if (typeof this.api.unregisterUIPart === 'function') {
-        try { await this.api.unregisterUIPart(id); } catch {}
-      }
-    }
   }
 
   mountBaseStyles() {
@@ -13310,24 +13316,10 @@ class RisuHelperApp {
                 this.settings.showFloatingChip = Boolean(e.target.checked);
                 await this.saveSettings();
                 await this.tracker.setChipVisible(this.settings.showFloatingChip);
-                await this.syncHostActionButton();
                 this.render();
               },
             }),
             '화면에 플로팅 버튼 표시 (드래그 이동 가능 · mainDom 필요)'
-          ),
-          h(doc, 'label', {},
-            h(doc, 'input', {
-              type: 'checkbox',
-              checked: this.settings.showHostActionButton,
-              onchange: async (e) => {
-                this.settings.showHostActionButton = Boolean(e.target.checked);
-                await this.saveSettings();
-                await this.syncHostActionButton();
-                this.render();
-              },
-            }),
-            '채팅 화면 우측 상단 고정 ✨ 버튼도 표시 (RisuAI가 그리는 버튼 · 위치 이동 불가)'
           ),
           h(doc, 'label', {},
             h(doc, 'input', {
@@ -13870,7 +13862,6 @@ class RisuHelperApp {
 }
 
   __exports.RisuHelperApp = RisuHelperApp;
-  __exports.shouldRegisterHostActionButton = shouldRegisterHostActionButton;
 
   },
   "src/main.js"(__require, __exports) {

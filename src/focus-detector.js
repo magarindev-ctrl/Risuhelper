@@ -1703,6 +1703,8 @@ class FocusTracker {
 
       if (this.showFloatingChip && !this._isDocked) {
         await this.mountFloatingChip();
+      } else if (!this.showFloatingChip) {
+        await this._sweepOrphanChips();
       }
       this.scheduleScan();
       return true;
@@ -2279,17 +2281,41 @@ class FocusTracker {
     await this._refreshChipMetrics();
   }
 
-  async mountFloatingChip() {
-    if (!this.rootDoc || this.chipEl) return;
-    try {
-      const body = await this.rootDoc.querySelector('body');
-      if (!body) return;
-
-      // Remove any orphaned chip left behind from a prior plugin reload
+  async _sweepOrphanChips() {
+    if (!this.rootDoc) return;
+    let removedAny = false;
+    if (typeof this.rootDoc.querySelectorAll === 'function') {
+      try {
+        const nodes = await this.rootDoc.querySelectorAll(`[${CHIP_ATTR}="1"]`);
+        const len = nodes ? await nodes.length() : 0;
+        for (let i = 0; i < len; i++) {
+          const node = await nodes.at(i);
+          if (node) {
+            try {
+              await node.remove();
+              removedAny = true;
+            } catch (err) { noteDetectError(err); }
+          }
+        }
+      } catch (err) { noteDetectError(err); }
+    }
+    if (!removedAny && typeof this.rootDoc.querySelector === 'function') {
       try {
         const stale = await this.rootDoc.querySelector(`[${CHIP_ATTR}="1"]`);
         if (stale) await stale.remove();
       } catch (err) { noteDetectError(err); }
+    }
+  }
+
+  async mountFloatingChip() {
+    if (!this.rootDoc || this.chipEl || !this.showFloatingChip || this._isDocked) return;
+    try {
+      const body = await this.rootDoc.querySelector('body');
+      if (!body || !this.showFloatingChip || this._isDocked) return;
+
+      // Remove any orphaned chip left behind from a prior plugin reload
+      await this._sweepOrphanChips();
+      if (!this.showFloatingChip || this._isDocked || this.chipEl) return;
 
       // Use <div> instead of <button> so grabbing/dragging never steals :focus from the active editor
       const chip = await this.rootDoc.createElement('div');
@@ -2304,12 +2330,13 @@ class FocusTracker {
       }));
       await chip.setTextContent('⋮⋮ ✨ RisuHelper');
 
+      const attachedListeners = [];
       for (const downEvt of ['pointerdown', 'touchstart', 'mousedown']) {
         try {
           const downId = await chip.addEventListener(downEvt, (e) => {
             this._handleChipPointerDown(e);
           });
-          if (downId) this.chipListenerIds.push({ type: downEvt, id: downId });
+          if (downId) attachedListeners.push({ type: downEvt, id: downId });
         } catch (err) { noteDetectError(err); }
       }
 
@@ -2321,23 +2348,38 @@ class FocusTracker {
           }
           this.onChipClick(this.lastContext);
         });
-        if (clickId) this.chipListenerIds.push({ type: 'click', id: clickId });
+        if (clickId) attachedListeners.push({ type: 'click', id: clickId });
       } catch (err) { noteDetectError(err); }
+
+      if (!this.showFloatingChip || this._isDocked || this.chipEl) {
+        for (const entry of attachedListeners) {
+          try { await chip.removeEventListener(entry.type, entry.id); } catch (err) { noteDetectError(err); }
+        }
+        return;
+      }
 
       await body.appendChild(chip);
       this.chipEl = chip;
+      this.chipListenerIds = attachedListeners;
+      if (!this.showFloatingChip || this._isDocked) {
+        await this.unmountFloatingChip();
+        return;
+      }
       await this._refreshChipMetrics();
     } catch (err) { noteDetectError(err); }
   }
 
   async setChipVisible(visible) {
     this.showFloatingChip = Boolean(visible);
+    if (!this.showFloatingChip) {
+      this._chipHiddenForDock = false;
+      await this.unmountFloatingChip();
+      return;
+    }
     if (!this.rootDoc) return;
-    if (this.showFloatingChip && !this.chipEl && !this._isDocked) {
+    if (!this.chipEl && !this._isDocked) {
       await this.mountFloatingChip();
       if (this.lastContext) await this.updateChipLabel(this.lastContext);
-    } else if (!this.showFloatingChip && this.chipEl) {
-      await this.unmountFloatingChip();
     }
   }
 
@@ -2356,17 +2398,21 @@ class FocusTracker {
     this._dragHandled = false;
     this._pendingStyleUpdate = null;
     this._cachedChipRect = null;
-    if (!this.chipEl) return;
-    try {
-      for (const entry of this.chipListenerIds) {
-        try {
-          await this.chipEl.removeEventListener(entry.type, entry.id);
-        } catch (err) { noteDetectError(err); }
-      }
-      await this.chipEl.remove();
-    } catch (err) { noteDetectError(err); }
+    const chip = this.chipEl;
+    const listeners = this.chipListenerIds;
     this.chipEl = null;
     this.chipListenerIds = [];
+    if (chip) {
+      try {
+        for (const entry of listeners) {
+          try {
+            await chip.removeEventListener(entry.type, entry.id);
+          } catch (err) { noteDetectError(err); }
+        }
+        await chip.remove();
+      } catch (err) { noteDetectError(err); }
+    }
+    await this._sweepOrphanChips();
   }
 
   async syncModuleEditorDom(opts) {
