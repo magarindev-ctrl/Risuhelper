@@ -1,21 +1,21 @@
 //@name risuhelper
 //@display-name RisuHelper
 //@api 3.0
-//@version 0.4.6
+//@version 0.4.7
 //@update-url https://raw.githubusercontent.com/magarindev-ctrl/Risuhelper/main/dist/risuhelper.js
 //@link https://github.com/magarindev-ctrl/Risuhelper RisuHelper GitHub
 
 /*
- * RisuHelper v0.4.6 — RisuAI Plugin API v3
+ * RisuHelper v0.4.7 — RisuAI Plugin API v3
  * License: GPL-3.0-only
  * https://github.com/magarindev-ctrl/Risuhelper
  */
 (() => {
   'use strict';
-  const __RISUHELPER_VERSION__ = "0.4.6";
+  const __RISUHELPER_VERSION__ = "0.4.7";
   const __modules = {
   "src/version.js"(__require, __exports) {
-const VERSION = '0.4.6';
+const VERSION = '0.4.7';
 const PLUGIN_NAME = 'risuhelper';
 const STORAGE_KEY = 'risuhelper_state_v1';
 const PRESET_STORAGE_KEY = 'risuhelper_preset_v1';
@@ -421,6 +421,12 @@ html, body {
   background: var(--rh-err-bg);
   border-color: var(--rh-err-border);
   color: var(--rh-err-text);
+}
+
+.rh-btn.ok {
+  background: var(--rh-diff-add-bg);
+  border-color: var(--rh-ok);
+  color: var(--rh-diff-add-text);
 }
 
 .rh-btn.ghost {
@@ -6507,6 +6513,35 @@ class HostAdapter {
     return { ok: true, label, undone, reverted, conflicts };
   }
 
+  /**
+   * Commits applied changes by clearing their undo records without modifying host data.
+   * With no options, clears the entire undo history; pass `undoId` or `groupId` to commit a subset.
+   */
+  clearUndoHistory({ undoId = null, groupId = null } = {}) {
+    if (this.undoStack.length === 0) {
+      return { ok: true, clearedUnits: 0, clearedRecords: 0, clearedIds: [] };
+    }
+    const unitsBefore = this.undoUnitCount();
+    let removed;
+    if (undoId) {
+      removed = this.undoStack.filter(r => r.id === undoId);
+      this.undoStack = this.undoStack.filter(r => r.id !== undoId);
+    } else if (groupId) {
+      removed = this.undoStack.filter(r => r.groupId === groupId);
+      this.undoStack = this.undoStack.filter(r => r.groupId !== groupId);
+    } else {
+      removed = this.undoStack;
+      this.undoStack = [];
+    }
+    const clearedIds = removed.map(r => r.id);
+    if (clearedIds.length === 0) {
+      return { ok: true, clearedUnits: 0, clearedRecords: 0, clearedIds: [] };
+    }
+    const clearedUnits = Math.max(1, unitsBefore - this.undoUnitCount());
+    this._emitUndoChange({ clearedIds, clearedUnits });
+    return { ok: true, clearedUnits, clearedRecords: clearedIds.length, clearedIds };
+  }
+
   exportUndoState() {
     return { version: 1, records: this.undoStack.map(r => ({ ...r })) };
   }
@@ -11849,6 +11884,38 @@ class RisuHelperApp {
     }
   }
 
+  /** Marks cards whose undo records were explicitly committed so they stay applied without Undo/Commit buttons. */
+  markCommittedCards(clearedIds) {
+    const committed = new Set(clearedIds || []);
+    if (committed.size === 0) return;
+    for (const msg of this.messages) {
+      for (const item of msg.proposals || []) {
+        if (item.applied && item.undoId && committed.has(item.undoId)) {
+          item.undoId = null;
+          item.statusMessage = '확정됨 (되돌리기 기록 비움)';
+        }
+      }
+      if (msg.groupId && !this.adapter.undoStack.some(r => r.groupId === msg.groupId)) {
+        msg.groupId = null;
+      }
+    }
+  }
+
+  /** Commits applied changes by clearing Undo records (all, one group, or one card) without touching host data. */
+  async commitUndoHistory({ undoId = null, groupId = null } = {}) {
+    if (this.applyingGroup) return;
+    const res = this.adapter.clearUndoHistory({ undoId, groupId });
+    if (!res.clearedIds.length) return;
+    this.markCommittedCards(res.clearedIds);
+    await this.flushUndoState();
+    const toast = undoId
+      ? '✓ 변경을 확정했습니다. (되돌리기 기록에서 제거됨)'
+      : groupId
+        ? '✓ 묶음 변경을 확정하고 되돌리기 기록을 비웠습니다.'
+        : `✓ 변경 ${res.clearedUnits}건을 확정하고 되돌리기 기록을 비웠습니다.`;
+    this.showToast(toast);
+  }
+
   /** Reconciles applied cards whose undo record was removed (undone or skipped due to conflict). */
   syncAppliedCards({ conflict = false } = {}) {
     const liveIds = new Set(this.adapter.undoStack.map(r => r.id));
@@ -13012,6 +13079,11 @@ class RisuHelperApp {
       if (item.undoId) {
         rightControls.push(
           h(doc, 'button', {
+            class: 'rh-btn ok',
+            title: '이 변경을 확정하고 되돌리기 단추를 제거합니다',
+            onclick: () => this.commitUndoHistory({ undoId: item.undoId }),
+          }, '✓ 확정'),
+          h(doc, 'button', {
             class: 'rh-btn danger',
             onclick: () => this.undoProposalItem(item),
           }, '되돌리기')
@@ -13475,7 +13547,12 @@ class RisuHelperApp {
             }
             this.render();
           },
-        }, `되돌리기 (${this.adapter.undoUnitCount()})`)
+        }, `되돌리기 (${this.adapter.undoUnitCount()})`),
+        this.adapter.undoUnitCount() > 0 && h(doc, 'button', {
+          class: 'rh-btn ok',
+          title: '적용한 변경을 모두 확정하고 되돌리기 기록을 비웁니다 (실수 롤백 방지)',
+          onclick: () => this.commitUndoHistory(),
+        }, '✓ 변경 확정')
       )
     );
 
@@ -13752,6 +13829,11 @@ class RisuHelperApp {
                   disabled: this.busy || this.applyingGroup,
                   onclick: () => this.applyAllProposals(msg),
                 }, `모두 적용 (${applicable.length})`),
+                msg.groupId && h(doc, 'button', {
+                  class: 'rh-btn ok',
+                  title: '이 묶음 적용을 확정하고 묶음 되돌리기 기록을 비웁니다',
+                  onclick: () => this.commitUndoHistory({ groupId: msg.groupId }),
+                }, '✓ 묶음 확정'),
                 msg.groupId && h(doc, 'button', {
                   class: 'rh-btn danger',
                   onclick: () => this.undoProposalGroup(msg),

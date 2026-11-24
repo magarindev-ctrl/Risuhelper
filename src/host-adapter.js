@@ -1898,6 +1898,35 @@ class HostAdapter {
     return { ok: true, label, undone, reverted, conflicts };
   }
 
+  /**
+   * Commits applied changes by clearing their undo records without modifying host data.
+   * With no options, clears the entire undo history; pass `undoId` or `groupId` to commit a subset.
+   */
+  clearUndoHistory({ undoId = null, groupId = null } = {}) {
+    if (this.undoStack.length === 0) {
+      return { ok: true, clearedUnits: 0, clearedRecords: 0, clearedIds: [] };
+    }
+    const unitsBefore = this.undoUnitCount();
+    let removed;
+    if (undoId) {
+      removed = this.undoStack.filter(r => r.id === undoId);
+      this.undoStack = this.undoStack.filter(r => r.id !== undoId);
+    } else if (groupId) {
+      removed = this.undoStack.filter(r => r.groupId === groupId);
+      this.undoStack = this.undoStack.filter(r => r.groupId !== groupId);
+    } else {
+      removed = this.undoStack;
+      this.undoStack = [];
+    }
+    const clearedIds = removed.map(r => r.id);
+    if (clearedIds.length === 0) {
+      return { ok: true, clearedUnits: 0, clearedRecords: 0, clearedIds: [] };
+    }
+    const clearedUnits = Math.max(1, unitsBefore - this.undoUnitCount());
+    this._emitUndoChange({ clearedIds, clearedUnits });
+    return { ok: true, clearedUnits, clearedRecords: clearedIds.length, clearedIds };
+  }
+
   exportUndoState() {
     return { version: 1, records: this.undoStack.map(r => ({ ...r })) };
   }

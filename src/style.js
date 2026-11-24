@@ -283,6 +283,12 @@ html, body {
   color: var(--rh-err-text);
 }
 
+.rh-btn.ok {
+  background: var(--rh-diff-add-bg);
+  border-color: var(--rh-ok);
+  color: var(--rh-diff-add-text);
+}
+
 .rh-btn.ghost {
   background: transparent;
 }

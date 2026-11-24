@@ -1618,3 +1618,52 @@ test('a text overwrite without a target names the free-talk actions in its refus
   assert.match(preview.error, /update_field/);
   assert.match(preview.label, /자유대화/);
 });
+
+test('clearUndoHistory commits single, group, or all undo records without altering host data', async () => {
+  const { state, adapter } = createMockHost();
+  const events = [];
+  adapter.onUndoChange = (info) => events.push(info);
+
+  const r1 = await adapter.applyProposal(
+    { action: 'replace_text', content: 'D1' },
+    { targetKind: 'char_field', fieldKey: 'desc' }
+  );
+  const { groupId } = await adapter.runGroup('묶음', async () => {
+    await adapter.applyProposal(
+      { action: 'replace_text', content: 'F1' },
+      { targetKind: 'char_field', fieldKey: 'firstMessage' }
+    );
+    await adapter.applyProposal(
+      { action: 'create_lorebook', comment: 'L1', key: 'k', content: 'body' },
+      { targetKind: 'char_lorebook', loreScope: 'character' }
+    );
+  });
+  assert.equal(adapter.undoUnitCount(), 2);
+
+  // Commit just the first standalone record
+  const single = adapter.clearUndoHistory({ undoId: r1.undoId });
+  assert.equal(single.clearedRecords, 1);
+  assert.deepEqual(single.clearedIds, [r1.undoId]);
+  assert.equal(adapter.undoUnitCount(), 1);
+  assert.equal(state.character.desc, 'D1', 'host data stays intact');
+
+  // Commit the group
+  const grp = adapter.clearUndoHistory({ groupId });
+  assert.equal(grp.clearedRecords, 2);
+  assert.equal(adapter.undoUnitCount(), 0);
+  assert.equal(state.character.firstMessage, 'F1');
+  assert.equal(state.character.globalLore.some(e => e.comment === 'L1'), true);
+
+  // Add two more records and clear everything at once
+  await adapter.applyProposal({ action: 'replace_text', content: 'D2' }, { targetKind: 'char_field', fieldKey: 'desc' });
+  await adapter.applyProposal({ action: 'replace_text', content: 'F2' }, { targetKind: 'char_field', fieldKey: 'firstMessage' });
+  assert.equal(adapter.undoUnitCount(), 2);
+  const all = adapter.clearUndoHistory();
+  assert.equal(all.clearedUnits, 2);
+  assert.equal(all.clearedRecords, 2);
+  assert.equal(adapter.undoUnitCount(), 0);
+  assert.equal(state.character.desc, 'D2');
+  assert.equal(state.character.firstMessage, 'F2');
+  assert.ok(events.some(e => Array.isArray(e.clearedIds) && e.clearedIds.length === 2));
+});
+

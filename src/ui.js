@@ -311,6 +311,38 @@ class RisuHelperApp {
     }
   }
 
+  /** Marks cards whose undo records were explicitly committed so they stay applied without Undo/Commit buttons. */
+  markCommittedCards(clearedIds) {
+    const committed = new Set(clearedIds || []);
+    if (committed.size === 0) return;
+    for (const msg of this.messages) {
+      for (const item of msg.proposals || []) {
+        if (item.applied && item.undoId && committed.has(item.undoId)) {
+          item.undoId = null;
+          item.statusMessage = '확정됨 (되돌리기 기록 비움)';
+        }
+      }
+      if (msg.groupId && !this.adapter.undoStack.some(r => r.groupId === msg.groupId)) {
+        msg.groupId = null;
+      }
+    }
+  }
+
+  /** Commits applied changes by clearing Undo records (all, one group, or one card) without touching host data. */
+  async commitUndoHistory({ undoId = null, groupId = null } = {}) {
+    if (this.applyingGroup) return;
+    const res = this.adapter.clearUndoHistory({ undoId, groupId });
+    if (!res.clearedIds.length) return;
+    this.markCommittedCards(res.clearedIds);
+    await this.flushUndoState();
+    const toast = undoId
+      ? '✓ 변경을 확정했습니다. (되돌리기 기록에서 제거됨)'
+      : groupId
+        ? '✓ 묶음 변경을 확정하고 되돌리기 기록을 비웠습니다.'
+        : `✓ 변경 ${res.clearedUnits}건을 확정하고 되돌리기 기록을 비웠습니다.`;
+    this.showToast(toast);
+  }
+
   /** Reconciles applied cards whose undo record was removed (undone or skipped due to conflict). */
   syncAppliedCards({ conflict = false } = {}) {
     const liveIds = new Set(this.adapter.undoStack.map(r => r.id));
@@ -1474,6 +1506,11 @@ class RisuHelperApp {
       if (item.undoId) {
         rightControls.push(
           h(doc, 'button', {
+            class: 'rh-btn ok',
+            title: '이 변경을 확정하고 되돌리기 단추를 제거합니다',
+            onclick: () => this.commitUndoHistory({ undoId: item.undoId }),
+          }, '✓ 확정'),
+          h(doc, 'button', {
             class: 'rh-btn danger',
             onclick: () => this.undoProposalItem(item),
           }, '되돌리기')
@@ -1937,7 +1974,12 @@ class RisuHelperApp {
             }
             this.render();
           },
-        }, `되돌리기 (${this.adapter.undoUnitCount()})`)
+        }, `되돌리기 (${this.adapter.undoUnitCount()})`),
+        this.adapter.undoUnitCount() > 0 && h(doc, 'button', {
+          class: 'rh-btn ok',
+          title: '적용한 변경을 모두 확정하고 되돌리기 기록을 비웁니다 (실수 롤백 방지)',
+          onclick: () => this.commitUndoHistory(),
+        }, '✓ 변경 확정')
       )
     );
 
@@ -2214,6 +2256,11 @@ class RisuHelperApp {
                   disabled: this.busy || this.applyingGroup,
                   onclick: () => this.applyAllProposals(msg),
                 }, `모두 적용 (${applicable.length})`),
+                msg.groupId && h(doc, 'button', {
+                  class: 'rh-btn ok',
+                  title: '이 묶음 적용을 확정하고 묶음 되돌리기 기록을 비웁니다',
+                  onclick: () => this.commitUndoHistory({ groupId: msg.groupId }),
+                }, '✓ 묶음 확정'),
                 msg.groupId && h(doc, 'button', {
                   class: 'rh-btn danger',
                   onclick: () => this.undoProposalGroup(msg),
