@@ -15,6 +15,7 @@
   "scripts": {
     "build": "node tools/build.mjs",
     "test": "node --test tests/*.test.mjs",
-    "check": "npm run build && npm test"
+    "check": "npm run build && npm test",
+    "eval": "node tools/eval-real-model.mjs"
   }
 }
