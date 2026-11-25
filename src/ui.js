@@ -52,6 +52,7 @@ const ACTION_LABELS = {
   create_greeting: '추가 첫 메시지 생성',
   delete_greeting: '추가 첫 메시지 삭제',
   import_chat: '채팅 이사',
+  create_chat: '새 채팅 생성',
   update_chat_vars: '채팅 변수 편집',
   create_module: '새 모듈 생성',
   create_character: '새 캐릭터 생성',

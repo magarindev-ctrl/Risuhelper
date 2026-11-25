@@ -150,6 +150,7 @@ const VALID_ACTIONS = new Set([
   'delete_greeting',
   'update_field',
   'import_chat',
+  'create_chat',
   'update_chat_vars',
   'create_module',
   'create_character',
@@ -349,7 +350,7 @@ function parseAssistantReply(rawText) {
 
 // Properties each action understands. Anything else in a proposal is ignored by the host adapter;
 // the UI shows it on the card so an improvised property is never dropped (or stored) silently.
-const COMMON_PROPOSAL_KEYS = ['action', 'title', 'scope', 'target', 'moduleIndex'];
+const COMMON_PROPOSAL_KEYS = ['action', 'title', 'scope', 'target', 'moduleIndex', 'targetCharIndex', 'targetChatIndex'];
 const LORE_ENTRY_KEYS = [
   'comment', 'key', 'secondkey', 'content', 'insertorder', 'alwaysActive', 'selective', 'useRegex',
   'activationPercent', 'mode', 'folder', 'folderName', 'folderIndex',
@@ -369,6 +370,7 @@ const PROPOSAL_KEYS_BY_ACTION = {
   create_greeting: ['content', 'useInCurrentChat'],
   update_field: ['field', 'edits', 'content'],
   import_chat: ['sourceChatIndex', 'items', 'variableKeys'],
+  create_chat: ['name', 'fmIndex', 'switchToNewChat', 'importFromChatIndex', 'importItems', 'variableKeys', 'summaryLorebook'],
   update_chat_vars: ['set', 'remove'],
   delete_lorebook: ['loreIndex'],
   delete_regex: ['regexIndex'],
@@ -430,6 +432,16 @@ function validateProposal(item) {
   }
   if (!VALID_ACTIONS.has(item.action)) {
     return `알 수 없는 action입니다: ${String(item.action)}`;
+  }
+  if (item.targetCharIndex !== undefined && item.targetCharIndex !== null) {
+    if (!Number.isInteger(item.targetCharIndex) || item.targetCharIndex < 0) {
+      return 'targetCharIndex는 0 이상의 정수여야 합니다.';
+    }
+  }
+  if (item.targetChatIndex !== undefined && item.targetChatIndex !== null) {
+    if (!Number.isInteger(item.targetChatIndex) || item.targetChatIndex < 0) {
+      return 'targetChatIndex는 0 이상의 정수여야 합니다.';
+    }
   }
   if (item.target !== undefined) {
     if (!item.target || typeof item.target !== 'object' || Array.isArray(item.target)) {
@@ -542,6 +554,36 @@ function validateProposal(item) {
     }
     if (item.variableKeys !== undefined && (!Array.isArray(item.variableKeys) || item.variableKeys.some(k => typeof k !== 'string' || !k))) {
       return 'import_chat의 variableKeys는 변수 이름 문자열 배열이어야 합니다.';
+    }
+  }
+  if (item.action === 'create_chat') {
+    if (item.name !== undefined && typeof item.name !== 'string') {
+      return 'create_chat의 name은 문자열이어야 합니다.';
+    }
+    if (item.fmIndex !== undefined && (!Number.isInteger(item.fmIndex) || item.fmIndex < -1)) {
+      return 'create_chat의 fmIndex는 -1(기본 첫 메시지) 또는 0 이상의 정수여야 합니다.';
+    }
+    if (item.switchToNewChat !== undefined && typeof item.switchToNewChat !== 'boolean') {
+      return 'create_chat의 switchToNewChat은 boolean이어야 합니다.';
+    }
+    if (item.importFromChatIndex !== undefined && item.importFromChatIndex !== null) {
+      const okRef = item.importFromChatIndex === 'current' || (Number.isInteger(item.importFromChatIndex) && item.importFromChatIndex >= 0);
+      if (!okRef) {
+        return 'create_chat의 importFromChatIndex는 "current" 또는 0 이상의 정수여야 합니다.';
+      }
+    }
+    if (item.importItems !== undefined) {
+      if (!Array.isArray(item.importItems) || item.importItems.length === 0 || item.importItems.some(i => !CHAT_TRANSFER_ITEMS.includes(i))) {
+        return `create_chat의 importItems는 다음 중 하나 이상을 담은 배열이어야 합니다: ${CHAT_TRANSFER_ITEMS.join(', ')}`;
+      }
+    }
+    if (item.variableKeys !== undefined && (!Array.isArray(item.variableKeys) || item.variableKeys.some(k => typeof k !== 'string' || !k))) {
+      return 'create_chat의 variableKeys는 변수 이름 문자열 배열이어야 합니다.';
+    }
+    if (item.summaryLorebook !== undefined && item.summaryLorebook !== null) {
+      if (typeof item.summaryLorebook !== 'object' || Array.isArray(item.summaryLorebook) || typeof item.summaryLorebook.content !== 'string') {
+        return 'create_chat의 summaryLorebook은 문자열 content를 포함한 JSON 객체여야 합니다.';
+      }
     }
   }
   if (item.action === 'create_greeting') {
@@ -770,6 +812,39 @@ function formatAttachedFetchLog(log) {
   return parts.join('\n\n');
 }
 
+const GHOSTWRITE_CUE_RE =
+  /대필|다음\s*(?:대사|턴|행동|응답|장면|말|메시지)|선택지|다듬|이어\s*(?:써|쓰|서|주)|묘사|대사|답장|행동|반응|초안|롤플|상황에\s*맞|안심|위로|화내|거절|고백|어떻게\s*(?:말|대답|반응|답장)|뭐라고\s*(?:할|말|대답)|유저\s*(?:대사|행동|응답|턴)|요약|정리해|흐름|대화\s*내용|지금까지|reply|ghostwrite|draft/i;
+
+const NON_GHOSTWRITE_QUERY_RE =
+  /(?:로어북|lorebook|정규식|regex|lua|루아|트리거|cbs|페르소나|persona|모듈|설정|컨피그|temperature|온도|변수|scriptstate|바이어스|스캔\s*깊이|토큰\s*예산|포팅|새\s*캐릭터|새\s*채팅|프리셋|플러그인|요청\s*로그|콜드\s*스토리지).*(?:뭐|무엇|알려|설명|차이|사용법|어떻게|만들|생성|수정|바꿔|추가|삭제|옮겨|정리|편집|설정|확인|보여|추천|뜻|기능)/i;
+
+/**
+ * Decides whether `chat_input` should attach the active chat transcript (`formatActiveChatForGhostwrite`).
+ * General RisuAI Q&A / authoring / config prompts typed while cursor happens to sit in the chat box
+ * skip the transcript so prompts stay lean (~8-10K chars), while ghostwriting / continuation /
+ * summary prompts always receive the compact sliding-window transcript.
+ */
+function shouldIncludeGhostwriteContext(userInput = '', history = []) {
+  const cur = String(userInput ?? '').trim();
+  if (!cur) return true;
+  if (GHOSTWRITE_CUE_RE.test(cur)) return true;
+  if (NON_GHOSTWRITE_QUERY_RE.test(cur)) return false;
+
+  // Short follow-ups keep ghostwrite context if the previous turn was ghostwriting
+  if (Array.isArray(history) && history.length > 0) {
+    for (let i = history.length - 1; i >= 0; i--) {
+      const msg = history[i];
+      if (!msg) continue;
+      if (msg.role === 'assistant') {
+        const raw = String(msg.rawText ?? msg.content ?? '');
+        if (/"action"\s*:\s*"replace_text"/.test(raw)) return true;
+        break;
+      }
+    }
+  }
+  return true;
+}
+
 /**
  * Builds the system prompt + message list sent to Risuai.runLLMModel().
  */
@@ -842,7 +917,7 @@ function buildConversationMessages({ context, snapshot, extraContext, history, u
   }
   if (extraContext?.characterCatalog?.length) {
     extraBlocks.push(
-      '[다른 캐릭터 목록 (교차 포팅용 읽기 전용 요약)] port_from_character의 sourceCharIndex에 charIndex 값을 사용하세요(current: true는 현재 캐릭터이므로 원본 불가).\n' +
+      '[다른 캐릭터 목록 (교차 포팅용 읽기 전용 요약)] `port_from_character`의 `sourceCharIndex` 또는 다른 캐릭터 직접 편집(`targetCharIndex`)에 `charIndex` 값을 사용하세요(`current: true`는 현재 캐릭터).\n' +
       JSON.stringify(extraContext.characterCatalog, null, 2)
     );
   }
@@ -869,19 +944,24 @@ function buildConversationMessages({ context, snapshot, extraContext, history, u
     }
     extraBlocks.push(parts.join('\n'));
   }
-  if (snapshot?.target?.targetKind === 'chat_input' && snapshot?.chatContext) {
+  const includeGhostwriteContext = Boolean(
+    snapshot?.target?.targetKind === 'chat_input' &&
+    snapshot?.chatContext &&
+    shouldIncludeGhostwriteContext(userInput, history)
+  );
+  if (includeGhostwriteContext) {
     extraBlocks.push(formatActiveChatForGhostwrite(snapshot.chatContext));
   }
   if (extraContext?.chatList?.chats?.length > 1) {
     const list = extraContext.chatList;
     extraBlocks.push(
-      '[같은 캐릭터의 채팅 목록] chatIndex = import_chat의 sourceChatIndex에 쓰는 번호(0부터). current: true = 지금 열려 있는 채팅(모든 변경이 적용되는 곳). coldStored: true = 콜드 스토리지 보관 중(RisuAI에서 먼저 열어야 읽힘). ' +
+      '[같은 캐릭터의 채팅 목록] chatIndex = `import_chat`의 `sourceChatIndex`, `create_chat`의 `importFromChatIndex`, 또는 다른 채팅 직접 편집의 `targetChatIndex`에 쓰는 번호(0부터). current: true = 지금 열려 있는 채팅. coldStored: true = 콜드 스토리지 보관 중(RisuAI에서 먼저 열어야 읽힘). ' +
       `사용자에게 말할 때는 "N번 채팅"(N = chatIndex + 1)이라고 부르세요.${list.total > list.chats.length ? ` (총 ${list.total}개 중 일부만 표시)` : ''}\n` +
       JSON.stringify(list.chats, null, 2) +
       (extraContext.referenceChat
         ? ''
         : '\n다른 채팅의 대화 내용은 전달되지 않았습니다. 다른 채팅을 요약해 달라는 요청에는 내용을 지어내지 말고, ☰ 메뉴의 "참조 채팅"에서 그 채팅을 고르거나 "N번 채팅"처럼 번호·이름으로 지목해 다시 요청하라고 안내하세요. ' +
-          '변수·작가의 노트 등을 그대로 옮기는 import_chat은 대화 내용 없이도 제안할 수 있습니다.')
+          '변수·작가의 노트 등을 그대로 옮기는 import_chat / create_chat은 대화 내용 없이도 제안할 수 있습니다.')
     );
   }
   if (extraContext?.referenceChat) {
@@ -914,10 +994,13 @@ function buildConversationMessages({ context, snapshot, extraContext, history, u
       '채팅 말풍선과 기존 모듈 기본 필드는 전용 동작이 없으니, 해당 칸을 클릭하거나 상단에서 대상을 고른 뒤 요청하라고 안내하세요.' +
       (screenHintText ? `\n- 화면 힌트(참고용, 편집 대상 아님): ${screenHintText}` : '')
     : isChatInput
-      ? '\n- 모드: 채팅 입력창 (유저 대필) — 사용자가 현재 채팅의 다음 유저 응답을 대필·다듬기 위해 채팅 입력칸을 선택했습니다. ' +
-        '대필을 요청하면 아래 [현재 채팅 대화 흐름]에 맞춰 바로 보낼 수 있는 유저 턴 본문을 `replace_text` 제안 블록으로 제시하세요(여러 선택지를 요청하면 각 선택지를 별도 `replace_text` 블록으로). ' +
-        '참고: Plugin v3 제한으로 본체 입력칸에 아직 전송하지 않은 초안은 읽을 수 없으므로, 사용자가 초안을 붙여넣지 않고 "방금 쓴 초안 다듬어줘"라고 하면 여기에 붙여넣어 달라고 안내하세요. ' +
-        '로어북·첫 메시지·캐릭터 필드·채팅 변수·채팅 이사 요청에는 각 전용 동작을 그대로 사용하면 됩니다.'
+      ? (includeGhostwriteContext
+          ? '\n- 모드: 채팅 입력창 (유저 대필) — 사용자가 현재 채팅의 다음 유저 응답을 대필·다듬기 위해 채팅 입력칸을 선택했습니다. ' +
+            '대필을 요청하면 아래 [현재 채팅 대화 흐름]에 맞춰 바로 보낼 수 있는 유저 턴 본문을 `replace_text` 제안 블록으로 제시하세요(여러 선택지를 요청하면 각 선택지를 별도 `replace_text` 블록으로). ' +
+            '참고: Plugin v3 제한으로 본체 입력칸에 아직 전송하지 않은 초안은 읽을 수 없으므로, 사용자가 초안을 붙여넣지 않고 "방금 쓴 초안 다듬어줘"라고 하면 여기에 붙여넣어 달라고 안내하세요. ' +
+            '로어북·첫 메시지·캐릭터 필드·채팅 변수·채팅 이사 요청에는 각 전용 동작을 그대로 사용하면 됩니다.'
+          : '\n- 모드: 채팅 입력창 (질문·편집 요청) — 커서가 채팅 입력칸에 있지만 일반 질문·설정·제작 요청이므로 불필요한 채팅 대화 전문은 생략했습니다. ' +
+            '질문에 답하거나 각 전용 동작(로어북·정규식·Lua·캐릭터 필드·채팅 변수·채팅 생성/이사 등)으로 제안하세요.')
       : '';
 
   const dynamicRulesBlock = skillPack.rules.length > 0
@@ -977,6 +1060,7 @@ ${extraBlocks.join('\n\n')}
 export {
   DELETE_ACTIONS,
   findUnknownProposalKeys,
+  shouldIncludeGhostwriteContext,
   readModelResponse,
   callRisuModel,
   extractProposalBlocks,

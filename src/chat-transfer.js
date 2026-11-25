@@ -165,13 +165,15 @@ function memoryTexts(chat) {
  * `budget` characters; when older ones are left out, summaries the host's memory feature already
  * made (HypaV3 / HypaV2 / SupaMemory) are passed along to cover them.
  */
-function buildReferenceChat(chat, { index, budget = 60000 } = {}) {
+function buildReferenceChat(chat, { index, budget = 60000, maxMessages = 0 } = {}) {
   const limit = Math.max(200, Number(budget) || 0);
+  const msgLimit = Number.isInteger(maxMessages) && maxMessages > 0 ? maxMessages : 0;
   const messages = Array.isArray(chat?.message) ? chat.message : [];
 
   const transcript = [];
   let used = 0;
   for (let i = messages.length - 1; i >= 0; i--) {
+    if (msgLimit > 0 && transcript.length >= msgLimit) break;
     const text = String(messages[i]?.data ?? '');
     const role = messages[i]?.role === 'user' ? '유저' : '캐릭터';
     if (used + text.length > limit) {

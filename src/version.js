@@ -1,4 +1,4 @@
-const VERSION = '0.5.1';
+const VERSION = '0.6.0';
 const PLUGIN_NAME = 'risuhelper';
 const STORAGE_KEY = 'risuhelper_state_v1';
 const PRESET_STORAGE_KEY = 'risuhelper_preset_v1';
@@ -84,6 +84,8 @@ const CONFIG_FIELD_META = {
 // How many characters of the target's original text are sent to the model. Longer originals are
 // truncated (and full overwrites of them blocked), so this is user-configurable in settings.
 const DEFAULT_MAX_CONTENT_CHARS = 60000;
+const DEFAULT_GHOSTWRITE_CHAT_CHARS = 10000;
+const DEFAULT_GHOSTWRITE_MAX_MESSAGES = 12;
 const MAX_CONTENT_CHAR_OPTIONS = [24000, 60000, 120000, 300000];
 const ALLOWED_CHAR_FIELDS = Object.keys(CHAR_FIELD_META);
 const ALLOWED_MODULE_FIELDS = Object.keys(MODULE_FIELD_META);
@@ -108,6 +110,8 @@ export {
   PRESET_STORAGE_KEY,
   UNDO_STORAGE_KEY,
   DEFAULT_MAX_CONTENT_CHARS,
+  DEFAULT_GHOSTWRITE_CHAT_CHARS,
+  DEFAULT_GHOSTWRITE_MAX_MESSAGES,
   MAX_CONTENT_CHAR_OPTIONS,
   ALLOWED_CONFIG_KEYS,
   CONFIG_KEY_TYPES,

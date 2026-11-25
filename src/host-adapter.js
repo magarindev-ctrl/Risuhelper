@@ -5,6 +5,8 @@ import {
   MODULE_FIELD_META,
   CONFIG_FIELD_META,
   DEFAULT_MAX_CONTENT_CHARS,
+  DEFAULT_GHOSTWRITE_CHAT_CHARS,
+  DEFAULT_GHOSTWRITE_MAX_MESSAGES,
   ALLOWED_CHAR_FIELDS,
   ALLOWED_MODULE_FIELDS,
   ALLOWED_LORE_TEXT_FIELDS,
@@ -14,6 +16,10 @@ import { applyTextEdits } from './text-edits.js';
 import { diffValues, revertOps } from './undo-journal.js';
 import { FREE_EDIT_FIELDS, AUTHOR_NOTE_FIELD, fieldLabel } from './fields.js';
 import { listChats, buildReferenceChat, planChatImport, chatName, isColdStoredChat } from './chat-transfer.js';
+import {
+  probeHostCapabilities,
+  detectHostFlavorSync,
+} from './host-capabilities.js';
 import {
   summarizeChatVariables,
   planChatVarsUpdate,
@@ -867,10 +873,6 @@ function normalizeRegexEntry(input, existing = null) {
   return base;
 }
 
-function isCatchAllProxyApi(api) {
-  return Boolean(api && typeof api.__risuhelper_nonexistent_probe__ === 'function');
-}
-
 function isMissingMethodError(err) {
   const msg = String(err?.message || err || '').toLowerCase();
   return msg.includes('not found') || msg.includes('not a function') || msg.includes('undefined');
@@ -1087,6 +1089,8 @@ class HostAdapter {
     this.maxContentChars = DEFAULT_MAX_CONTENT_CHARS;
     this._activeGroup = null;
     this._probedFlavor = null;
+    this._capabilities = null;
+    this._runtimeInfo = null;
     this._lastMatchedModuleId = null;
   }
 
@@ -1107,68 +1111,34 @@ class HostAdapter {
   }
 
   /**
-   * Probes the real host flavor safely (working around RisuAI Plugin v3's catch-all `window.risuai` Proxy,
-   * where `typeof api.anyName === 'function'` is always true for nonexistent methods).
+   * Probes the real host flavor and API capability matrix safely (working around RisuAI
+   * Plugin v3's catch-all `window.risuai` Proxy via `getRuntimeInfo()` + `<title>`).
    */
   async probeHostFlavor(rootDoc = null) {
     if (this._probedFlavor) return this._probedFlavor;
-
-    // 1. Check host document <title> when mainDom is available (zero side effects, works on every fork)
-    if (rootDoc && typeof rootDoc.querySelector === 'function') {
-      try {
-        const titleEl = await rootDoc.querySelector('title');
-        const title = titleEl ? String((await titleEl.textContent()) || '').trim().toLowerCase() : '';
-        if (title.includes('pocketrisu')) {
-          this._probedFlavor = { name: 'PocketRisu', activePersonaAutoSyncs: false, syncLiteCharError: false };
-          return this._probedFlavor;
-        }
-        if (title.includes('risubard')) {
-          this._probedFlavor = { name: 'RisuBard', activePersonaAutoSyncs: false, syncLiteCharError: false };
-          return this._probedFlavor;
-        }
-        if (title.includes('risunest')) {
-          this._probedFlavor = { name: 'RisuNest', activePersonaAutoSyncs: true, syncLiteCharError: true };
-          return this._probedFlavor;
-        }
-        if (title.includes('haejeok') || title.includes('해적')) {
-          this._probedFlavor = { name: 'HaejeokRisuai', activePersonaAutoSyncs: true, syncLiteCharError: false };
-          return this._probedFlavor;
-        }
-        if (title.includes('risuai')) {
-          this._probedFlavor = { name: 'RisuAI', activePersonaAutoSyncs: false, syncLiteCharError: false };
-          return this._probedFlavor;
-        }
-      } catch {}
-    }
-
-    // 2. Non-Proxy object (e.g. unit tests or direct host objects) can safely inspect own properties
-    if (!isCatchAllProxyApi(this.api)) {
-      if (typeof this.api?.risunestCallHostTool === 'function') {
-        this._probedFlavor = { name: 'RisuNest', activePersonaAutoSyncs: true, syncLiteCharError: true };
-        return this._probedFlavor;
-      }
-      if (typeof this.api?._getBardWikiDocuments === 'function') {
-        this._probedFlavor = { name: 'RisuBard', activePersonaAutoSyncs: false, syncLiteCharError: false };
-        return this._probedFlavor;
-      }
-    }
-
-    this._probedFlavor = { name: 'RisuAI', activePersonaAutoSyncs: false, syncLiteCharError: false };
+    const probed = await probeHostCapabilities(this.api, rootDoc);
+    this._probedFlavor = probed;
+    this._capabilities = probed.capabilities;
+    this._runtimeInfo = probed.runtime;
     return this._probedFlavor;
   }
 
   detectHostFlavor() {
     if (this._probedFlavor) return this._probedFlavor;
-    // Never trust `typeof api.foo === 'function'` when `window.risuai` is a catch-all Proxy
-    if (!isCatchAllProxyApi(this.api)) {
-      if (typeof this.api?.risunestCallHostTool === 'function') {
-        return { name: 'RisuNest', activePersonaAutoSyncs: true, syncLiteCharError: true };
-      }
-      if (typeof this.api?._getBardWikiDocuments === 'function') {
-        return { name: 'RisuBard', activePersonaAutoSyncs: false, syncLiteCharError: false };
-      }
-    }
-    return { name: 'RisuAI', activePersonaAutoSyncs: false, syncLiteCharError: false };
+    return detectHostFlavorSync(this.api);
+  }
+
+  getCapabilities() {
+    if (this._capabilities) return this._capabilities;
+    return this.detectHostFlavor().capabilities;
+  }
+
+  hasCapability(cap) {
+    return Boolean(this.getCapabilities()?.[cap]);
+  }
+
+  getRuntimeInfo() {
+    return this._runtimeInfo;
   }
 
   async _getCharacter() {
@@ -1193,6 +1163,57 @@ class HostAdapter {
     }
     if (typeof this.api.setChar === 'function') return await this.api.setChar(char);
     throw new Error('캐릭터 저장 API를 찾을 수 없습니다.');
+  }
+
+  /**
+   * Reads any character by index using `getCharacterFromIndex(index)` (present on all 6 hosts),
+   * avoiding full `db.characters` reads. Falls back cleanly when absent in older mocks/hosts.
+   */
+  async _getCharacterAt(charIndex) {
+    if (charIndex === null || charIndex === undefined) {
+      return await this._getCharacter();
+    }
+    if (!Number.isInteger(charIndex) || charIndex < 0) return null;
+
+    if (this.hasCapability('getCharacterFromIndex') && typeof this.api.getCharacterFromIndex === 'function') {
+      try {
+        const fetched = await this.api.getCharacterFromIndex(charIndex);
+        return fetched ?? null;
+      } catch (err) {
+        if (!isMissingMethodError(err)) throw err;
+      }
+    }
+
+    const { charIndex: activeIdx } = await this._getActiveIndices();
+    if (Number.isInteger(activeIdx) && activeIdx === charIndex) {
+      return await this._getCharacter();
+    }
+    const db = await this.readDbSubset(['characters']);
+    return Array.isArray(db?.characters) ? (db.characters[charIndex] ?? null) : null;
+  }
+
+  /**
+   * Writes any character by index using `setCharacterToIndex(index, char)` (present on all 6 hosts).
+   * Falls back to `_setCharacter` only when `charIndex` matches the active character.
+   */
+  async _setCharacterAt(charIndex, nextChar) {
+    if (
+      Number.isInteger(charIndex) &&
+      charIndex >= 0 &&
+      this.hasCapability('setCharacterToIndex') &&
+      typeof this.api.setCharacterToIndex === 'function'
+    ) {
+      try {
+        return await this.api.setCharacterToIndex(charIndex, nextChar);
+      } catch (err) {
+        if (!isMissingMethodError(err)) throw err;
+      }
+    }
+    const { charIndex: activeIdx } = await this._getActiveIndices();
+    if (Number.isInteger(activeIdx) && activeIdx === charIndex) {
+      return await this._setCharacter(nextChar);
+    }
+    throw new Error('이 호스트는 다른 캐릭터 직접 저장 API(setCharacterToIndex)를 지원하지 않습니다. 해당 캐릭터로 이동한 뒤 다시 시도해 주세요.');
   }
 
   async _getActiveIndices() {
@@ -1428,7 +1449,7 @@ class HostAdapter {
 
   /**
    * Saves a modified chat via setChatToIndex() when supported (required by PocketRisu / RisuNest),
-   * falling back to updating char.chats[chatIndex] via _setCharacter() on older/hardened forks.
+   * falling back to updating char.chats[chatIndex] via _setCharacter() only for the active character.
    */
   async _setChat(charIndex, chatIndex, nextChat) {
     if (
@@ -1443,7 +1464,10 @@ class HostAdapter {
         if (!isMissingMethodError(err)) throw err;
       }
     }
-    const { char } = await this.readActiveCharacter();
+    const { char, charIndex: activeCharIndex } = await this.readActiveCharacter();
+    if (Number.isInteger(charIndex) && Number.isInteger(activeCharIndex) && charIndex !== activeCharIndex) {
+      throw new Error('다른 캐릭터의 채팅을 저장하려면 setChatToIndex API 지원이 필요합니다.');
+    }
     if (!char || !Array.isArray(char.chats) || !char.chats[chatIndex]) {
       throw new Error('채팅 저장 API(setChatToIndex)를 사용할 수 없습니다.');
     }
@@ -1478,6 +1502,111 @@ class HostAdapter {
     return { chat, char, charIndex, chatIndex };
   }
 
+  _formatCrossPrefix({ char, charIndex, chat = null, chatIndex = null, crossCharacter = false, crossChat = false } = {}) {
+    const charLabel = char?.name || (Number.isInteger(charIndex) ? `#${charIndex + 1}` : '무제');
+    if (crossCharacter && chat) {
+      return `[다른 캐릭터: ${charLabel} · 채팅: ${chatName(chat, chatIndex ?? 0)}] `;
+    }
+    if (crossCharacter) {
+      return `[다른 캐릭터: ${charLabel}] `;
+    }
+    if (crossChat && chat) {
+      return `[다른 채팅: ${chatName(chat, chatIndex ?? 0)}] `;
+    }
+    return '';
+  }
+
+  /**
+   * Resolves a target character: active character by default, or any character when `targetCharIndex`
+   * (or a cross-character `binding`) is explicitly specified.
+   */
+  async _resolveTargetCharacter(proposalOrTarget = {}, binding = null, actionVerb = '적용') {
+    const rawIdx = proposalOrTarget?.targetCharIndex ?? binding?.targetCharIndex;
+    const isExplicit = Number.isInteger(rawIdx) && rawIdx >= 0;
+
+    if (!isExplicit && !binding?.crossCharacter) {
+      const { char, charIndex, chatIndex } = await this._requireSameActiveCharacter(binding, actionVerb);
+      return {
+        char,
+        charIndex,
+        activeCharIndex: charIndex,
+        activeChatIndex: chatIndex,
+        crossCharacter: false,
+      };
+    }
+
+    const { charIndex: activeCharIndex, chatIndex: activeChatIndex } = await this._getActiveIndices();
+    const targetIdx = isExplicit ? rawIdx : binding?.charIndex;
+    if (!Number.isInteger(targetIdx) || targetIdx < 0) {
+      throw new Error(`대상 캐릭터 인덱스(${String(targetIdx)})가 올바르지 않습니다.`);
+    }
+    const isSameAsActive = Number.isInteger(activeCharIndex) && targetIdx === activeCharIndex;
+    const char = isSameAsActive ? await this._getCharacter() : await this._getCharacterAt(targetIdx);
+    if (!char) {
+      throw new Error(`대상 캐릭터 #${targetIdx + 1}을(를) 찾을 수 없습니다.`);
+    }
+    if (binding && !isSameCharacter(char, targetIdx, binding)) {
+      throw new Error(`대상 캐릭터(#${targetIdx + 1})가 변경되어 ${actionVerb}을(를) 중단했습니다. 다시 요청해 주세요.`);
+    }
+    return {
+      char,
+      charIndex: targetIdx,
+      activeCharIndex,
+      activeChatIndex,
+      crossCharacter: !isSameAsActive,
+    };
+  }
+
+  /**
+   * Resolves a target chat: active chat by default, or any character's chat when `targetCharIndex`
+   * / `targetChatIndex` (or a cross-chat `binding`) is explicitly specified.
+   */
+  async _resolveTargetChat(proposalOrTarget = {}, binding = null, actionVerb = '적용') {
+    const hasTargetChar = Number.isInteger(proposalOrTarget?.targetCharIndex) && proposalOrTarget.targetCharIndex >= 0;
+    const hasTargetChat = Number.isInteger(proposalOrTarget?.targetChatIndex) && proposalOrTarget.targetChatIndex >= 0;
+
+    if (!hasTargetChar && !hasTargetChat && !binding?.crossCharacter && !binding?.crossChat) {
+      const { chat, char, charIndex, chatIndex } = await this._requireSameActiveChat(binding, actionVerb);
+      return { chat, char, charIndex, chatIndex, crossCharacter: false, crossChat: false };
+    }
+
+    const { char, charIndex, activeChatIndex, crossCharacter } = await this._resolveTargetCharacter(
+      proposalOrTarget,
+      binding,
+      actionVerb
+    );
+    const chats = Array.isArray(char.chats) ? char.chats : [];
+    let chatIndex = hasTargetChat
+      ? proposalOrTarget.targetChatIndex
+      : (Number.isInteger(binding?.chatIndex)
+          ? binding.chatIndex
+          : (!crossCharacter && Number.isInteger(activeChatIndex) ? activeChatIndex : (char.chatPage ?? 0)));
+
+    // Re-locate by pinned chatId if chat list shifted between preview and apply/undo
+    if (binding?.chatId && chats[chatIndex]?.id !== binding.chatId) {
+      const movedIdx = chats.findIndex(c => c && c.id === binding.chatId);
+      if (movedIdx === -1) {
+        throw new Error(`대상 채팅을 찾을 수 없어 ${actionVerb}을(를) 중단했습니다. (삭제되었거나 채팅 목록이 바뀌었습니다)`);
+      }
+      chatIndex = movedIdx;
+    }
+
+    if (!Number.isInteger(chatIndex) || chatIndex < 0 || chatIndex >= chats.length) {
+      throw new Error(`대상 채팅 #${Number(chatIndex) + 1}을(를) 찾을 수 없습니다. (총 ${chats.length}개)`);
+    }
+
+    const chat = await this._readChatAt(charIndex, chatIndex, char);
+    if (!chat) throw new Error(`대상 채팅 #${chatIndex + 1}을(를) 읽지 못했습니다.`);
+    if (isColdStoredChat(chat)) {
+      throw new Error(
+        `대상 채팅 #${chatIndex + 1}("${chatName(chat, chatIndex)}")은(는) 콜드 스토리지에 보관 중이라 읽거나 수정할 수 없습니다. RisuAI에서 먼저 열어 복원해 주세요.`
+      );
+    }
+
+    const crossChat = crossCharacter || (Number.isInteger(activeChatIndex) && chatIndex !== activeChatIndex);
+    return { chat, char, charIndex, chatIndex, crossCharacter, crossChat };
+  }
+
   /**
    * Resolves the effective target while blocking prompt-injected target/fieldKey overrides.
    */
@@ -1495,11 +1624,18 @@ class HostAdapter {
     }
 
     if (proposal?.action === 'patch_text' || proposal?.action === 'replace_text') {
-      // Never allow LLM proposal.target to redirect a direct text edit to a different field or target
+      // Never allow LLM proposal.target or targetCharIndex/targetChatIndex to redirect a direct text edit
+      if (proposal.targetCharIndex !== undefined && proposal.targetCharIndex !== null && proposal.targetCharIndex !== base.targetCharIndex) {
+        throw new Error('보안상 patch_text/replace_text에서는 targetCharIndex로 대상을 전환할 수 없습니다. 전용 동작(update_field 등)을 사용해 주세요.');
+      }
+      if (proposal.targetChatIndex !== undefined && proposal.targetChatIndex !== null && proposal.targetChatIndex !== base.targetChatIndex) {
+        throw new Error('보안상 patch_text/replace_text에서는 targetChatIndex로 대상을 전환할 수 없습니다. 전용 동작(update_field 등)을 사용해 주세요.');
+      }
       if (pt) {
         const guardedKeys = [
           'targetKind', 'fieldKey', 'loreIndex', 'loreScope',
           'personaIndex', 'moduleIndex', 'regexIndex', 'greetingIndex', 'messageIndex',
+          'targetCharIndex', 'targetChatIndex',
         ];
         for (const k of guardedKeys) {
           if (pt[k] !== undefined && pt[k] !== null && pt[k] !== base[k]) {
@@ -1573,38 +1709,69 @@ class HostAdapter {
     };
   }
 
+  _summarizeCatalogCharacter(c, charIndex, activeIndex) {
+    const lore = Array.isArray(c.globalLore) ? c.globalLore : [];
+    const regex = Array.isArray(c.customscript) ? c.customscript : [];
+    const lua = extractLuaFromTriggers(c.triggerscript);
+    return {
+      charIndex,
+      name: String(c.name || '(이름 없음)'),
+      type: c.type === 'group' ? 'group' : 'character',
+      current: charIndex === activeIndex,
+      loreCount: lore.length,
+      loreNames: lore.slice(0, 25).map((e, idx) => `#${idx} ${e?.mode === 'folder' ? '📁 ' : ''}${e?.comment || '(무제)'}`),
+      regexCount: regex.length,
+      regexNames: regex.slice(0, 25).map((r, idx) => `#${idx} ${r?.comment || '(무제)'}`),
+      hasLua: Boolean(lua.isLua && lua.code.trim()),
+      tags: Array.isArray(c.tags) ? c.tags.slice(0, 12) : [],
+    };
+  }
+
   /**
-   * Reads a lightweight read-only catalog of characters in `db.characters` for cross-character porting.
-   * Should ONLY be called on demand (when user requests porting or inspecting other characters).
+   * Reads a lightweight read-only catalog of characters for cross-character porting and borderless targeting.
+   * Uses RisuNest's paginated `queryCharacters` + `getCharacterFromIndex` fast path when supported to
+   * avoid loading the full `db.characters` array; falls back to `getDatabase(['characters'])` otherwise.
    */
   async readCharacterCatalog() {
+    const { charIndex } = await this._getActiveIndices();
+    const activeIndex = Number.isInteger(charIndex) ? charIndex : null;
+
+    if (this.hasCapability('risunestQuery') && typeof this.api.queryCharacters === 'function') {
+      try {
+        const page = await this.api.queryCharacters({ trash: false, limit: 60 });
+        const rawItems = Array.isArray(page) ? page : (Array.isArray(page?.items) ? page.items : null);
+        if (rawItems) {
+          const catalog = [];
+          for (let i = 0; i < rawItems.length && catalog.length < 60; i++) {
+            const item = rawItems[i];
+            if (!item || item.trashTime) continue;
+            const cIdx = Number.isInteger(item.index)
+              ? item.index
+              : (Number.isInteger(item.charIndex) ? item.charIndex : i);
+            let full = null;
+            if (this.hasCapability('getCharacterFromIndex') && typeof this.api.getCharacterFromIndex === 'function') {
+              try { full = await this.api.getCharacterFromIndex(cIdx); } catch {}
+            }
+            const src = full || item;
+            if (!src || src.trashTime || src.chaId === '§temp' || src.chaId === '§playground') continue;
+            catalog.push(this._summarizeCatalogCharacter(src, cIdx, activeIndex));
+          }
+          return { characters: [], catalog, activeIndex, permissionDenied: false, usedQueryCharacters: true };
+        }
+      } catch {}
+    }
+
     const db = await this.readDbSubset(['characters']);
     if (!db) return { characters: [], catalog: [], activeIndex: null, permissionDenied: true };
     const characters = Array.isArray(db.characters) ? db.characters : [];
-    const { charIndex } = await this._getActiveIndices();
-    const activeIndex = Number.isInteger(charIndex) ? charIndex : null;
     const catalog = [];
     for (let i = 0; i < characters.length; i++) {
       const c = characters[i];
       if (!c || c.trashTime || c.chaId === '§temp' || c.chaId === '§playground') continue;
-      const lore = Array.isArray(c.globalLore) ? c.globalLore : [];
-      const regex = Array.isArray(c.customscript) ? c.customscript : [];
-      const lua = extractLuaFromTriggers(c.triggerscript);
-      catalog.push({
-        charIndex: i,
-        name: String(c.name || '(이름 없음)'),
-        type: c.type === 'group' ? 'group' : 'character',
-        current: i === activeIndex,
-        loreCount: lore.length,
-        loreNames: lore.slice(0, 25).map((e, idx) => `#${idx} ${e?.mode === 'folder' ? '📁 ' : ''}${e?.comment || '(무제)'}`),
-        regexCount: regex.length,
-        regexNames: regex.slice(0, 25).map((r, idx) => `#${idx} ${r?.comment || '(무제)'}`),
-        hasLua: Boolean(lua.isLua && lua.code.trim()),
-        tags: Array.isArray(c.tags) ? c.tags.slice(0, 12) : [],
-      });
+      catalog.push(this._summarizeCatalogCharacter(c, i, activeIndex));
       if (catalog.length >= 60) break;
     }
-    return { characters, catalog, activeIndex, permissionDenied: false };
+    return { characters, catalog, activeIndex, permissionDenied: false, usedQueryCharacters: false };
   }
 
   /**
@@ -1797,9 +1964,25 @@ class HostAdapter {
   async readTargetSnapshot(target) {
     const t = target || { targetKind: 'general' };
 
+    const resolveCharSnap = async () => {
+      try {
+        return { ok: true, ...(await this._resolveTargetCharacter(t)) };
+      } catch (err) {
+        return { ok: false, reason: err.message };
+      }
+    };
+    const resolveChatSnap = async () => {
+      try {
+        return { ok: true, ...(await this._resolveTargetChat(t)) };
+      } catch (err) {
+        return { ok: false, reason: err.message };
+      }
+    };
+
     if (t.targetKind === 'char_field') {
-      const { char, charIndex } = await this.readActiveCharacter();
-      if (!char) return { ok: false, reason: '선택된 캐릭터가 없습니다.', content: '' };
+      const resolved = await resolveCharSnap();
+      if (!resolved.ok) return { ok: false, reason: resolved.reason, content: '' };
+      const { char, charIndex, crossCharacter } = resolved;
       const fieldKey = t.fieldKey || 'desc';
       const fieldErr = validateAllowedFieldKey('char_field', fieldKey);
       if (fieldErr) return { ok: false, reason: fieldErr, content: '' };
@@ -1807,14 +1990,15 @@ class HostAdapter {
         ? String(char.depth_prompt?.prompt ?? '')
         : String(char[fieldKey] ?? '');
       const orphanedCharLore = findOrphanedLorebooks(char.globalLore);
+      const prefix = this._formatCrossPrefix({ char, charIndex, crossCharacter });
       return {
         ok: true,
-        target: { ...t, fieldKey },
-        hostBinding: { charIndex, ...getCharIdentity(char) },
-        label: CHAR_FIELD_META[fieldKey]?.label || fieldKey,
+        target: { ...t, fieldKey, ...(crossCharacter ? { targetCharIndex: charIndex } : {}) },
+        hostBinding: { charIndex, ...getCharIdentity(char), ...(crossCharacter ? { targetCharIndex: charIndex, crossCharacter: true } : {}) },
+        label: `${prefix}${CHAR_FIELD_META[fieldKey]?.label || fieldKey}`,
         content,
         charName: char.name || '(이름 없음)',
-        ...(orphanedCharLore.length > 0 ? {
+        ...(orphanedCharLore.length > 0 && !crossCharacter ? {
           orphanedLoreCount: orphanedCharLore.length,
           orphanedLoreIndices: orphanedCharLore,
           orphanedLoreScopeLabel: '캐릭터 로어북',
@@ -1824,8 +2008,9 @@ class HostAdapter {
     }
 
     if (t.targetKind === 'char_alt_greeting') {
-      const { char, charIndex } = await this.readActiveCharacter();
-      if (!char) return { ok: false, reason: '선택된 캐릭터가 없습니다.', content: '' };
+      const resolved = await resolveCharSnap();
+      if (!resolved.ok) return { ok: false, reason: resolved.reason, content: '' };
+      const { char, charIndex, crossCharacter } = resolved;
       const list = Array.isArray(char.alternateGreetings) ? char.alternateGreetings : [];
       // No guessing: without a valid index nothing is selected. Falling back to the first
       // greeting would turn "write a new one" into overwriting an existing greeting.
@@ -1833,13 +2018,14 @@ class HostAdapter {
         Number.isInteger(t.greetingIndex) && t.greetingIndex >= 0 && t.greetingIndex < list.length
           ? t.greetingIndex
           : null;
+      const prefix = this._formatCrossPrefix({ char, charIndex, crossCharacter });
       return {
         ok: true,
-        target: { ...t, fieldKey: 'alternateGreetings', greetingIndex: idx },
-        hostBinding: { charIndex, greetingIndex: idx, ...getCharIdentity(char) },
+        target: { ...t, fieldKey: 'alternateGreetings', greetingIndex: idx, ...(crossCharacter ? { targetCharIndex: charIndex } : {}) },
+        hostBinding: { charIndex, greetingIndex: idx, ...getCharIdentity(char), ...(crossCharacter ? { targetCharIndex: charIndex, crossCharacter: true } : {}) },
         label: idx !== null
-          ? `캐릭터 · 추가 첫 메시지 #${idx + 1} (${char.name || '무제'})`
-          : `캐릭터 · 추가 첫 메시지 (항목 미선택 · 현재 ${list.length}개 · ${char.name || '무제'})`,
+          ? `${prefix}캐릭터 · 추가 첫 메시지 #${idx + 1} (${char.name || '무제'})`
+          : `${prefix}캐릭터 · 추가 첫 메시지 (항목 미선택 · 현재 ${list.length}개 · ${char.name || '무제'})`,
         content: idx !== null ? String(list[idx] ?? '') : '',
         greetingCount: list.length,
         altGreetingsSummary: list.slice(0, 40).map((g, i) => ({
@@ -1851,16 +2037,30 @@ class HostAdapter {
     }
 
     if (t.targetKind === 'chat_note') {
-      const { chat, char, charIndex, chatIndex } = await this.readActiveChat();
-      if (!chat) return { ok: false, reason: '활성 채팅을 찾을 수 없습니다.', content: '' };
+      const resolved = await resolveChatSnap();
+      if (!resolved.ok) return { ok: false, reason: resolved.reason, content: '' };
+      const { chat, char, charIndex, chatIndex, crossCharacter, crossChat } = resolved;
       const fieldKey = t.fieldKey || 'note';
       const fieldErr = validateAllowedFieldKey('chat_note', fieldKey);
       if (fieldErr) return { ok: false, reason: fieldErr, content: '' };
+      const prefix = this._formatCrossPrefix({ char, charIndex, chat, chatIndex, crossCharacter, crossChat });
       return {
         ok: true,
-        target: { ...t, fieldKey: 'note' },
-        hostBinding: { charIndex, chatIndex, ...getCharIdentity(char) },
-        label: '작가의 노트 (현재 채팅)',
+        target: {
+          ...t,
+          fieldKey: 'note',
+          ...(crossCharacter ? { targetCharIndex: charIndex } : {}),
+          ...(crossChat ? { targetChatIndex: chatIndex } : {}),
+        },
+        hostBinding: {
+          charIndex,
+          chatIndex,
+          chatId: chat.id || null,
+          ...getCharIdentity(char),
+          ...(crossCharacter ? { targetCharIndex: charIndex, crossCharacter: true } : {}),
+          ...(crossChat ? { targetChatIndex: chatIndex, crossChat: true } : {}),
+        },
+        label: crossCharacter || crossChat ? `${prefix}작가의 노트` : '작가의 노트 (현재 채팅)',
         content: String(chat.note ?? ''),
         charName: char?.name || '(이름 없음)',
       };
@@ -1876,7 +2076,12 @@ class HostAdapter {
       const activeGreeting = (fmIndex >= 0 && Array.isArray(char?.alternateGreetings) && char.alternateGreetings[fmIndex] !== undefined)
         ? String(char.alternateGreetings[fmIndex] ?? '')
         : String(char?.firstMessage ?? '');
-      const ref = buildReferenceChat(chat, { index: chatIndex, budget: this.maxContentChars });
+      const ghostBudget = Math.min(this.maxContentChars, DEFAULT_GHOSTWRITE_CHAT_CHARS);
+      const ref = buildReferenceChat(chat, {
+        index: chatIndex,
+        budget: ghostBudget,
+        maxMessages: DEFAULT_GHOSTWRITE_MAX_MESSAGES,
+      });
       return {
         ok: true,
         target: { ...t, targetKind: 'chat_input', fieldKey: 'input' },
@@ -1887,7 +2092,7 @@ class HostAdapter {
         chatContext: {
           chatName: ref.name,
           messageCount: ref.messageCount,
-          activeGreeting: activeGreeting.slice(0, 4000),
+          activeGreeting: activeGreeting.slice(0, 2500),
           authorNote: ref.authorNote,
           variables: ref.variables,
           variablesOmitted: ref.variablesOmitted,
@@ -1949,8 +2154,9 @@ class HostAdapter {
     }
 
     if (t.targetKind === 'char_lorebook') {
-      const { char, charIndex } = await this.readActiveCharacter();
-      if (!char) return { ok: false, reason: '선택된 캐릭터가 없습니다.', content: '' };
+      const resolved = await resolveCharSnap();
+      if (!resolved.ok) return { ok: false, reason: resolved.reason, content: '' };
+      const { char, charIndex, crossCharacter } = resolved;
       const list = Array.isArray(char.globalLore) ? char.globalLore : [];
       const idx = Number.isInteger(t.loreIndex) ? t.loreIndex : null;
       const entry = idx !== null && list[idx] ? list[idx] : null;
@@ -1958,11 +2164,12 @@ class HostAdapter {
       const fieldErr = validateAllowedFieldKey('char_lorebook', fieldKey);
       if (fieldErr) return { ok: false, reason: fieldErr, content: '' };
       const { loreSummary, foldersSummary, orphanedLoreIndices, orphanedLoreCount } = summarizeLoreList(list);
+      const prefix = this._formatCrossPrefix({ char, charIndex, crossCharacter });
       return {
         ok: true,
-        target: { ...t, loreIndex: idx, fieldKey },
-        hostBinding: { charIndex, ...getCharIdentity(char) },
-        label: entry ? `캐릭터 로어북 #${idx + 1} (${entry.comment || '무제'})` : `캐릭터 로어북 (${list.length}개)`,
+        target: { ...t, loreIndex: idx, fieldKey, ...(crossCharacter ? { targetCharIndex: charIndex } : {}) },
+        hostBinding: { charIndex, ...getCharIdentity(char), ...(crossCharacter ? { targetCharIndex: charIndex, crossCharacter: true } : {}) },
+        label: entry ? `${prefix}캐릭터 로어북 #${idx + 1} (${entry.comment || '무제'})` : `${prefix}캐릭터 로어북 (${list.length}개)`,
         content: entry ? String(entry[fieldKey] ?? '') : '',
         entry,
         loreCount: list.length,
@@ -1970,7 +2177,7 @@ class HostAdapter {
         foldersSummary,
         orphanedLoreIndices,
         orphanedLoreCount,
-        ...(orphanedLoreCount > 0 ? {
+        ...(orphanedLoreCount > 0 && !crossCharacter ? {
           orphanedLoreScopeLabel: '캐릭터 로어북',
           orphanedLoreTarget: { targetKind: 'char_lorebook', loreScope: 'character' },
         } : {}),
@@ -1978,8 +2185,9 @@ class HostAdapter {
     }
 
     if (t.targetKind === 'chat_lorebook') {
-      const { chat, char, charIndex, chatIndex } = await this.readActiveChat();
-      if (!chat) return { ok: false, reason: '활성 채팅을 찾을 수 없습니다.', content: '' };
+      const resolved = await resolveChatSnap();
+      if (!resolved.ok) return { ok: false, reason: resolved.reason, content: '' };
+      const { chat, char, charIndex, chatIndex, crossCharacter, crossChat } = resolved;
       const list = Array.isArray(chat.localLore) ? chat.localLore : [];
       const idx = Number.isInteger(t.loreIndex) ? t.loreIndex : null;
       const entry = idx !== null && list[idx] ? list[idx] : null;
@@ -1987,11 +2195,25 @@ class HostAdapter {
       const fieldErr = validateAllowedFieldKey('chat_lorebook', fieldKey);
       if (fieldErr) return { ok: false, reason: fieldErr, content: '' };
       const { loreSummary, foldersSummary, orphanedLoreIndices, orphanedLoreCount } = summarizeLoreList(list);
+      const prefix = this._formatCrossPrefix({ char, charIndex, chat, chatIndex, crossCharacter, crossChat });
       return {
         ok: true,
-        target: { ...t, loreIndex: idx, fieldKey },
-        hostBinding: { charIndex, chatIndex, ...getCharIdentity(char) },
-        label: entry ? `채팅 로어북 #${idx + 1} (${entry.comment || '무제'})` : `채팅 로어북 (${list.length}개)`,
+        target: {
+          ...t,
+          loreIndex: idx,
+          fieldKey,
+          ...(crossCharacter ? { targetCharIndex: charIndex } : {}),
+          ...(crossChat ? { targetChatIndex: chatIndex } : {}),
+        },
+        hostBinding: {
+          charIndex,
+          chatIndex,
+          chatId: chat.id || null,
+          ...getCharIdentity(char),
+          ...(crossCharacter ? { targetCharIndex: charIndex, crossCharacter: true } : {}),
+          ...(crossChat ? { targetChatIndex: chatIndex, crossChat: true } : {}),
+        },
+        label: entry ? `${prefix}채팅 로어북 #${idx + 1} (${entry.comment || '무제'})` : `${prefix}채팅 로어북 (${list.length}개)`,
         content: entry ? String(entry[fieldKey] ?? '') : '',
         entry,
         loreCount: list.length,
@@ -1999,7 +2221,7 @@ class HostAdapter {
         foldersSummary,
         orphanedLoreIndices,
         orphanedLoreCount,
-        ...(orphanedLoreCount > 0 ? {
+        ...(orphanedLoreCount > 0 && !crossCharacter && !crossChat ? {
           orphanedLoreScopeLabel: '채팅 로어북',
           orphanedLoreTarget: { targetKind: 'chat_lorebook', loreScope: 'chat' },
         } : {}),
@@ -2007,14 +2229,16 @@ class HostAdapter {
     }
 
     if (t.targetKind === 'char_lua') {
-      const { char, charIndex } = await this.readActiveCharacter();
-      if (!char) return { ok: false, reason: '선택된 캐릭터가 없습니다.', content: '' };
+      const resolved = await resolveCharSnap();
+      if (!resolved.ok) return { ok: false, reason: resolved.reason, content: '' };
+      const { char, charIndex, crossCharacter } = resolved;
       const lua = extractLuaFromTriggers(char.triggerscript);
+      const prefix = this._formatCrossPrefix({ char, charIndex, crossCharacter });
       return {
         ok: true,
-        target: { ...t, fieldKey: 'code' },
-        hostBinding: { charIndex, ...getCharIdentity(char) },
-        label: `캐릭터 Lua 트리거 (${char.name || '무제'})`,
+        target: { ...t, fieldKey: 'code', ...(crossCharacter ? { targetCharIndex: charIndex } : {}) },
+        hostBinding: { charIndex, ...getCharIdentity(char), ...(crossCharacter ? { targetCharIndex: charIndex, crossCharacter: true } : {}) },
+        label: `${prefix}캐릭터 Lua 트리거 (${char.name || '무제'})`,
         content: lua.code,
         isLua: lua.isLua,
         hasOtherTriggers: lua.hasOtherTriggers,
@@ -2023,16 +2247,18 @@ class HostAdapter {
     }
 
     if (t.targetKind === 'char_regex') {
-      const { char, charIndex } = await this.readActiveCharacter();
-      if (!char) return { ok: false, reason: '선택된 캐릭터가 없습니다.', content: '' };
+      const resolved = await resolveCharSnap();
+      if (!resolved.ok) return { ok: false, reason: resolved.reason, content: '' };
+      const { char, charIndex, crossCharacter } = resolved;
       const list = Array.isArray(char.customscript) ? char.customscript : [];
       const idx = Number.isInteger(t.regexIndex) ? t.regexIndex : null;
       const entry = idx !== null && list[idx] ? list[idx] : null;
+      const prefix = this._formatCrossPrefix({ char, charIndex, crossCharacter });
       return {
         ok: true,
-        target: { ...t, regexIndex: idx },
-        hostBinding: { charIndex, ...getCharIdentity(char) },
-        label: entry ? `캐릭터 정규식 #${idx + 1} (${entry.comment || '무제'})` : `캐릭터 정규식 (${list.length}개)`,
+        target: { ...t, regexIndex: idx, ...(crossCharacter ? { targetCharIndex: charIndex } : {}) },
+        hostBinding: { charIndex, ...getCharIdentity(char), ...(crossCharacter ? { targetCharIndex: charIndex, crossCharacter: true } : {}) },
+        label: entry ? `${prefix}캐릭터 정규식 #${idx + 1} (${entry.comment || '무제'})` : `${prefix}캐릭터 정규식 (${list.length}개)`,
         content: entry ? JSON.stringify(entry, null, 2) : '',
         entry,
         regexList: list.slice(0, 30),
@@ -2312,20 +2538,62 @@ class HostAdapter {
     return record.id;
   }
 
-  async _commitCharacter(char, charIndex, nextChar, label, opts = {}) {
+  async _commitCharacterAt(char, charIndex, nextChar, label, opts = {}) {
     const ops = diffValues(char, nextChar);
-    await this._setCharacter(nextChar);
-    return this._recordChange({ type: 'char', binding: { charIndex, ...getCharIdentity(char) } }, ops, label, opts);
+    const isCross = Boolean(opts.crossCharacter);
+    if (isCross) {
+      await this._setCharacterAt(charIndex, nextChar);
+    } else {
+      await this._setCharacter(nextChar);
+    }
+    return this._recordChange(
+      {
+        type: 'char',
+        binding: {
+          charIndex,
+          ...getCharIdentity(char),
+          ...(isCross ? { targetCharIndex: charIndex, crossCharacter: true } : {}),
+        },
+      },
+      ops,
+      label,
+      opts
+    );
+  }
+
+  async _commitCharacter(char, charIndex, nextChar, label, opts = {}) {
+    return await this._commitCharacterAt(char, charIndex, nextChar, label, opts);
   }
 
   async _commitChat(chat, charIndex, chatIndex, nextChat, label, opts = {}) {
     const ops = diffValues(chat, nextChat);
-    let identity = { charId: null, charName: null };
-    try {
-      identity = getCharIdentity(await this._getCharacter());
-    } catch {}
+    const isCrossChar = Boolean(opts.crossCharacter);
+    const isCrossChat = Boolean(opts.crossChat || isCrossChar);
+    let identity = opts.char ? getCharIdentity(opts.char) : { charId: null, charName: null };
+    if (!identity.charId && !identity.charName) {
+      try {
+        const owner = isCrossChar ? await this._getCharacterAt(charIndex) : await this._getCharacter();
+        identity = getCharIdentity(owner);
+      } catch {}
+    }
     await this._setChat(charIndex, chatIndex, nextChat);
-    return this._recordChange({ type: 'chat', chatIndex, binding: { charIndex, ...identity } }, ops, label, opts);
+    return this._recordChange(
+      {
+        type: 'chat',
+        chatIndex,
+        binding: {
+          charIndex,
+          chatIndex,
+          chatId: chat?.id || null,
+          ...identity,
+          ...(isCrossChar ? { targetCharIndex: charIndex, crossCharacter: true } : {}),
+          ...(isCrossChat ? { targetChatIndex: chatIndex, crossChat: true } : {}),
+        },
+      },
+      ops,
+      label,
+      opts
+    );
   }
 
   async _commitDb(before, next, label, opts = {}) {
@@ -2358,17 +2626,79 @@ class HostAdapter {
       if (!Array.isArray(ops) || ops.length === 0) continue;
 
       if (entity.type === 'char') {
-        const { char: latest } = await this._requireSameActiveCharacter(entity.binding, '되돌리기');
+        let latest = null;
+        let saveCrossIndex = null;
+        if (entity.binding?.crossCharacter) {
+          const resolved = await this._resolveTargetCharacter({}, entity.binding, '되돌리기');
+          latest = resolved.char;
+          if (resolved.crossCharacter) saveCrossIndex = resolved.charIndex;
+        } else {
+          const { char: activeChar, charIndex: activeIdx } = await this.readActiveCharacter();
+          if (activeChar && (!entity.binding || isSameCharacter(activeChar, activeIdx, entity.binding))) {
+            latest = activeChar;
+          } else if (
+            entity.binding &&
+            Number.isInteger(entity.binding.charIndex) &&
+            this.hasCapability('getCharacterFromIndex') &&
+            this.hasCapability('setCharacterToIndex')
+          ) {
+            const byIdx = await this._getCharacterAt(entity.binding.charIndex);
+            if (byIdx && isSameCharacter(byIdx, entity.binding.charIndex, entity.binding)) {
+              latest = byIdx;
+              saveCrossIndex = entity.binding.charIndex;
+            }
+          }
+          if (!latest) {
+            const fallback = await this._requireSameActiveCharacter(entity.binding, '되돌리기');
+            latest = fallback.char;
+          }
+        }
         const res = revertOps(latest, ops);
-        if (res.reverted > 0) await this._setCharacter(res.value);
+        if (res.reverted > 0) {
+          if (saveCrossIndex !== null) await this._setCharacterAt(saveCrossIndex, res.value);
+          else await this._setCharacter(res.value);
+        }
         reverted += res.reverted;
         conflicts.push(...res.conflicts);
       } else if (entity.type === 'chat') {
-        const { charIndex } = await this._requireSameActiveCharacter(entity.binding, '되돌리기');
-        const latestChat = await this._readChatAt(charIndex, entity.chatIndex);
+        let targetCharIndex;
+        let targetChatIndex = entity.chatIndex;
+        let latestChat = null;
+        if (entity.binding?.crossCharacter || entity.binding?.crossChat) {
+          const resolved = await this._resolveTargetChat(
+            { targetCharIndex: entity.binding.charIndex, targetChatIndex: entity.chatIndex },
+            entity.binding,
+            '되돌리기'
+          );
+          targetCharIndex = resolved.charIndex;
+          targetChatIndex = resolved.chatIndex;
+          latestChat = resolved.chat;
+        } else {
+          const { char: activeChar, charIndex: activeIdx } = await this.readActiveCharacter();
+          if (activeChar && (!entity.binding || isSameCharacter(activeChar, activeIdx, entity.binding))) {
+            targetCharIndex = activeIdx;
+            latestChat = await this._readChatAt(targetCharIndex, targetChatIndex, activeChar);
+          } else if (
+            entity.binding &&
+            Number.isInteger(entity.binding.charIndex) &&
+            this.hasCapability('getCharacterFromIndex') &&
+            this.hasCapability('setChatToIndex')
+          ) {
+            const byIdx = await this._getCharacterAt(entity.binding.charIndex);
+            if (byIdx && isSameCharacter(byIdx, entity.binding.charIndex, entity.binding)) {
+              targetCharIndex = entity.binding.charIndex;
+              latestChat = await this._readChatAt(targetCharIndex, targetChatIndex, byIdx);
+            }
+          }
+          if (!latestChat) {
+            const fallback = await this._requireSameActiveCharacter(entity.binding, '되돌리기');
+            targetCharIndex = fallback.charIndex;
+            latestChat = await this._readChatAt(targetCharIndex, targetChatIndex, fallback.char);
+          }
+        }
         if (!latestChat) throw new Error('되돌릴 채팅을 찾을 수 없습니다.');
         const res = revertOps(latestChat, ops);
-        if (res.reverted > 0) await this._setChat(charIndex, entity.chatIndex, res.value);
+        if (res.reverted > 0) await this._setChat(targetCharIndex, targetChatIndex, res.value);
         reverted += res.reverted;
         conflicts.push(...res.conflicts);
       } else if (entity.type === 'db') {
@@ -2494,17 +2824,41 @@ class HostAdapter {
     return this.undoStack.length;
   }
 
-  async _loadLorebookForPreview(scope, proposal, target) {
+  async _loadLorebookForPreview(scope, proposal, target, binding = null) {
+    const crossHint = {
+      targetCharIndex: proposal?.targetCharIndex ?? target?.targetCharIndex,
+      targetChatIndex: proposal?.targetChatIndex ?? target?.targetChatIndex,
+    };
+
     if (scope === 'chat') {
-      const { chat, char, charIndex, chatIndex } = await this.readActiveChat();
-      if (!chat) return { ok: false, error: '활성 채팅을 찾을 수 없습니다.' };
+      let resolved;
+      try {
+        resolved = await this._resolveTargetChat(crossHint, binding, '미리보기');
+      } catch (err) {
+        return { ok: false, error: err.message };
+      }
+      const { chat, char, charIndex, chatIndex, crossCharacter, crossChat } = resolved;
       const list = Array.isArray(chat.localLore) ? chat.localLore : [];
+      const prefix = this._formatCrossPrefix({ char, charIndex, chat, chatIndex, crossCharacter, crossChat });
       return {
         ok: true,
         list,
-        scopeLabel: '채팅 로어북',
-        target: { ...target, targetKind: 'chat_lorebook', loreScope: 'chat' },
-        hostBinding: { charIndex, chatIndex, ...getCharIdentity(char) },
+        scopeLabel: `${prefix}채팅 로어북`,
+        target: {
+          ...target,
+          targetKind: 'chat_lorebook',
+          loreScope: 'chat',
+          ...(crossCharacter ? { targetCharIndex: charIndex } : {}),
+          ...(crossChat ? { targetChatIndex: chatIndex } : {}),
+        },
+        hostBinding: {
+          charIndex,
+          chatIndex,
+          chatId: chat.id || null,
+          ...getCharIdentity(char),
+          ...(crossCharacter ? { targetCharIndex: charIndex, crossCharacter: true } : {}),
+          ...(crossChat ? { targetChatIndex: chatIndex, crossChat: true } : {}),
+        },
       };
     }
 
@@ -2539,15 +2893,30 @@ class HostAdapter {
       };
     }
 
-    const { char, charIndex } = await this.readActiveCharacter();
-    if (!char) return { ok: false, error: '선택된 캐릭터가 없습니다.' };
+    let resolved;
+    try {
+      resolved = await this._resolveTargetCharacter(crossHint, binding, '미리보기');
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+    const { char, charIndex, crossCharacter } = resolved;
     const list = Array.isArray(char.globalLore) ? char.globalLore : [];
+    const prefix = this._formatCrossPrefix({ char, charIndex, crossCharacter });
     return {
       ok: true,
       list,
-      scopeLabel: '캐릭터 로어북',
-      target: { ...target, targetKind: 'char_lorebook', loreScope: 'character' },
-      hostBinding: { charIndex, ...getCharIdentity(char) },
+      scopeLabel: `${prefix}캐릭터 로어북`,
+      target: {
+        ...target,
+        targetKind: 'char_lorebook',
+        loreScope: 'character',
+        ...(crossCharacter ? { targetCharIndex: charIndex } : {}),
+      },
+      hostBinding: {
+        charIndex,
+        ...getCharIdentity(char),
+        ...(crossCharacter ? { targetCharIndex: charIndex, crossCharacter: true } : {}),
+      },
     };
   }
 
@@ -2563,6 +2932,45 @@ class HostAdapter {
       if (!modulesCache) modulesCache = await this.readModules();
       return modulesCache;
     };
+
+    const loadTargetChar = async () => {
+      try {
+        const res = await this._resolveTargetCharacter(
+          { targetCharIndex: proposal.targetCharIndex ?? target?.targetCharIndex },
+          options?.hostBinding || null,
+          '검증'
+        );
+        return { ok: true, ...res };
+      } catch (err) {
+        return { ok: false, error: err.message };
+      }
+    };
+
+    if (proposal.targetCharIndex !== undefined && proposal.targetCharIndex !== null) {
+      if (!Number.isInteger(proposal.targetCharIndex) || proposal.targetCharIndex < 0) {
+        return `제안이 가리키는 대상 캐릭터 인덱스(${formatBadIndex(proposal.targetCharIndex)})가 올바르지 않습니다.`;
+      }
+      const checked = await loadTargetChar();
+      if (!checked.ok) return checked.error;
+    }
+
+    if (proposal.targetChatIndex !== undefined && proposal.targetChatIndex !== null) {
+      if (!Number.isInteger(proposal.targetChatIndex) || proposal.targetChatIndex < 0) {
+        return `제안이 가리키는 대상 채팅 인덱스(${formatBadIndex(proposal.targetChatIndex)})가 올바르지 않습니다.`;
+      }
+      try {
+        await this._resolveTargetChat(
+          {
+            targetCharIndex: proposal.targetCharIndex ?? target?.targetCharIndex,
+            targetChatIndex: proposal.targetChatIndex,
+          },
+          options?.hostBinding || null,
+          '검증'
+        );
+      } catch (err) {
+        return err.message;
+      }
+    }
 
     if (proposal.moduleIndex !== undefined && proposal.moduleIndex !== null) {
       const { modules, permissionDenied } = await loadModules();
@@ -2597,33 +3005,35 @@ class HostAdapter {
         return `수정할 수 없는 필드입니다: ${String(proposal.field)}. (가능: ${FREE_EDIT_FIELDS.join(', ')})`;
       }
       if (proposal.field !== AUTHOR_NOTE_FIELD) {
-        const { char } = await this.readActiveCharacter();
-        if (!char) return '선택된 캐릭터가 없습니다.';
-        if (char.type === 'group') {
+        const resolved = await loadTargetChar();
+        if (!resolved.ok) return resolved.error;
+        if (resolved.char.type === 'group') {
           return '그룹 채팅에는 캐릭터 필드가 없어 update_field로 수정할 수 없습니다. (작가의 노트는 가능)';
         }
       }
     }
 
     if (proposal.action === 'update_greeting' || proposal.action === 'create_greeting') {
-      const { char } = await this.readActiveCharacter();
-      if (!char) return '선택된 캐릭터가 없습니다.';
-      if (char.type === 'group') {
+      const resolved = await loadTargetChar();
+      if (!resolved.ok) return resolved.error;
+      if (resolved.char.type === 'group') {
         return '그룹 채팅에는 첫 메시지(firstMessage / alternateGreetings) 구조가 없어 첫 메시지 수정·추가를 지원하지 않습니다.';
       }
     }
 
     if (proposal.action === 'update_greeting' && proposal.greetingIndex !== -1) {
-      const { char } = await this.readActiveCharacter();
-      const list = Array.isArray(char?.alternateGreetings) ? char.alternateGreetings : [];
+      const resolved = await loadTargetChar();
+      if (!resolved.ok) return resolved.error;
+      const list = Array.isArray(resolved.char?.alternateGreetings) ? resolved.char.alternateGreetings : [];
       if (!Number.isInteger(proposal.greetingIndex) || proposal.greetingIndex < 0 || proposal.greetingIndex >= list.length) {
         return `수정할 추가 첫 메시지 #${Number(proposal.greetingIndex) + 1}을(를) 찾을 수 없습니다. (현재 ${list.length}개) 새로 만들려면 create_greeting을 사용해 주세요.`;
       }
     }
 
     if (proposal.action === 'delete_greeting') {
-      const { char } = await this.readActiveCharacter();
-      if (!char) return '선택된 캐릭터가 없습니다.';
+      const resolved = await loadTargetChar();
+      if (!resolved.ok) return resolved.error;
+      const char = resolved.char;
       if (char.type === 'group') {
         return '그룹 채팅에는 첫 메시지 구조가 없어 삭제할 수 없습니다.';
       }
@@ -2676,8 +3086,9 @@ class HostAdapter {
         }
         list = Array.isArray(modules[modIdx]?.regex) ? modules[modIdx].regex : [];
       } else {
-        const { char } = await this.readActiveCharacter();
-        list = Array.isArray(char?.customscript) ? char.customscript : [];
+        const resolved = await loadTargetChar();
+        if (!resolved.ok) return resolved.error;
+        list = Array.isArray(resolved.char?.customscript) ? resolved.char.customscript : [];
       }
       if (proposal.action === 'delete_regex' && options?.hostBinding?.deleteRegex) {
         const res = resolvePinnedDeleteIndex(list, proposal.regexIndex, options.hostBinding.deleteRegex, matchesRegexFingerprint, '정규식 스크립트');
@@ -2691,7 +3102,7 @@ class HostAdapter {
 
     if (proposal.action === 'delete_lorebook') {
       const scope = this._loreScopeOf(proposal, target);
-      const loaded = await this._loadLorebookForPreview(scope, proposal, target);
+      const loaded = await this._loadLorebookForPreview(scope, proposal, target, options?.hostBinding || null);
       if (!loaded.ok) return loaded.error;
       const pinnedLore = options?.hostBinding?.deleteLore || null;
       const resolved = resolvePinnedDeleteIndex(loaded.list, proposal.loreIndex, pinnedLore, matchesLoreFingerprint, loaded.scopeLabel);
@@ -2719,7 +3130,7 @@ class HostAdapter {
       const { fieldKey: _stale, ...rest } = res.target;
       res.target = rest;
     }
-    const skipAutoCbs = new Set(['upsert_regex', 'create_module', 'create_character', 'port_from_character']);
+    const skipAutoCbs = new Set(['upsert_regex', 'create_module', 'create_character', 'port_from_character', 'create_chat']);
     if (
       res?.ok &&
       typeof res.after === 'string' &&
@@ -2882,6 +3293,7 @@ class HostAdapter {
         targetKind: scope,
         moduleIndex: proposal.moduleIndex ?? target.moduleIndex,
         moduleDomHints: proposal.moduleIndex === undefined ? target.moduleDomHints : undefined,
+        ...(proposal.targetCharIndex !== undefined ? { targetCharIndex: proposal.targetCharIndex } : {}),
       });
       if (!snap.ok) return { ok: false, error: snap.reason };
       if (snap.moduleUncertain) return { ok: false, error: MODULE_UNCERTAIN_ERROR, label: snap.label, target: snap.target };
@@ -2929,6 +3341,8 @@ class HostAdapter {
         moduleIndex: proposal.moduleIndex ?? target.moduleIndex,
         moduleDomHints: proposal.moduleIndex === undefined ? target.moduleDomHints : undefined,
         fieldKey,
+        ...(proposal.targetCharIndex !== undefined ? { targetCharIndex: proposal.targetCharIndex } : {}),
+        ...(proposal.targetChatIndex !== undefined ? { targetChatIndex: proposal.targetChatIndex } : {}),
       });
       if (!snap.ok) return { ok: false, error: snap.reason };
       if (snap.moduleUncertain) return { ok: false, error: MODULE_UNCERTAIN_ERROR, label: snap.label, target: snap.target };
@@ -3066,6 +3480,7 @@ class HostAdapter {
         regexIndex: idx,
         moduleIndex: proposal.moduleIndex ?? target.moduleIndex,
         moduleDomHints: proposal.moduleIndex === undefined ? target.moduleDomHints : undefined,
+        ...(proposal.targetCharIndex !== undefined ? { targetCharIndex: proposal.targetCharIndex } : {}),
       });
       if (!snap.ok) return { ok: false, error: snap.reason };
       if (snap.moduleUncertain) return { ok: false, error: MODULE_UNCERTAIN_ERROR, label: snap.label, target: snap.target };
@@ -3193,7 +3608,7 @@ class HostAdapter {
     }
 
     if (proposal.action === 'update_field') {
-      const fTarget = this._fieldTarget(proposal.field);
+      const fTarget = this._fieldTarget(proposal.field, proposal);
       const snap = await this.readTargetSnapshot(fTarget);
       if (!snap.ok) return { ok: false, error: snap.reason };
       const before = String(snap.content ?? '');
@@ -3210,7 +3625,7 @@ class HostAdapter {
           label: snap.label,
           target: { ...snap.target, fieldsShownFull: target.fieldsShownFull, greetingsShownFull: target.greetingsShownFull },
           hostBinding: snap.hostBinding,
-          warning: proposal.field === 'firstMessage' ? await this._greetingScopeNotice(-1) : null,
+          warning: proposal.field === 'firstMessage' && !snap.hostBinding?.crossCharacter ? await this._greetingScopeNotice(-1) : null,
         };
       } catch (err) {
         return { ok: false, error: err.message, before, label: snap.label };
@@ -3235,7 +3650,7 @@ class HostAdapter {
           label: snap.label,
           target: { ...snap.target, greetingsShownFull: target.greetingsShownFull },
           hostBinding: snap.hostBinding,
-          warning: await this._greetingScopeNotice(proposal.greetingIndex),
+          warning: !snap.hostBinding?.crossCharacter ? await this._greetingScopeNotice(proposal.greetingIndex) : null,
         };
       } catch (err) {
         return { ok: false, error: err.message, before, label: snap.label };
@@ -3243,17 +3658,23 @@ class HostAdapter {
     }
 
     if (proposal.action === 'create_greeting') {
-      const { char, charIndex } = await this.readActiveCharacter();
-      if (!char) return { ok: false, error: '선택된 캐릭터가 없습니다.' };
+      let resolved;
+      try {
+        resolved = await this._resolveTargetCharacter(proposal, null, '미리보기');
+      } catch (err) {
+        return { ok: false, error: err.message };
+      }
+      const { char, charIndex, crossCharacter } = resolved;
       const count = Array.isArray(char.alternateGreetings) ? char.alternateGreetings.length : 0;
+      const prefix = this._formatCrossPrefix({ char, charIndex, crossCharacter });
       return {
         ok: true,
         before: '',
         after: String(proposal.content ?? ''),
-        createsGreeting: true,
-        label: `캐릭터 · 추가 첫 메시지 #${count + 1} (새로 추가 · ${char.name || '무제'})`,
-        target: { targetKind: 'char_alt_greeting', fieldKey: 'alternateGreetings' },
-        hostBinding: { charIndex, ...getCharIdentity(char) },
+        createsGreeting: !crossCharacter,
+        label: `${prefix}캐릭터 · 추가 첫 메시지 #${count + 1} (새로 추가 · ${char.name || '무제'})`,
+        target: { targetKind: 'char_alt_greeting', fieldKey: 'alternateGreetings', ...(crossCharacter ? { targetCharIndex: charIndex } : {}) },
+        hostBinding: { charIndex, ...getCharIdentity(char), ...(crossCharacter ? { targetCharIndex: charIndex, crossCharacter: true } : {}) },
         warning: '새 항목은 맨 뒤에 추가되며 기존 첫 메시지와 기존 채팅은 바뀌지 않습니다.',
       };
     }
@@ -3305,23 +3726,82 @@ class HostAdapter {
       };
     }
 
-    if (proposal.action === 'update_chat_vars') {
-      const { chat, char, charIndex, chatIndex } = await this.readActiveChat();
-      if (!char || !chat) return { ok: false, error: '활성 채팅을 찾을 수 없습니다.' };
-      if (isColdStoredChat(chat)) {
-        return { ok: false, error: '현재 채팅이 콜드 스토리지에 보관 중입니다. 채팅을 다시 열어 주세요.' };
+    if (proposal.action === 'create_chat') {
+      let planned;
+      try {
+        planned = await this._planCreateChat(proposal);
+      } catch (err) {
+        return { ok: false, error: err.message };
       }
+      const {
+        char, charIndex, crossCharacter, newChat, switchToNewChat,
+        sourceMeta, importPlan, summaryEntry, metaChanges, afterText, notes,
+      } = planned;
+      const prefix = this._formatCrossPrefix({ char, charIndex, crossCharacter });
+      const defaultLabel = sourceMeta
+        ? `${prefix}새 채팅 생성 + 이사 ("${sourceMeta.name}" → "${newChat.name}")`
+        : `${prefix}새 채팅 생성 ("${newChat.name}")`;
+      const warnParts = [
+        switchToNewChat
+          ? `새 채팅 "${newChat.name}"을(를) 추가하고 해당 채팅으로 전환합니다. 기존 채팅은 변경되지 않으며 되돌리기로 새 채팅을 제거할 수 있습니다.`
+          : `새 채팅 "${newChat.name}"을(를) 추가합니다(현재 열린 채팅 유지). 되돌리기로 새 채팅을 제거할 수 있습니다.`,
+      ];
+      if (importPlan?.copied?.length > 0) {
+        warnParts.push(`원본 채팅에서 그대로 복사: ${importPlan.copied.join(', ')}.`);
+      }
+      if (summaryEntry) {
+        warnParts.push(`요약 로어북("${summaryEntry.comment}")을 새 채팅 로어북에 포함합니다.`);
+      }
+      warnParts.push(...notes);
+      return {
+        ok: true,
+        before: '',
+        after: afterText,
+        metaChanges,
+        label: proposal.title || defaultLabel,
+        target: { targetKind: 'general', ...(crossCharacter ? { targetCharIndex: charIndex } : {}) },
+        hostBinding: {
+          charIndex,
+          ...getCharIdentity(char),
+          ...(crossCharacter ? { targetCharIndex: charIndex, crossCharacter: true } : {}),
+          ...(sourceMeta ? { sourceChatIndex: sourceMeta.index, sourceChatId: sourceMeta.id, sourceChatName: sourceMeta.name } : {}),
+        },
+        warning: warnParts.join(' '),
+      };
+    }
+
+    if (proposal.action === 'update_chat_vars') {
+      let resolved;
+      try {
+        resolved = await this._resolveTargetChat(proposal, null, '미리보기');
+      } catch (err) {
+        return { ok: false, error: err.message };
+      }
+      const { chat, char, charIndex, chatIndex, crossCharacter, crossChat } = resolved;
       const plan = planChatVarsUpdate(chat.scriptstate, proposal);
       if (!plan.ok) return { ok: false, error: plan.error };
       const labelName = chatName(chat, chatIndex ?? 0);
+      const prefix = this._formatCrossPrefix({ char, charIndex, chat, chatIndex, crossCharacter, crossChat });
       return {
         ok: true,
         before: plan.before,
         after: plan.after,
         metaChanges: plan.metaChanges,
-        label: `채팅 변수 편집 (${labelName} · ${plan.changedCount}건)`,
-        target: { targetKind: 'chat_note', fieldKey: 'note' },
-        hostBinding: { charIndex, chatIndex, ...getCharIdentity(char) },
+        label: `${prefix}채팅 변수 편집 (${labelName} · ${plan.changedCount}건)`,
+        target: {
+          targetKind: 'chat_note',
+          fieldKey: 'note',
+          ...(crossCharacter ? { targetCharIndex: charIndex } : {}),
+          ...(crossChat ? { targetChatIndex: chatIndex } : {}),
+        },
+        hostBinding: {
+          charIndex,
+          chatIndex,
+          chatId: chat.id || null,
+          ...getCharIdentity(char),
+          ...(crossCharacter ? { targetCharIndex: charIndex, crossCharacter: true } : {}),
+          ...(crossChat ? { targetChatIndex: chatIndex, crossChat: true } : {}),
+        },
         ...(plan.removedCount > 0 ? { warning: `기존 채팅 변수 ${plan.removedCount}개를 삭제합니다. 적용 후에도 되돌리기로 복구할 수 있습니다.` } : {}),
       };
     }
@@ -3359,6 +3839,7 @@ class HostAdapter {
         regexIndex: idx,
         moduleIndex: proposal.moduleIndex ?? target.moduleIndex,
         moduleDomHints: proposal.moduleIndex === undefined ? target.moduleDomHints : undefined,
+        ...(proposal.targetCharIndex !== undefined ? { targetCharIndex: proposal.targetCharIndex } : {}),
       });
       if (!snap.ok) return { ok: false, error: snap.reason };
       if (snap.moduleUncertain) return { ok: false, error: MODULE_UNCERTAIN_ERROR, label: snap.label, target: snap.target };
@@ -3410,8 +3891,13 @@ class HostAdapter {
     }
 
     if (proposal.action === 'delete_greeting') {
-      const { char, charIndex, chatIndex } = await this.readActiveCharacter();
-      if (!char) return { ok: false, error: '선택된 캐릭터가 없습니다.' };
+      let resolved;
+      try {
+        resolved = await this._resolveTargetCharacter(proposal, null, '미리보기');
+      } catch (err) {
+        return { ok: false, error: err.message };
+      }
+      const { char, charIndex, activeChatIndex, crossCharacter } = resolved;
       const idx = proposal.greetingIndex;
       const list = Array.isArray(char.alternateGreetings) ? char.alternateGreetings : [];
       if (idx < 0 || idx >= list.length) {
@@ -3422,6 +3908,7 @@ class HostAdapter {
       if (affectedChats > 0) {
         notes.push(`이 추가 첫 메시지를 사용 중인 채팅 ${affectedChats}개는 기본 첫 메시지로 안전하게 전환됩니다.`);
       }
+      const prefix = this._formatCrossPrefix({ char, charIndex, crossCharacter });
       return {
         ok: true,
         isDelete: true,
@@ -3430,9 +3917,15 @@ class HostAdapter {
         metaChanges: [
           { key: 'greetingIndex', label: '삭제 대상', before: `추가 첫 메시지 #${idx + 1}`, after: '(삭제됨)' },
         ],
-        label: `추가 첫 메시지 #${idx + 1} 삭제`,
-        target: { targetKind: 'char_alt_greeting', greetingIndex: idx },
-        hostBinding: { charIndex, chatIndex, ...getCharIdentity(char), deleteGreetingText: String(list[idx] ?? '') },
+        label: `${prefix}추가 첫 메시지 #${idx + 1} 삭제`,
+        target: { targetKind: 'char_alt_greeting', greetingIndex: idx, ...(crossCharacter ? { targetCharIndex: charIndex } : {}) },
+        hostBinding: {
+          charIndex,
+          chatIndex: activeChatIndex,
+          ...getCharIdentity(char),
+          ...(crossCharacter ? { targetCharIndex: charIndex, crossCharacter: true } : {}),
+          deleteGreetingText: String(list[idx] ?? ''),
+        },
         warning: notes.join(' '),
       };
     }
@@ -3531,30 +4024,41 @@ class HostAdapter {
     }
 
     if (proposal.action === 'update_char_settings') {
-      const { char, charIndex } = await this.readActiveCharacter();
-      if (!char) return { ok: false, error: '선택된 캐릭터가 없습니다.' };
+      let resolved;
+      try {
+        resolved = await this._resolveTargetCharacter(proposal, null, '미리보기');
+      } catch (err) {
+        return { ok: false, error: err.message };
+      }
+      const { char, charIndex, crossCharacter } = resolved;
       const plan = planCharSettingsUpdate(char, proposal);
       if (!plan.ok) return { ok: false, error: plan.error };
+      const prefix = this._formatCrossPrefix({ char, charIndex, crossCharacter });
       return {
         ok: true,
         before: plan.before,
         after: plan.after,
         metaChanges: plan.metaChanges,
-        label: `캐릭터 고급 설정 (${char.name || '무제'})`,
-        target: { targetKind: 'char_field', fieldKey: 'desc' },
-        hostBinding: { charIndex, ...getCharIdentity(char) },
+        label: `${prefix}캐릭터 고급 설정 (${char.name || '무제'})`,
+        target: { targetKind: 'char_field', fieldKey: 'desc', ...(crossCharacter ? { targetCharIndex: charIndex } : {}) },
+        hostBinding: { charIndex, ...getCharIdentity(char), ...(crossCharacter ? { targetCharIndex: charIndex, crossCharacter: true } : {}) },
       };
     }
 
     if (proposal.action === 'port_from_character') {
       const { char: currentChar, charIndex: activeIndex } = await this.readActiveCharacter();
       if (!currentChar) return { ok: false, error: '현재 선택된 캐릭터가 없습니다.' };
-      const { characters, permissionDenied } = await this.readCharacterCatalog();
-      if (permissionDenied) return { ok: false, error: DB_PERMISSION_ERROR };
       const srcIdx = proposal.sourceCharIndex;
-      const sourceChar = Number.isInteger(srcIdx) ? characters[srcIdx] : null;
+      let sourceChar = null;
+      if (this.hasCapability('getCharacterFromIndex') && typeof this.api.getCharacterFromIndex === 'function') {
+        sourceChar = await this._getCharacterAt(srcIdx);
+      } else {
+        const { characters, permissionDenied } = await this.readCharacterCatalog();
+        if (permissionDenied) return { ok: false, error: DB_PERMISSION_ERROR };
+        sourceChar = Number.isInteger(srcIdx) ? characters[srcIdx] : null;
+      }
       if (!sourceChar) {
-        return { ok: false, error: `원본 캐릭터 #${Number(srcIdx) + 1}을(를) 찾을 수 없습니다. (총 ${characters.length}개)` };
+        return { ok: false, error: `원본 캐릭터 #${Number(srcIdx) + 1}을(를) 찾을 수 없습니다.` };
       }
       if (srcIdx === activeIndex || (sourceChar.chaId && sourceChar.chaId === currentChar.chaId)) {
         return { ok: false, error: '원본 캐릭터가 현재 캐릭터와 같습니다. 다른 캐릭터를 sourceCharIndex로 지정해 주세요.' };
@@ -3683,6 +4187,8 @@ class HostAdapter {
         return await this._applyDeleteGreeting(proposal, options);
       case 'import_chat':
         return await this._applyImportChat(proposal, options);
+      case 'create_chat':
+        return await this._applyCreateChat(proposal, options);
       case 'update_chat_vars':
         return await this._applyUpdateChatVars(proposal, options);
       default:
@@ -3893,10 +4399,12 @@ class HostAdapter {
   }
 
   /** Where a free-talk field lives: the author note is on the chat, everything else on the character. */
-  _fieldTarget(field) {
+  _fieldTarget(field, proposal = {}) {
+    const crossChar = Number.isInteger(proposal?.targetCharIndex) ? { targetCharIndex: proposal.targetCharIndex } : {};
+    const crossChat = Number.isInteger(proposal?.targetChatIndex) ? { targetChatIndex: proposal.targetChatIndex } : {};
     return field === AUTHOR_NOTE_FIELD
-      ? { targetKind: 'chat_note', fieldKey: 'note' }
-      : { targetKind: 'char_field', fieldKey: field };
+      ? { targetKind: 'chat_note', fieldKey: 'note', ...crossChar, ...crossChat }
+      : { targetKind: 'char_field', fieldKey: field, ...crossChar };
   }
 
   /**
@@ -3919,7 +4427,7 @@ class HostAdapter {
   }
 
   async _applyUpdateField(proposal, target, options = {}) {
-    const fTarget = this._fieldTarget(proposal.field);
+    const fTarget = this._fieldTarget(proposal.field, proposal);
     const snap = await this.readTargetSnapshot(fTarget);
     if (!snap.ok) throw new Error(snap.reason);
     const guardError = this._fieldOverwriteError(proposal, target, String(snap.content ?? ''));
@@ -3934,9 +4442,10 @@ class HostAdapter {
 
   /** Where a greeting lives: index -1 is the default first message, n >= 0 an alternate greeting. */
   _greetingTarget(proposal) {
+    const crossChar = Number.isInteger(proposal?.targetCharIndex) ? { targetCharIndex: proposal.targetCharIndex } : {};
     return proposal.greetingIndex === -1
-      ? { targetKind: 'char_field', fieldKey: 'firstMessage' }
-      : { targetKind: 'char_alt_greeting', fieldKey: 'alternateGreetings', greetingIndex: proposal.greetingIndex };
+      ? { targetKind: 'char_field', fieldKey: 'firstMessage', ...crossChar }
+      : { targetKind: 'char_alt_greeting', fieldKey: 'alternateGreetings', greetingIndex: proposal.greetingIndex, ...crossChar };
   }
 
   /**
@@ -3994,11 +4503,11 @@ class HostAdapter {
     if (!Array.isArray(opened.root.alternateGreetings)) opened.root.alternateGreetings = [];
     opened.root.alternateGreetings.push(String(proposal.content ?? ''));
     const number = opened.root.alternateGreetings.length;
-    const undoId = await opened.commit(`추가 첫 메시지 #${number} 생성`);
+    const undoId = await opened.commit(`${opened.name} 추가 첫 메시지 #${number} 생성`);
 
-    // Optionally make the chat on screen use the new greeting; recorded in the same undo entry.
+    // Optionally make the chat on screen use the new greeting (active character only); recorded in the same undo entry.
     let switched = false;
-    if (options.useInCurrentChat ?? proposal.useInCurrentChat) {
+    if (!opened.crossCharacter && (options.useInCurrentChat ?? proposal.useInCurrentChat)) {
       try {
         const { chat, charIndex, chatIndex } = await this.readActiveChat();
         if (chat) {
@@ -4016,7 +4525,7 @@ class HostAdapter {
       switchedCurrentChat: switched,
       summary: switched
         ? `추가 첫 메시지 #${number}을(를) 새로 만들고 현재 채팅의 첫 메시지로 전환했습니다.`
-        : `추가 첫 메시지 #${number}을(를) 새로 만들었습니다. 채팅 화면의 첫 메시지 좌우 화살표로 전환할 수 있습니다.`,
+        : `${opened.name}에 추가 첫 메시지 #${number}을(를) 새로 만들었습니다. 채팅 화면의 첫 메시지 좌우 화살표로 전환할 수 있습니다.`,
     };
   }
 
@@ -4039,6 +4548,206 @@ class HostAdapter {
     };
   }
 
+  /**
+   * Plans creating a brand-new fork-safe chat (guaranteed UUID `id` + `message: []`), optionally
+   * migrating state from `'current'` or a specific chat index and attaching a summary lorebook
+   * in a single one-click card.
+   */
+  async _planCreateChat(proposal, binding = null) {
+    const resolved = await this._resolveTargetCharacter(proposal, binding, '새 채팅 생성');
+    const { char, charIndex, activeChatIndex, crossCharacter } = resolved;
+    const existingChats = Array.isArray(char.chats) ? char.chats : [];
+    const refActiveChatIdx = !crossCharacter && Number.isInteger(activeChatIndex)
+      ? activeChatIndex
+      : (Number.isInteger(char.chatPage) ? char.chatPage : 0);
+    const chatsMeta = listChats(char, refActiveChatIdx);
+
+    const name = typeof proposal.name === 'string' && proposal.name.trim()
+      ? proposal.name.trim()
+      : `Chat ${existingChats.length + 1}`;
+    const hasExplicitFm = Number.isInteger(proposal.fmIndex);
+    if (hasExplicitFm) {
+      if (proposal.fmIndex < -1) {
+        throw new Error('fmIndex는 -1(기본 첫 메시지) 또는 0 이상의 정수여야 합니다.');
+      }
+      if (proposal.fmIndex >= 0) {
+        if (char.type === 'group') {
+          throw new Error('그룹 채팅에는 추가 첫 메시지 번호(fmIndex)를 지정할 수 없습니다.');
+        }
+        const altCount = Array.isArray(char.alternateGreetings) ? char.alternateGreetings.length : 0;
+        if (proposal.fmIndex >= altCount) {
+          throw new Error(`지정한 추가 첫 메시지 #${proposal.fmIndex + 1}이(가) 없습니다. (현재 ${altCount}개)`);
+        }
+      }
+    }
+
+    let newChat = {
+      id: makeUuid(),
+      name,
+      message: [],
+      note: '',
+      localLore: [],
+      ...(hasExplicitFm ? { fmIndex: proposal.fmIndex } : {}),
+    };
+
+    const metaChanges = [
+      { key: 'name', label: '새 채팅 이름', before: '(신규)', after: name },
+    ];
+    const switchToNewChat = proposal.switchToNewChat !== false;
+    metaChanges.push({
+      key: 'switchToNewChat',
+      label: '채팅 전환',
+      before: `현재 채팅 #${refActiveChatIdx + 1}`,
+      after: switchToNewChat ? `새 채팅 #${existingChats.length + 1}로 전환` : '현재 채팅 유지',
+    });
+
+    let sourceMeta = null;
+    let importPlan = null;
+    const notes = [];
+    const afterSections = [];
+
+    if (proposal.importFromChatIndex !== undefined && proposal.importFromChatIndex !== null) {
+      let srcIdx = proposal.importFromChatIndex === 'current'
+        ? refActiveChatIdx
+        : proposal.importFromChatIndex;
+      if (binding?.sourceChatId && chatsMeta[srcIdx]?.id !== binding.sourceChatId) {
+        const moved = chatsMeta.find(c => c.id === binding.sourceChatId);
+        if (!moved) {
+          throw new Error('이관 원본 채팅을 찾을 수 없습니다. (삭제되었거나 목록이 바뀌었습니다) 다시 요청해 주세요.');
+        }
+        srcIdx = moved.index;
+      }
+      const entry = Number.isInteger(srcIdx) ? chatsMeta[srcIdx] : null;
+      if (!entry) {
+        throw new Error(`이관 원본 ${Number(srcIdx) + 1}번 채팅이 없습니다. (이 캐릭터의 채팅 ${chatsMeta.length}개)`);
+      }
+      const source = await this._readChatAt(charIndex, srcIdx, char);
+      if (!source) throw new Error(`이관 원본 ${srcIdx + 1}번 채팅을 읽지 못했습니다.`);
+      if (isColdStoredChat(source)) {
+        throw new Error(
+          `이관 원본 ${srcIdx + 1}번 채팅 "${entry.name}"은(는) 콜드 스토리지에 보관 중이라 변수·로어북을 읽을 수 없습니다. RisuAI에서 한 번 열어 복원한 뒤 다시 시도해 주세요.`
+        );
+      }
+      const items = Array.isArray(proposal.importItems) && proposal.importItems.length > 0
+        ? proposal.importItems
+        : ['variables', 'authorNote', 'localLore', 'persona', 'modules', 'greeting'];
+
+      let personas = null;
+      let modules = null;
+      if (items.includes('persona') && source.bindedPersona) {
+        try {
+          const p = await this.readPersonas();
+          if (!p.permissionDenied) personas = p.personas;
+        } catch {}
+      }
+      if (items.includes('modules') && Array.isArray(source.modules) && source.modules.length > 0) {
+        try {
+          const m = await this.readModules();
+          if (!m.permissionDenied) modules = m.modules;
+        } catch {}
+      }
+
+      importPlan = planChatImport(source, newChat, {
+        items,
+        variableKeys: proposal.variableKeys,
+        personas,
+        modules,
+        isGroup: char.type === 'group',
+        alternateGreetingCount: Array.isArray(char.alternateGreetings) ? char.alternateGreetings.length : null,
+      });
+      newChat = importPlan.next;
+      if (hasExplicitFm) newChat.fmIndex = proposal.fmIndex;
+      sourceMeta = { index: srcIdx, id: entry.id, name: entry.name };
+
+      metaChanges.push({
+        key: 'importFrom',
+        label: '원클릭 이사 원본',
+        before: '(없음)',
+        after: `#${srcIdx + 1} "${entry.name}" (${importPlan.copied.join(', ') || '복사할 항목 없음'})`,
+      });
+      metaChanges.push(...importPlan.metaChanges);
+      if (importPlan.after) afterSections.push(importPlan.after);
+      notes.push(...importPlan.skipped.map(s => s.reason));
+      if (importPlan.missingVariables.length > 0) {
+        notes.push(`원본 채팅에 없는 변수는 건너뜁니다: ${importPlan.missingVariables.join(', ')}`);
+      }
+    }
+
+    let summaryEntry = null;
+    if (proposal.summaryLorebook && typeof proposal.summaryLorebook === 'object') {
+      summaryEntry = normalizeLorebookEntry({
+        comment: '이전 채팅 요약',
+        key: '',
+        alwaysActive: true,
+        insertorder: 100,
+        ...proposal.summaryLorebook,
+      });
+      if (!Array.isArray(newChat.localLore)) newChat.localLore = [];
+      newChat.localLore.push(summaryEntry);
+      metaChanges.push({
+        key: 'summaryLorebook',
+        label: '요약 로어북 추가',
+        before: '(신규)',
+        after: `${summaryEntry.comment}${summaryEntry.alwaysActive ? ' (항상 활성)' : ''}`,
+      });
+      afterSections.push(`[요약 로어북: ${summaryEntry.comment}]\n${summaryEntry.content}`);
+    }
+
+    const afterText = afterSections.join('\n\n') || `(빈 새 채팅 "${name}")`;
+    return {
+      char,
+      charIndex,
+      crossCharacter,
+      existingChats,
+      newChat,
+      switchToNewChat,
+      sourceMeta,
+      importPlan,
+      summaryEntry,
+      metaChanges,
+      afterText,
+      notes,
+    };
+  }
+
+  async _applyCreateChat(proposal, options = {}) {
+    const planned = await this._planCreateChat(proposal, options.hostBinding);
+    const {
+      char, charIndex, crossCharacter, existingChats, newChat,
+      switchToNewChat, sourceMeta, importPlan, summaryEntry,
+    } = planned;
+
+    // Shallow-copy existing chats so diffValues() short-circuits via `a === b` instead of
+    // deep-comparing long existing chat transcripts, and preserves PocketRisu _placeholder chats.
+    const nextChats = [...existingChats, newChat];
+    const newChatIndex = nextChats.length - 1;
+    const nextChar = {
+      ...char,
+      chats: nextChats,
+      ...(switchToNewChat ? { chatPage: newChatIndex } : {}),
+    };
+
+    const prefix = this._formatCrossPrefix({ char, charIndex, crossCharacter });
+    const label = sourceMeta
+      ? `${prefix}새 채팅 생성 + 이사 ("${sourceMeta.name}" → "${newChat.name}")`
+      : `${prefix}새 채팅 생성 ("${newChat.name}")`;
+    const undoId = await this._commitCharacterAt(char, charIndex, nextChar, label, { crossCharacter });
+
+    const details = [];
+    if (importPlan?.copied?.length > 0) details.push(`이관: ${importPlan.copied.join(', ')}`);
+    if (summaryEntry) details.push(`요약 로어북 "${summaryEntry.comment}" 추가`);
+    if (switchToNewChat) details.push('새 채팅으로 전환됨');
+    const detailSuffix = details.length > 0 ? ` (${details.join(' · ')})` : '';
+    return {
+      ok: true,
+      undoId,
+      chatId: newChat.id,
+      chatIndex: newChatIndex,
+      switchedToNewChat: switchToNewChat,
+      summary: `${prefix}새 채팅 "${newChat.name}"을(를) 생성했습니다${detailSuffix}.`,
+    };
+  }
+
   /** Sends a drafted user reply directly via RisuAI's Plugin v3 sendChat() (appends user turn + triggers AI reply). */
   async sendUserChatMessage(text, options = {}) {
     if (typeof this.api?.sendChat !== 'function') {
@@ -4055,20 +4764,32 @@ class HostAdapter {
   }
 
   /**
-   * Opens the entity a scoped operation works on — the active character, the active chat, or one
+   * Opens the entity a scoped operation works on — any character, any chat, or one
    * installed module — and returns a cloned `root` to mutate plus `commit(label)`, which writes
-   * it and records the undo entry. One implementation serves all three scopes.
+   * it and records the undo entry. One implementation serves all three scopes and borderless targets.
    */
   async _openScope(scope, proposal, target, options = {}, verb = '적용') {
+    const crossHint = {
+      targetCharIndex: proposal?.targetCharIndex ?? target?.targetCharIndex,
+      targetChatIndex: proposal?.targetChatIndex ?? target?.targetChatIndex,
+    };
+
     if (scope === 'chat') {
-      const { chat, charIndex, chatIndex } = await this._requireSameActiveChat(options.hostBinding, verb);
+      const { chat, char, charIndex, chatIndex, crossCharacter, crossChat } = await this._resolveTargetChat(
+        crossHint,
+        options.hostBinding,
+        verb
+      );
       const next = clone(chat);
+      const prefix = this._formatCrossPrefix({ char, charIndex, chat, chatIndex, crossCharacter, crossChat });
       return {
         scope: 'chat',
-        name: '채팅',
+        name: prefix ? `${prefix}채팅` : '채팅',
+        crossCharacter,
+        crossChat,
         root: next,
         listKeys: { lore: 'localLore' },
-        commit: (label) => this._commitChat(chat, charIndex, chatIndex, next, label),
+        commit: (label) => this._commitChat(chat, charIndex, chatIndex, next, label, { char, crossCharacter, crossChat }),
       };
     }
     if (scope === 'module') {
@@ -4080,19 +4801,24 @@ class HostAdapter {
       return {
         scope: 'module',
         name: `모듈 "${modules[modIdx].name}"`,
+        crossCharacter: false,
+        crossChat: false,
         root: nextModules[modIdx],
         listKeys: { lore: 'lorebook', regex: 'regex', trigger: 'trigger' },
         commit: (label) => this._commitDb({ modules }, { modules: nextModules }, label),
       };
     }
-    const { char, charIndex } = await this._requireSameActiveCharacter(options.hostBinding, verb);
+    const { char, charIndex, crossCharacter } = await this._resolveTargetCharacter(crossHint, options.hostBinding, verb);
     const next = clone(char);
+    const prefix = this._formatCrossPrefix({ char, charIndex, crossCharacter });
     return {
       scope: 'character',
-      name: '캐릭터',
+      name: prefix ? `${prefix}캐릭터` : '캐릭터',
+      crossCharacter,
+      crossChat: false,
       root: next,
       listKeys: { lore: 'globalLore', regex: 'customscript', trigger: 'triggerscript' },
-      commit: (label) => this._commitCharacter(char, charIndex, next, label),
+      commit: (label) => this._commitCharacterAt(char, charIndex, next, label, { crossCharacter }),
     };
   }
 
@@ -4384,20 +5110,29 @@ class HostAdapter {
   }
 
   async _applyUpdateChatVars(proposal, options = {}) {
-    const { char, charIndex, chatIndex, chat } = await this._requireSameActiveChat(options.hostBinding, '채팅 변수 편집');
-    if (isColdStoredChat(chat)) {
-      throw new Error('현재 채팅이 콜드 스토리지에 보관 중입니다. 채팅을 다시 열어 주세요.');
-    }
+    const { char, charIndex, chatIndex, chat, crossCharacter, crossChat } = await this._resolveTargetChat(
+      proposal,
+      options.hostBinding,
+      '채팅 변수 편집'
+    );
     const plan = planChatVarsUpdate(chat.scriptstate, proposal);
     if (!plan.ok) throw new Error(plan.error);
 
     const nextChat = clone(chat);
     nextChat.scriptstate = plan.nextState;
-    const undoId = await this._commitChat(chat, charIndex, chatIndex, nextChat, `채팅 변수 편집 (${plan.changedCount}건)`);
+    const prefix = this._formatCrossPrefix({ char, charIndex, chat, chatIndex, crossCharacter, crossChat });
+    const undoId = await this._commitChat(
+      chat,
+      charIndex,
+      chatIndex,
+      nextChat,
+      `${prefix}채팅 변수 편집 (${plan.changedCount}건)`,
+      { char, crossCharacter, crossChat }
+    );
     return {
       ok: true,
       undoId,
-      summary: `현재 채팅 변수 ${plan.changedCount}건을 반영했습니다.`,
+      summary: `${prefix || '현재 '}채팅 변수 ${plan.changedCount}건을 반영했습니다.`,
     };
   }
 
@@ -4474,7 +5209,11 @@ class HostAdapter {
   }
 
   async _applyDeleteGreeting(proposal, options = {}) {
-    const { char, charIndex } = await this._requireSameActiveCharacter(options.hostBinding, '추가 첫 메시지 삭제');
+    const { char, charIndex, crossCharacter } = await this._resolveTargetCharacter(
+      proposal,
+      options.hostBinding,
+      '추가 첫 메시지 삭제'
+    );
     if (char.type === 'group') throw new Error('그룹 채팅에는 첫 메시지 구조가 없습니다.');
     const list = Array.isArray(char.alternateGreetings) ? char.alternateGreetings : [];
     const pinnedText = options?.hostBinding?.deleteGreetingText;
@@ -4498,8 +5237,15 @@ class HostAdapter {
         else if (c.fmIndex > idx) c.fmIndex -= 1;
       }
     }
-    const undoId = await this._commitCharacter(char, charIndex, nextChar, `추가 첫 메시지 #${idx + 1} 삭제`);
-    return { ok: true, undoId, summary: `추가 첫 메시지 #${idx + 1}을(를) 삭제했습니다.` };
+    const prefix = this._formatCrossPrefix({ char, charIndex, crossCharacter });
+    const undoId = await this._commitCharacterAt(
+      char,
+      charIndex,
+      nextChar,
+      `${prefix}추가 첫 메시지 #${idx + 1} 삭제`,
+      { crossCharacter }
+    );
+    return { ok: true, undoId, summary: `${prefix}추가 첫 메시지 #${idx + 1}을(를) 삭제했습니다.` };
   }
 
   async _applyCreateModule(proposal, options = {}) {
@@ -4599,33 +5345,56 @@ class HostAdapter {
   }
 
   async _applyUpdateCharSettings(proposal, options = {}) {
-    const { char, charIndex } = await this._requireSameActiveCharacter(options.hostBinding, '캐릭터 고급 설정 수정');
+    const { char, charIndex, crossCharacter } = await this._resolveTargetCharacter(
+      proposal,
+      options.hostBinding,
+      '캐릭터 고급 설정 수정'
+    );
     const plan = planCharSettingsUpdate(char, proposal);
     if (!plan.ok) throw new Error(plan.error);
 
     const nextChar = clone(char);
     Object.assign(nextChar, plan.nextPatch);
-    const undoId = await this._commitCharacter(char, charIndex, nextChar, `캐릭터 고급 설정 수정 (${char.name || '무제'})`);
+    const prefix = this._formatCrossPrefix({ char, charIndex, crossCharacter });
+    const undoId = await this._commitCharacterAt(
+      char,
+      charIndex,
+      nextChar,
+      `${prefix}캐릭터 고급 설정 수정 (${char.name || '무제'})`,
+      { crossCharacter }
+    );
     return {
       ok: true,
       undoId,
-      summary: `캐릭터 "${char.name || '무제'}"의 고급 설정(${Object.keys(plan.nextPatch).join(', ')})을 저장했습니다.`,
+      summary: `${prefix}캐릭터 "${char.name || '무제'}"의 고급 설정(${Object.keys(plan.nextPatch).join(', ')})을 저장했습니다.`,
     };
   }
 
   async _applyPortFromCharacter(proposal, options = {}) {
     const { char: currentChar, charIndex: activeIndex } = await this._requireSameActiveCharacter(options.hostBinding, '캐릭터 포팅');
-    const { characters, permissionDenied } = await this.readCharacterCatalog();
-    if (permissionDenied) throw new Error(DB_PERMISSION_ERROR);
-
     let srcIdx = proposal.sourceCharIndex;
     const binding = options?.hostBinding || null;
-    if (binding?.sourceChaId && characters[srcIdx]?.chaId !== binding.sourceChaId) {
-      const byId = characters.findIndex(c => c && c.chaId === binding.sourceChaId);
-      if (byId === -1) throw new Error('원본 캐릭터를 찾을 수 없습니다. (삭제되었거나 목록이 바뀌었습니다)');
-      srcIdx = byId;
+    let sourceChar = null;
+
+    if (this.hasCapability('getCharacterFromIndex') && typeof this.api.getCharacterFromIndex === 'function') {
+      sourceChar = await this._getCharacterAt(srcIdx);
+      if (binding?.sourceChaId && sourceChar?.chaId !== binding.sourceChaId) {
+        sourceChar = null;
+      }
     }
-    const sourceChar = Number.isInteger(srcIdx) ? characters[srcIdx] : null;
+
+    if (!sourceChar) {
+      const db = await this.readDbSubset(['characters']);
+      if (!db) throw new Error(DB_PERMISSION_ERROR);
+      const characters = Array.isArray(db.characters) ? db.characters : [];
+      if (binding?.sourceChaId && characters[srcIdx]?.chaId !== binding.sourceChaId) {
+        const byId = characters.findIndex(c => c && c.chaId === binding.sourceChaId);
+        if (byId === -1) throw new Error('원본 캐릭터를 찾을 수 없습니다. (삭제되었거나 목록이 바뀌었습니다)');
+        srcIdx = byId;
+      }
+      sourceChar = Number.isInteger(srcIdx) ? characters[srcIdx] : null;
+    }
+
     if (!sourceChar) throw new Error(`원본 캐릭터 #${Number(srcIdx) + 1}을(를) 찾을 수 없습니다.`);
     if (srcIdx === activeIndex || (sourceChar.chaId && sourceChar.chaId === currentChar.chaId)) {
       throw new Error('원본 캐릭터가 현재 캐릭터와 같습니다.');
