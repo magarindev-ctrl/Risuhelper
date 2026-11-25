@@ -138,6 +138,10 @@ function proposalFence(obj) {
   return '```risuhelper-proposal\n' + JSON.stringify(obj, null, 2) + '\n```';
 }
 
+function toolFence(calls) {
+  return '```risuhelper-tool\n' + JSON.stringify(calls) + '\n```';
+}
+
 /**
  * 20 representative scenarios covering Q&A guards, focused edits, truncation safety,
  * free-talk field/greeting actions, lorebook CRUD & atomic folder organization,
@@ -1189,6 +1193,262 @@ const EVAL_SCENARIOS = [
       return issues;
     },
   },
+
+  // 27. M0: create_chat + one-click migration + summaryLorebook + switchToNewChat + surgical undo
+  {
+    id: 'chat-create-migrate',
+    category: 'M0 · 새 채팅 생성·이사',
+    title: '새 채팅 생성 + 변수·작가노트 이사 + 요약 로어북 + 전환',
+    prompt: '현재 채팅의 변수랑 작가의 노트를 그대로 옮기고, 지금까지 대화 요약 로어북도 하나 넣어서 "2부 여정"이라는 새 채팅을 만들고 바로 전환해 줘.',
+    expectMode: 'apply',
+    setup() {
+      const character = baseCharacter();
+      character.chats = [
+        {
+          id: 'eval-chat-part1',
+          name: '1부 항구 도시',
+          note: '은은한 판타지 문체 유지',
+          fmIndex: -1,
+          scriptstate: { $hp: 75, $gold: 300 },
+          localLore: [],
+          message: [
+            { role: 'user', data: '탑 정상에서 별빛 조각을 회수했다.', chatId: 'p1m1' },
+            { role: 'char', data: '아리아는 별빛 조각을 봉인 주머니에 넣었다.', chatId: 'p1m2' },
+          ],
+        },
+      ];
+      character.chatPage = 0;
+      return {
+        character,
+        db: baseDb(character),
+        context: { screen: 'chat', targetKind: 'general', freeTalk: true, labelText: '자유대화', screenHint: '채팅 화면' },
+      };
+    },
+    goldenReply: '새 채팅 "2부 여정"을 만들고 현재 채팅의 변수·작가의 노트와 요약 로어북을 함께 옮깁니다.\n' + proposalFence({
+      action: 'create_chat',
+      title: '2부 여정 새 채팅 생성 및 이사',
+      name: '2부 여정',
+      importFromChatIndex: 'current',
+      importItems: ['variables', 'authorNote'],
+      summaryLorebook: {
+        comment: '1부 줄거리 요약',
+        content: '항구 도시 마법 탑 정상에서 별빛 조각을 회수해 봉인했다.',
+        alwaysActive: true,
+      },
+      switchToNewChat: true,
+    }),
+    check({ proposals, state }) {
+      const issues = [];
+      if (!proposals.some(p => p.proposal.action === 'create_chat')) {
+        issues.push(`create_chat 기대, 실제: ${proposals.map(p => p.proposal.action).join(', ')}`);
+      }
+      if (state.character.chats.length !== 2) {
+        issues.push(`새 채팅 생성 후 채팅 2개 기대, 실제 ${state.character.chats.length}개`);
+        return issues;
+      }
+      const created = state.character.chats[1];
+      if (!created.id) issues.push('새 채팅에 포크 안전 UUID id가 없음');
+      if (String(created.scriptstate?.$hp ?? '') !== '75') issues.push('변수 $hp가 복사되지 않음');
+      if (!String(created.note || '').includes('판타지')) issues.push('작가의 노트가 복사되지 않음');
+      if (!Array.isArray(created.localLore) || created.localLore.length === 0) issues.push('요약 로어북이 포함되지 않음');
+      if (state.character.chatPage !== 1) issues.push(`새 채팅 전환(chatPage=1) 기대, 실제 ${state.character.chatPage}`);
+      return issues;
+    },
+  },
+
+  // 28. M0 + Issue 1 regression: borderless create_lorebook targeting non-open chat with explicit [다른 채팅: ...] label
+  {
+    id: 'borderless-other-chat-lore',
+    category: 'M0 · 경계 없는 타 채팅 편집',
+    title: '열려 있지 않은 1번 채팅에 채팅 로어북 추가 + 대상 표시 확인',
+    prompt: '지금 열린 2부 채팅 말고 1번 채팅(1부 모험)의 채팅 로어북에 "1부 결말" 항목(키워드: 결말, 내용: 은빛 늑대와 계약을 맺었다.)을 추가해 줘.',
+    expectMode: 'apply',
+    setup() {
+      const character = baseCharacter();
+      character.chats = [
+        {
+          id: 'eval-chat-1',
+          name: '1부 모험',
+          note: '1부 노트',
+          fmIndex: -1,
+          scriptstate: {},
+          localLore: [],
+          message: [{ role: 'char', data: '은빛 늑대와 숲에서 조우했다.', chatId: 'c1m1' }],
+        },
+        {
+          id: 'eval-chat-2',
+          name: '2부 여정',
+          note: '2부 노트',
+          fmIndex: -1,
+          scriptstate: {},
+          localLore: [],
+          message: [{ role: 'char', data: '2부 시작.', chatId: 'c2m1' }],
+        },
+      ];
+      character.chatPage = 1;
+      return {
+        character,
+        chatIndex: 1,
+        db: baseDb(character),
+        context: { screen: 'chat', targetKind: 'general', freeTalk: true, labelText: '자유대화', screenHint: '채팅 화면' },
+      };
+    },
+    goldenReply: '1번 채팅(1부 모험)의 채팅 로어북에 항목을 추가합니다.\n' + proposalFence({
+      action: 'create_lorebook',
+      title: '1부 결말 로어북',
+      scope: 'chat',
+      targetChatIndex: 0,
+      comment: '1부 결말',
+      key: '결말',
+      content: '은빛 늑대와 계약을 맺었다.',
+    }),
+    check({ proposals, state }) {
+      const issues = [];
+      const hit = proposals.find(p => p.proposal.action === 'create_lorebook' && p.proposal.scope === 'chat' && p.proposal.targetChatIndex === 0);
+      if (!hit) {
+        issues.push(`create_lorebook(scope:"chat", targetChatIndex:0) 기대, 실제: ${proposals.map(p => p.proposal.action).join(', ')}`);
+      } else if (!/\[다른 채팅: 1부 모험\]/.test(String(hit.preview?.label || ''))) {
+        issues.push(`카드 고정 대상에 [다른 채팅: 1부 모험] 표시 누락 (실제: ${hit.preview?.label || ''})`);
+      }
+      if (!state.character.chats[0].localLore.some(e => e.comment === '1부 결말')) {
+        issues.push('1번 채팅 localLore에 "1부 결말"이 추가되지 않음');
+      }
+      if (state.character.chats[1].localLore.length !== 0) {
+        issues.push('현재 열린 2번 채팅 localLore가 의도치 않게 변경됨');
+      }
+      return issues;
+    },
+  },
+
+  // 29. M1 Loop: must call read_item to inspect hidden tail of truncated desc and unlock whole-text update_field
+  {
+    id: 'loop-read-full-item',
+    category: 'M1 · 3회 루프 (전문 조회)',
+    title: 'read_item으로 잘린 필드 전문을 읽어 숨겨진 유물 반영 후 정리',
+    prompt: '아리아 카드 본문 뒷부분에 적힌 유물 이름을 포함해서 아리아 소개글을 한 문단으로 깔끔하게 다시 정리해 줘.',
+    expectMode: 'apply',
+    requiresLoop: true,
+    setup() {
+      const character = baseCharacter();
+      character.desc = [
+        '아리아는 항구 도시의 연금술사이다.',
+        '은빛 단발 머리와 초록빛 눈동자를 지녔으며 공방에서 물약을 제조한다.',
+        '세부 배경 설정: ' + '오랜 세월 항구 도시의 약초 길드와 협력해 왔으며, '.repeat(12),
+        '숨겨진 유물: 푸른 월광석 (달빛 아래서만 빛나는 고대 촉매).',
+      ].join('\n');
+      return {
+        character,
+        db: baseDb(character),
+        context: { screen: 'chat', targetKind: 'general', freeTalk: true, labelText: '자유대화', screenHint: '채팅 화면' },
+      };
+    },
+    goldenReplies: [
+      '뒷부분의 유물 정보를 확인하기 위해 전문을 먼저 조회하겠습니다.\n' + toolFence([
+        { tool: 'read_item', args: { kind: 'char_field', field: 'desc' } },
+      ]),
+      '숨겨진 유물 "푸른 월광석"을 포함해 소개글을 한 문단으로 정리했습니다.\n' + proposalFence({
+        action: 'update_field',
+        title: '아리아 소개글 한 문단 정리',
+        field: 'desc',
+        content: '아리아는 은빛 단발과 초록빛 눈동자를 지닌 항구 도시의 연금술사로, 약초 길드와 협력하며 공방에서 물약을 제조하고 달빛 아래 빛나는 고대 촉매 "푸른 월광석"을 간직하고 있다.',
+      }),
+    ],
+    check({ proposals, state }) {
+      const issues = [];
+      if (!proposals.some(p => p.proposal.action === 'update_field' && p.proposal.field === 'desc')) {
+        issues.push(`update_field(field:"desc") 기대, 실제: ${proposals.map(p => p.proposal.action).join(', ')}`);
+      }
+      if (!state.character.desc.includes('푸른 월광석')) {
+        issues.push('전문 조회로만 알 수 있는 유물 "푸른 월광석"이 수정 본문에 누락됨');
+      }
+      return issues;
+    },
+  },
+
+  // 30. M1 Loop: must call load_skill(char_settings) from L1 catalog when prompt uses indirect phrasing
+  {
+    id: 'loop-load-skill-l2',
+    category: 'M1 · 3회 루프 (L2 스킬 로드)',
+    title: '미로드 L1 스킬(char_settings)을 load_skill로 불러온 뒤 적용',
+    prompt: '단어가 자꾸 겹쳐서 "문득"이 덜 나오게 억제치를 -20으로 걸고, 분류 라벨에 "미스터리"를 붙여 줘.',
+    expectMode: 'apply',
+    requiresLoop: true,
+    setup() {
+      const character = baseCharacter();
+      character.bias = [];
+      character.tags = ['판타지'];
+      return {
+        character,
+        db: baseDb(character),
+        context: { screen: 'chat', targetKind: 'general', freeTalk: true, labelText: '자유대화', screenHint: '채팅 화면' },
+      };
+    },
+    goldenReplies: [
+      '고급 튜닝 스키마를 먼저 불러오겠습니다.\n' + toolFence([
+        { tool: 'load_skill', args: { skillIds: ['char_settings'] } },
+      ]),
+      '"문득" 억제치(-20)와 "미스터리" 분류 라벨을 추가하는 제안을 작성했습니다.\n' + proposalFence({
+        action: 'update_char_settings',
+        title: '반복어 억제치 및 분류 라벨 추가',
+        addBias: [['문득', -20]],
+        addTags: ['미스터리'],
+      }),
+    ],
+    check({ proposals, state }) {
+      const issues = [];
+      if (!proposals.some(p => p.proposal.action === 'update_char_settings')) {
+        issues.push(`update_char_settings 기대, 실제: ${proposals.map(p => p.proposal.action).join(', ')}`);
+      }
+      if (!Array.isArray(state.character.bias) || !state.character.bias.some(b => Array.isArray(b) && b[0] === '문득' && Number(b[1]) === -20)) {
+        issues.push('bias에 ["문득", -20]이 반영되지 않음');
+      }
+      if (!Array.isArray(state.character.tags) || !state.character.tags.includes('미스터리')) {
+        issues.push('tags에 "미스터리"가 추가되지 않음');
+      }
+      return issues;
+    },
+  },
+
+  // 31. M1 Loop: subtly misquoted patch target triggers auto-repair (Call 1 fails preview -> Call 2 repairs)
+  {
+    id: 'loop-auto-repair',
+    category: 'M1 · 3회 루프 (자동 수정)',
+    title: '원문 불일치로 실패한 부분 편집을 자동 수정으로 복구',
+    prompt: '현재 칸의 원문에 있는 "북부 변경의 수호자"를 "왕도의 기사단장"으로 부분 편집해 줘.',
+    expectMode: 'apply',
+    requiresLoop: true,
+    setup() {
+      const character = baseCharacter();
+      character.desc = '아리아는 북부 변경의 수호 기사이며, 은빛 장검을 사용한다.';
+      return {
+        character,
+        db: baseDb(character),
+        context: { screen: 'character', targetKind: 'char_field', fieldKey: 'desc', labelText: '캐릭터 · 설명' },
+      };
+    },
+    goldenReplies: [
+      '부분 편집 제안을 작성합니다.\n' + proposalFence({
+        action: 'patch_text',
+        title: '직위 부분 편집 (1차 시도)',
+        edits: [{ before: '북부 변경의 수호자', after: '왕도의 기사단장' }],
+      }),
+      '원문 문구("북부 변경의 수호 기사")에 맞춰 수정했습니다.\n' + proposalFence({
+        action: 'patch_text',
+        title: '직위 부분 편집 (자동 수정)',
+        edits: [{ before: '북부 변경의 수호 기사', after: '왕도의 기사단장' }],
+      }),
+    ],
+    check({ proposals, state }) {
+      const issues = [];
+      if (!proposals.some(p => p.proposal.action === 'patch_text')) {
+        issues.push(`patch_text 기대, 실제: ${proposals.map(p => p.proposal.action).join(', ')}`);
+      }
+      if (!state.character.desc.includes('왕도의 기사단장')) {
+        issues.push('desc에 "왕도의 기사단장"이 반영되지 않음');
+      }
+      return issues;
+    },
+  },
 ];
 
 const deepClone = (v) => (typeof structuredClone === 'function' ? structuredClone(v) : JSON.parse(JSON.stringify(v)));
@@ -1215,16 +1475,31 @@ function createScenarioHost(setupRes, callModelFn) {
       state.character = deepClone(c);
       syncActiveIntoDb();
     },
+    async getCharacterFromIndex(idx) {
+      if (idx === 0) return deepClone(state.character);
+      const ch = state.db.characters?.[idx];
+      return ch ? deepClone(ch) : null;
+    },
+    async setCharacterToIndex(idx, c) {
+      if (idx === 0) {
+        state.character = deepClone(c);
+        syncActiveIntoDb();
+      } else if (Array.isArray(state.db.characters) && state.db.characters[idx]) {
+        state.db.characters[idx] = deepClone(c);
+      }
+    },
     async getCurrentCharacterIndex() { return 0; },
     async getCurrentChatIndex() { return state.chatIndex; },
-    async getChatFromIndex(_charIdx, chatIdx) {
-      const chat = state.character.chats?.[chatIdx];
+    async getChatFromIndex(charIdx, chatIdx) {
+      const ch = charIdx === 0 ? state.character : state.db.characters?.[charIdx];
+      const chat = ch?.chats?.[chatIdx];
       return chat ? deepClone(chat) : null;
     },
-    async setChatToIndex(_charIdx, chatIdx, chat) {
-      if (state.character.chats?.[chatIdx]) {
-        state.character.chats[chatIdx] = deepClone(chat);
-        syncActiveIntoDb();
+    async setChatToIndex(charIdx, chatIdx, chat) {
+      const ch = charIdx === 0 ? state.character : state.db.characters?.[charIdx];
+      if (ch?.chats?.[chatIdx]) {
+        ch.chats[chatIdx] = deepClone(chat);
+        if (charIdx === 0) syncActiveIntoDb();
       }
     },
     async getDatabase(includeOnly = 'all') {
@@ -1295,14 +1570,18 @@ function formatUndoConflict(c) {
  * @param {Function} [opts.callModel] async (messages, scenario) => { text, usage?, finishReason?, truncated? } | string
  * @param {boolean} [opts.dryRun]
  * @param {boolean} [opts.useGolden]
+ * @param {number} [opts.maxCalls=3]
  */
-async function runEvalScenario(scenario, { callModel = null, dryRun = false, useGolden = false } = {}) {
+async function runEvalScenario(scenario, { callModel = null, dryRun = false, useGolden = false, maxCalls = 3 } = {}) {
   const setupRes = scenario.setup();
-  let modelUsage = null;
+  let totalInputTokens = 0;
+  let totalOutputTokens = 0;
+  let hasUsage = false;
   let finishReason = '';
   let truncatedByProvider = false;
   let rawReply = '';
-  let latencyMs = 0;
+  let totalLatencyMs = 0;
+  let goldenCallIdx = 0;
 
   const invokeModel = async (messages) => {
     if (dryRun) {
@@ -1310,7 +1589,13 @@ async function runEvalScenario(scenario, { callModel = null, dryRun = false, use
       return '(dry-run)';
     }
     if (useGolden) {
-      rawReply = scenario.goldenReply;
+      if (Array.isArray(scenario.goldenReplies) && scenario.goldenReplies.length > 0) {
+        const idx = Math.min(goldenCallIdx, scenario.goldenReplies.length - 1);
+        goldenCallIdx++;
+        rawReply = scenario.goldenReplies[idx];
+      } else {
+        rawReply = scenario.goldenReply || '';
+      }
       return rawReply;
     }
     if (typeof callModel !== 'function') {
@@ -1318,13 +1603,17 @@ async function runEvalScenario(scenario, { callModel = null, dryRun = false, use
     }
     const t0 = Date.now();
     const res = await callModel(messages, scenario);
-    latencyMs = Date.now() - t0;
+    totalLatencyMs += Date.now() - t0;
     if (typeof res === 'string') {
       rawReply = res;
       return rawReply;
     }
     rawReply = String(res?.text ?? '');
-    modelUsage = res?.usage || null;
+    if (res?.usage) {
+      hasUsage = true;
+      totalInputTokens += Number(res.usage.inputTokens) || 0;
+      totalOutputTokens += Number(res.usage.outputTokens) || 0;
+    }
     finishReason = String(res?.finishReason || '');
     truncatedByProvider = Boolean(res?.truncated) || /^(length|max_tokens)$/i.test(finishReason);
     return rawReply;
@@ -1333,6 +1622,8 @@ async function runEvalScenario(scenario, { callModel = null, dryRun = false, use
   const { state, api, capturedRequests } = createScenarioHost(setupRes, invokeModel);
   const initialSnapshot = deepClone({ character: state.character, db: state.db });
   const app = new RisuHelperApp(api, createMockDocument());
+  const clampedMaxCalls = Math.max(1, Math.min(3, Number(maxCalls) || 3));
+  app.settings.maxLlmCalls = clampedMaxCalls;
   if (setupRes.maxContentChars) {
     app.settings.maxContentChars = setupRes.maxContentChars;
     app.adapter.maxContentChars = setupRes.maxContentChars;
@@ -1346,11 +1637,18 @@ async function runEvalScenario(scenario, { callModel = null, dryRun = false, use
     category: scenario.category,
     title: scenario.title,
     expectMode: scenario.expectMode,
+    requiresLoop: Boolean(scenario.requiresLoop),
     ok: false,
     failureCategory: null,
     issues: [],
     promptChars: 0,
+    totalPromptChars: 0,
     systemChars: 0,
+    callsUsed: 1,
+    maxCalls: clampedMaxCalls,
+    toolRunsCount: 0,
+    toolNames: [],
+    repairedCount: 0,
     latencyMs: 0,
     usage: null,
     finishReason: '',
@@ -1366,16 +1664,29 @@ async function runEvalScenario(scenario, { callModel = null, dryRun = false, use
     const sentMessages = capturedRequests[0] || [];
     result.systemChars = String(sentMessages[0]?.content || '').length;
     result.promptChars = sentMessages.reduce((sum, m) => sum + String(m?.content || '').length, 0);
-    result.latencyMs = latencyMs;
-    result.usage = modelUsage;
+    result.latencyMs = totalLatencyMs;
+    result.usage = hasUsage ? { inputTokens: totalInputTokens, outputTokens: totalOutputTokens } : null;
     result.finishReason = finishReason;
+
+    const assistantMsg = app.messages[app.messages.length - 1];
+    const loopMeta = assistantMsg?.loopMeta || null;
+    if (loopMeta) {
+      result.callsUsed = loopMeta.callsUsed || capturedRequests.length || 1;
+      result.maxCalls = loopMeta.maxCalls || clampedMaxCalls;
+      result.totalPromptChars = loopMeta.totalPromptChars || result.promptChars;
+      result.toolRunsCount = Array.isArray(loopMeta.toolRuns) ? loopMeta.toolRuns.length : 0;
+      result.toolNames = Array.isArray(loopMeta.toolRuns) ? loopMeta.toolRuns.map(t => t.tool) : [];
+      result.repairedCount = Number(loopMeta.repairedCount) || 0;
+    } else {
+      result.callsUsed = capturedRequests.length || 1;
+      result.totalPromptChars = result.promptChars;
+    }
 
     if (dryRun) {
       result.ok = true;
       return result;
     }
 
-    const assistantMsg = app.messages[app.messages.length - 1];
     result.rawReplyExcerpt = String(rawReply || '').slice(0, 500);
 
     if (assistantMsg?.error) {
@@ -1450,6 +1761,7 @@ async function runEvalScenario(scenario, { callModel = null, dryRun = false, use
         proposals,
         state,
         initialSnapshot,
+        loopMeta,
       }) || [];
       if (semanticIssues.length > 0) {
         result.failureCategory ||= (scenario.expectMode === 'no_proposal' && proposals.length > 0)

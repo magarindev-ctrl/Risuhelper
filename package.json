@@ -17,6 +17,7 @@
     "build:eval-plugin": "node tools/build-eval-plugin.mjs",
     "test": "node --test tests/*.test.mjs",
     "check": "npm run build && npm test",
-    "eval": "node tools/eval-real-model.mjs"
+    "eval": "node tools/eval-real-model.mjs",
+    "e2e:sim": "node tools/e2e/run-fork-e2e.mjs --host all --mode simulated"
   }
 }

@@ -713,3 +713,107 @@ test('bundled dist/risuhelper.js runs 2-call read_item -> update_field with tele
   assert.doesNotMatch(capturedPrompts[2], /risuhelper-tool/, 'maxLlmCalls=1 omits tool instructions from prompt');
   assert.match(ui.bodyText(), /호출 1\/1/);
 });
+
+test('borderless create_lorebook, organize_lorebook, upsert_regex, and create_chat always show [다른 채팅: ...] / [다른 캐릭터: ...] in preview.label even with custom proposal.title', async () => {
+  const { adapter } = makeRichHostFixture();
+  const baseTarget = { screen: 'chat', targetKind: 'general', freeTalk: true };
+
+  // 1. create_lorebook on another chat (targetChatIndex: 1 while chat 0 is open)
+  const pChatLore = await adapter.previewProposal({
+    action: 'create_lorebook',
+    title: '임의 제목',
+    scope: 'chat',
+    targetChatIndex: 1,
+    comment: '이전 회차 메모',
+    key: '유적',
+    content: '유적 기록',
+  }, baseTarget);
+  assert.equal(pChatLore.ok, true);
+  assert.match(pChatLore.label, /\[다른 채팅: 이전 회차\]/, 'must always show [다른 채팅: ...] regardless of proposal.title');
+  assert.match(pChatLore.label, /채팅 로어북/);
+
+  // 2. create_lorebook on another character
+  const pCharLore = await adapter.previewProposal({
+    action: 'create_lorebook',
+    title: '임의 제목',
+    scope: 'character',
+    targetCharIndex: 1,
+    comment: '빙결 주문',
+    key: '빙결',
+    content: '얼음 마법',
+  }, baseTarget);
+  assert.equal(pCharLore.ok, true);
+  assert.match(pCharLore.label, /\[다른 캐릭터: 마법사 카엘\]/);
+
+  // 3. organize_lorebook on another character
+  const pOrg = await adapter.previewProposal({
+    action: 'organize_lorebook',
+    title: '임의 정리 제목',
+    scope: 'character',
+    targetCharIndex: 1,
+    folderName: '마법 폴더',
+    loreIndices: [0],
+  }, baseTarget);
+  assert.equal(pOrg.ok, true);
+  assert.match(pOrg.label, /\[다른 캐릭터: 마법사 카엘\]/);
+
+  // 4. upsert_regex (new) on another character
+  const pRegex = await adapter.previewProposal({
+    action: 'upsert_regex',
+    title: '임의 정규식 제목',
+    scope: 'character',
+    targetCharIndex: 1,
+    comment: '마법 배지',
+    type: 'editdisplay',
+    in: '\\[MP:(\\d+)\\]',
+    out: '<span>$1</span>',
+    flag: 'g',
+  }, baseTarget);
+  assert.equal(pRegex.ok, true);
+  assert.match(pRegex.label, /\[다른 캐릭터: 마법사 카엘\]/);
+
+  // 5. create_chat on another character
+  const pCreateChat = await adapter.previewProposal({
+    action: 'create_chat',
+    title: '임의 새 채팅 제목',
+    targetCharIndex: 1,
+    name: '카엘 2부',
+  }, baseTarget);
+  assert.equal(pCreateChat.ok, true);
+  assert.match(pCreateChat.label, /\[다른 캐릭터: 마법사 카엘\]/);
+});
+
+test('auto-repair ending without replacement proposal preserves rejected proposal reasons visibly in UI (repairHistory)', async () => {
+  const state = { character: freshCharacter() };
+  const replies = [
+    proposalBlock({
+      action: 'update_field',
+      title: '실패할 1차 수정',
+      field: 'desc',
+      edits: [{ before: '원문에 절대 없는 문자열', after: '교체' }],
+    }),
+    '원문에서 해당 문구를 찾지 못해 제안을 취소했습니다.',
+  ];
+  const ui = await bootBundle({
+    state,
+    runLLMModel: async () => replies.shift() || '',
+  });
+
+  await ui.send('없는 문구 고쳐 줘');
+  const text = ui.bodyText();
+  assert.match(text, /호출 2\/3/);
+  assert.match(text, /이전 제안 거부 후 재응답 1회/);
+  assert.match(text, /호출 1 거부 사유/);
+  assert.match(text, /실패할 1차 수정/);
+  const traceEl = ui.findAll(n => n.tagName === 'DETAILS' && String(n.className || '').includes('rh-loop-trace'))[0];
+  assert.ok(traceEl && traceEl.open === true, 'loop trace must auto-open when auto-repair ends with zero proposals');
+});
+
+test('fork E2E simulator passes all canonical scenarios across upstream, PocketRisu (_placeholder), RisuBard, RisuNest, Haejeok, and Hardened', async () => {
+  const { runSimulatedHost } = await import('../tools/e2e/run-fork-e2e.mjs');
+  for (const hostId of ['risuai', 'pocketrisu', 'risubard', 'risunest', 'haejeok', 'hardened']) {
+    const run = await runSimulatedHost(hostId);
+    const failed = run.results.filter(r => !r.ok);
+    assert.equal(failed.length, 0, `${hostId} simulated E2E failures: ${failed.map(f => `${f.id}: ${f.error}`).join('; ')}`);
+  }
+});

@@ -10,6 +10,11 @@
 
 모든 Plugin v3 API를 6개 정책 분류(① 기존 핵심 · ② 읽기/진단 도구 · ③ 승인형 쓰기 · ④ 선언형 상주 확장 · ⑤ 플러그인 내부/UX · ⑥ 보안 경계 LLM 미노출)로 100% 분류하고, 런타임 기능 탐지 계층([`src/host-capabilities.js`](../src/host-capabilities.js))과 1:1로 연동합니다.
 
+> **검증 범위 안내**
+> - 아래 표의 `✅` / `❌`는 **6개 공개 저장소 실소스 대조 기준의 API 제공 여부**를 뜻합니다.
+> - **포크 시뮬레이션 E2E** (`npm run e2e:sim`, [`tools/e2e/run-fork-e2e.mjs`](../tools/e2e/run-fork-e2e.mjs)): 6개 호스트 프로파일(PocketRisu `_placeholder`, RisuNest `setDatabaseLite` 제약 등) 전체 자동 통과.
+> - **실제 브라우저(Chromium) 실구동 E2E**: 원본 RisuAI 핵심 흐름 확인 완료 · 포크 5종(PocketRisu · RisuBard · RisuNest · 해적리스 · Hardened)은 실호스트 실행 기록 미확보 상태이며 M3/M4에서 [`tools/e2e/run-fork-e2e.mjs`](../tools/e2e/run-fork-e2e.mjs) `--mode playwright`로 순차 기록합니다.
+
 ---
 
 ## 1. 표준 Plugin v3 API 전수표

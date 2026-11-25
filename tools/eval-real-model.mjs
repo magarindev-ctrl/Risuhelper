@@ -28,6 +28,7 @@ function parseArgs(argv) {
     apiKey: '',
     temperature: 0.2,
     maxTokens: DEFAULT_MAX_TOKENS,
+    maxCalls: 3,
     runs: 1,
     concurrency: 2,
     timeoutSec: 90,
@@ -51,6 +52,7 @@ function parseArgs(argv) {
     else if (a === '--api-key') opts.apiKey = next();
     else if (a === '--temperature') opts.temperature = Number(next());
     else if (a === '--max-tokens') opts.maxTokens = Math.max(256, Number(next()) || DEFAULT_MAX_TOKENS);
+    else if (a === '--max-calls') opts.maxCalls = Math.max(1, Math.min(3, Math.floor(Number(next())) || 3));
     else if (a === '--runs') opts.runs = Math.max(1, Math.min(10, Math.floor(Number(next())) || 1));
     else if (a === '--concurrency') opts.concurrency = Math.max(1, Math.min(8, Number(next()) || 1));
     else if (a === '--timeout') opts.timeoutSec = Math.max(10, Number(next()) || 90);
@@ -63,14 +65,14 @@ function parseArgs(argv) {
 }
 
 function usage() {
-  return `RisuHelper Real-Model 20-Scenario Evaluation Harness
+  return `RisuHelper Real-Model Evaluation Harness (${EVAL_SCENARIOS.length} scenarios)
 
 Usage:
   OPENAI_API_KEY=... node tools/eval-real-model.mjs [options]
 
 Modes:
-  --dry-run                Build all 20 prompts and measure prompt sizes (0 API calls)
-  --golden                 Verify all 20 scenarios & graders against golden replies (0 API calls)
+  --dry-run                Build all prompts and measure prompt sizes (0 API calls)
+  --golden                 Verify all scenarios & graders against golden replies (0 API calls)
   --provider <name>        openai (default, OpenAI/OpenRouter/Ollama/compat) | anthropic | gemini
 
 Options:
@@ -79,6 +81,7 @@ Options:
   --api-key <key>          API key (prefer env vars EVAL_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY / GEMINI_API_KEY to avoid shell history exposure)
   --temperature <num>      Sampling temperature (default: 0.2)
   --max-tokens <num>       Max output tokens (default: ${DEFAULT_MAX_TOKENS}; set high enough for thinking/reasoning models)
+  --max-calls <1|2|3>      Max LLM calls per scenario (default: 3; use 1 vs 3 to compare M1 loop lift)
   --runs <1..10>           Repeat each scenario N times to measure consistency (default: 1)
   --concurrency <1..8>     Concurrent scenario requests (default: 2)
   --timeout <sec>          Per-request timeout in seconds (default: 90)
@@ -258,13 +261,14 @@ async function main() {
     }
   }
 
-  console.log(`[eval] Running ${scenarios.length} scenarios x ${runs} run(s) = ${jobs.length} total (mode=${mode}${opts.model ? `, ${opts.provider}:${opts.model}, maxTokens=${opts.maxTokens}` : ''})...\n`);
+  console.log(`[eval] Running ${scenarios.length} scenarios x ${runs} run(s) = ${jobs.length} total (mode=${mode}, maxCalls=${opts.maxCalls}${opts.model ? `, ${opts.provider}:${opts.model}, maxTokens=${opts.maxTokens}` : ''})...\n`);
 
   const results = await runWithConcurrency(jobs, concurrency, async ({ sc, runIndex }, idx) => {
     const r = await runEvalScenario(sc, {
       callModel,
       dryRun: opts.dryRun,
       useGolden: opts.golden,
+      maxCalls: opts.maxCalls,
     });
     r.runIndex = runIndex;
     const num = String(idx + 1).padStart(String(jobs.length).length, '0');
@@ -272,7 +276,8 @@ async function main() {
     const acts = r.proposalActions.length ? r.proposalActions.join(',') : 'none';
     const runSuffix = runs > 1 ? ` #${runIndex}` : '';
     const fin = r.finishReason ? ` finish=${r.finishReason}` : '';
-    console.log(`[${num}/${jobs.length}] ${tag.padEnd(22)} ${(r.id + runSuffix).padEnd(32)} sys=${String(r.systemChars).padStart(5)}c  acts=${acts}${fin}${r.latencyMs ? `  ${r.latencyMs}ms` : ''}`);
+    const callsTag = ` calls=${r.callsUsed}/${r.maxCalls}`;
+    console.log(`[${num}/${jobs.length}] ${tag.padEnd(22)} ${(r.id + runSuffix).padEnd(32)} sys=${String(r.systemChars).padStart(5)}c${callsTag}  acts=${acts}${fin}${r.latencyMs ? `  ${r.latencyMs}ms` : ''}`);
     if (!r.ok) {
       for (const issue of r.issues) console.log(`      -> ${issue}`);
     }
@@ -284,12 +289,14 @@ async function main() {
     provider: opts.provider,
     model: opts.model,
     maxTokens: opts.maxTokens,
+    maxCalls: opts.maxCalls,
     runs,
     timestamp: new Date().toISOString(),
   });
   const md = renderMarkdownReport(results, summary);
 
-  console.log(`\n[eval] Summary: ${summary.passed}/${summary.total} passed (${summary.passRate}%) | system prompt avg ${summary.promptStats.avgSys.toLocaleString()} chars (min ${summary.promptStats.minSys.toLocaleString()}, max ${summary.promptStats.maxSys.toLocaleString()})`);
+  const ls = summary.loopStats;
+  console.log(`\n[eval] Summary: ${summary.passed}/${summary.total} passed (${summary.passRate}%) | 1-call ${ls.singleCallCount}/${summary.total} (${ls.singleCallRate}%, max ${ls.maxCallsObserved} calls, tools ${ls.totalToolRuns}, repairs ${ls.totalRepairs}) | system prompt avg ${summary.promptStats.avgSys.toLocaleString()} chars (min ${summary.promptStats.minSys.toLocaleString()}, max ${summary.promptStats.maxSys.toLocaleString()})`);
 
   if (opts.out) {
     fs.writeFileSync(path.resolve(opts.out), md, 'utf8');

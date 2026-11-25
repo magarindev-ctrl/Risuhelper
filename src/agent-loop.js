@@ -78,6 +78,7 @@ async function runAgentLoop({
   let totalPromptChars = 0;
   const steps = [];
   const toolRuns = [];
+  const repairHistory = [];
   let repairedCount = 0;
   let prevToolSig = null;
   let prevFailedRawReply = null;
@@ -259,6 +260,7 @@ async function runAgentLoop({
           steps,
           toolRuns,
           repairedCount,
+          repairHistory,
           loadedSkillIds: [...loadedSkillIds],
           fieldsShownFull: [...fieldsShownFull],
           greetingsShownFull: [...greetingsShownFull],
@@ -267,11 +269,22 @@ async function runAgentLoop({
 
       prevFailedRawReply = String(rawReply || '');
       repairedCount++;
+      const repairReasons = [
+        ...(parsed.errors || []).map(e => `파싱 실패: ${e?.error || String(e)}`),
+        ...(parsed.toolErrors || []).map(e => `도구 오류: ${e?.error || String(e)}`),
+        ...failedProposals.map(item => {
+          const act = item?.proposal?.action || 'unknown';
+          const ttl = item?.proposal?.title ? ` (${item.proposal.title})` : '';
+          return `${act}${ttl}: ${item?.preview?.error || '미리보기 실패'}`;
+        }),
+      ];
+      repairHistory.push({ call, reasons: repairReasons });
       steps.push({
         call,
         phase: 'repair',
         promptChars,
-        errorCount: parsed.errors.length + failedProposals.length + parsed.toolErrors.length,
+        errorCount: repairReasons.length,
+        reasons: repairReasons,
       });
 
       onProgress?.({
@@ -321,6 +334,7 @@ async function runAgentLoop({
       steps,
       toolRuns,
       repairedCount,
+      repairHistory,
       loadedSkillIds: [...loadedSkillIds],
       fieldsShownFull: [...fieldsShownFull],
       greetingsShownFull: [...greetingsShownFull],

@@ -280,6 +280,7 @@ class RisuHelperEvalApp {
     this.cancelled = false;
     this.currentJob = null;
     this.modelMode = 'model';
+    this.maxCalls = 3;
     this.runs = 1;
     this.timeoutSeconds = 120;
     this.results = [];
@@ -455,7 +456,7 @@ class RisuHelperEvalApp {
           this.currentLabel = `[${idx}/${this.totalJobs}] ${sc.id} — ${sc.title}`;
           this.render();
 
-          const res = await runEvalScenario(sc, { callModel });
+          const res = await runEvalScenario(sc, { callModel, maxCalls: this.maxCalls });
           res.runIndex = runIndex;
           if (this.cancelled && res.failureCategory === 'modelError') break;
           this.results.push(res);
@@ -472,6 +473,7 @@ class RisuHelperEvalApp {
           provider: 'risuai',
           model: this.modelMode,
           modelMode: this.modelMode,
+          maxCalls: this.maxCalls,
           platform,
           runs: this.runs,
           timestamp: new Date().toISOString(),
@@ -520,6 +522,18 @@ class RisuHelperEvalApp {
               h(doc, 'option', { value: 'model', selected: this.modelMode === 'model' }, '메인 모델 (model)'),
               h(doc, 'option', { value: 'submodel', selected: this.modelMode === 'submodel' }, '보조 모델 (submodel)'),
               h(doc, 'option', { value: 'otherAx', selected: this.modelMode === 'otherAx' }, '기타 보조 모델 (otherAx)')
+            )
+          ),
+          h(doc, 'label', { class: 'rhe-field' },
+            '호출 상한',
+            h(doc, 'select', {
+              class: 'rhe-select',
+              disabled: this.running,
+              onchange: (e) => { this.maxCalls = Math.max(1, Math.min(3, Number(e.target.value) || 3)); },
+            },
+              h(doc, 'option', { value: '3', selected: this.maxCalls === 3 }, '최대 3회 (기본)'),
+              h(doc, 'option', { value: '2', selected: this.maxCalls === 2 }, '최대 2회'),
+              h(doc, 'option', { value: '1', selected: this.maxCalls === 1 }, '1회 (비교용)')
             )
           ),
           h(doc, 'label', { class: 'rhe-field' },

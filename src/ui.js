@@ -1317,6 +1317,7 @@ class RisuHelperApp {
         totalPromptChars: loopResult.totalPromptChars,
         toolRuns: loopResult.toolRuns,
         repairedCount: loopResult.repairedCount,
+        repairHistory: loopResult.repairHistory || [],
         loadedSkillIds: loopResult.loadedSkillIds,
         steps: loopResult.steps,
       };
@@ -2924,11 +2925,17 @@ class RisuHelperApp {
           bubble.appendChild(body);
           if (!msg.streaming && msg.loopMeta && (msg.loopMeta.toolRuns?.length > 0 || msg.loopMeta.repairedCount > 0)) {
             const m = msg.loopMeta;
+            const repairEntries = Array.isArray(m.repairHistory) ? m.repairHistory : [];
+            const repairEndedWithoutProposal = m.repairedCount > 0 && (msg.proposals || []).length === 0;
             const summaryParts = [];
             if (m.toolRuns?.length > 0) summaryParts.push(`읽기 도구 ${m.toolRuns.length}건 조회`);
-            if (m.repairedCount > 0) summaryParts.push(`제안 오류 자동 수정 ${m.repairedCount}회`);
+            if (m.repairedCount > 0) {
+              summaryParts.push(repairEndedWithoutProposal
+                ? `이전 제안 거부 후 재응답 ${m.repairedCount}회`
+                : `제안 오류 자동 수정 ${m.repairedCount}회`);
+            }
             bubble.appendChild(
-              h(doc, 'details', { class: 'rh-preview-details rh-loop-trace' },
+              h(doc, 'details', { class: 'rh-preview-details rh-loop-trace', open: repairEndedWithoutProposal },
                 h(doc, 'summary', {}, `${summaryParts.join(' · ')} (자동 단계는 읽기 전용)`),
                 h(doc, 'ul', { class: 'rh-loop-trace-list' },
                   ...(m.toolRuns || []).map(run =>
@@ -2936,7 +2943,14 @@ class RisuHelperApp {
                       `${run.ok ? '✓' : '✗'} [호출 ${run.call}] ${run.label}${!run.ok && run.error ? ` — ${run.error}` : ''}`
                     )
                   ),
-                  m.repairedCount > 0 && h(doc, 'li', { class: 'rh-loop-trace-item ok' },
+                  ...repairEntries.flatMap(entry =>
+                    (entry.reasons || []).map(reason =>
+                      h(doc, 'li', { class: 'rh-loop-trace-item fail' },
+                        `↻ [호출 ${entry.call} 거부 사유] ${reason}`
+                      )
+                    )
+                  ),
+                  m.repairedCount > 0 && repairEntries.length === 0 && h(doc, 'li', { class: 'rh-loop-trace-item ok' },
                     `↻ 파싱·미리보기 오류를 감지해 ${m.repairedCount}회 자동 수정했습니다.`
                   )
                 )

@@ -6,25 +6,38 @@ import assert from 'node:assert/strict';
 import { EVAL_SCENARIOS, runEvalScenario, hasUnclosedProposalFence, formatUndoConflict } from '../tools/eval-scenarios.mjs';
 import { DEFAULT_MAX_TOKENS, parseArgs, summarizeResults, renderMarkdownReport } from '../tools/eval-real-model.mjs';
 
-test('eval harness defines 26 unique scenarios and every scenario passes with its golden reply (including undo)', async () => {
-  assert.equal(EVAL_SCENARIOS.length, 26);
+test('eval harness defines 31 unique scenarios and every scenario passes with its golden reply (including multi-call loops & undo)', async () => {
+  assert.equal(EVAL_SCENARIOS.length, 31);
   const ids = new Set(EVAL_SCENARIOS.map(s => s.id));
-  assert.equal(ids.size, 26, 'all scenario IDs must be unique');
+  assert.equal(ids.size, 31, 'all scenario IDs must be unique');
 
   const results = [];
   for (const sc of EVAL_SCENARIOS) {
-    const res = await runEvalScenario(sc, { useGolden: true });
+    const res = await runEvalScenario(sc, { useGolden: true, maxCalls: 3 });
     assert.equal(res.ok, true, `golden failed for ${sc.id}: ${res.issues.join('; ')}`);
     assert.ok(res.systemChars > 2000, `${sc.id} should produce full real system prompt`);
+    assert.ok(res.callsUsed <= 3, `${sc.id} must never exceed 3 calls`);
     results.push(res);
   }
 
-  const summary = summarizeResults(results, { mode: 'golden', provider: 'golden', model: '', maxTokens: DEFAULT_MAX_TOKENS, runs: 1, timestamp: '2026-01-01T00:00:00Z' });
-  assert.equal(summary.passed, 26);
-  assert.equal(summary.total, 26);
+  const summary = summarizeResults(results, { mode: 'golden', provider: 'golden', model: '', maxTokens: DEFAULT_MAX_TOKENS, maxCalls: 3, runs: 1, timestamp: '2026-01-01T00:00:00Z' });
+  assert.equal(summary.passed, 31);
+  assert.equal(summary.total, 31);
   assert.equal(summary.passRate, 100);
+  assert.ok(summary.loopStats.singleCallRate >= 80, `expected >=80% 1-call completion, got ${summary.loopStats.singleCallRate}%`);
+  assert.equal(summary.loopStats.loopTotal, 3);
+  assert.equal(summary.loopStats.loopPassed, 3);
+  assert.ok(summary.loopStats.maxCallsObserved <= 3);
   const md = renderMarkdownReport(results, summary);
-  assert.match(md, /26 \/ 26 \(100%\)/);
+  assert.match(md, /31 \/ 31 \(100%\)/);
+  assert.match(md, /호출 루프 지표/);
+
+  // Verify the 3 loop scenarios genuinely fail under maxCalls=1 while passing under maxCalls=3
+  for (const sc of EVAL_SCENARIOS.filter(s => s.requiresLoop)) {
+    const single = await runEvalScenario(sc, { useGolden: true, maxCalls: 1 });
+    assert.equal(single.ok, false, `loop scenario ${sc.id} should fail in 1-call mode`);
+    assert.equal(single.callsUsed, 1);
+  }
 });
 
 test('eval harness catches over-eager edits, preview errors (real error text), truncation, empty replies, parse errors, unknown keys, and undo conflict formatting', async () => {
@@ -111,20 +124,22 @@ test('eval harness catches over-eager edits, preview errors (real error text), t
   assert.doesNotMatch(formatted, /\[object Object\]/);
 });
 
-test('eval CLI defaults maxTokens to 8192 and supports --runs multi-run consistency reports', () => {
+test('eval CLI defaults maxTokens to 8192 and maxCalls to 3, and supports --runs and --max-calls flags', () => {
   const def = parseArgs([]);
   assert.equal(def.maxTokens, 8192);
+  assert.equal(def.maxCalls, 3);
   assert.equal(def.runs, 1);
 
-  const multi = parseArgs(['--runs', '3', '--max-tokens', '16384']);
+  const multi = parseArgs(['--runs', '3', '--max-tokens', '16384', '--max-calls', '1']);
   assert.equal(multi.runs, 3);
   assert.equal(multi.maxTokens, 16384);
+  assert.equal(multi.maxCalls, 1);
 
   const sampleResults = [
-    { id: 'focused-desc-patch', category: '포커스 · 부분 편집', title: 't', expectMode: 'apply', ok: true, failureCategory: null, issues: [], systemChars: 8500, latencyMs: 500, usage: null, finishReason: 'stop', proposalActions: ['patch_text'], runIndex: 1 },
-    { id: 'focused-desc-patch', category: '포커스 · 부분 편집', title: 't', expectMode: 'apply', ok: false, failureCategory: 'outputTruncated', issues: ['잘림'], systemChars: 8500, latencyMs: 600, usage: null, finishReason: 'length', proposalActions: [], runIndex: 2 },
+    { id: 'focused-desc-patch', category: '포커스 · 부분 편집', title: 't', expectMode: 'apply', ok: true, failureCategory: null, issues: [], systemChars: 8500, callsUsed: 1, maxCalls: 3, toolRunsCount: 0, repairedCount: 0, latencyMs: 500, usage: null, finishReason: 'stop', proposalActions: ['patch_text'], runIndex: 1 },
+    { id: 'focused-desc-patch', category: '포커스 · 부분 편집', title: 't', expectMode: 'apply', ok: false, failureCategory: 'outputTruncated', issues: ['잘림'], systemChars: 8500, callsUsed: 2, maxCalls: 3, toolRunsCount: 1, repairedCount: 0, latencyMs: 600, usage: null, finishReason: 'length', proposalActions: [], runIndex: 2 },
   ];
-  const summary = summarizeResults(sampleResults, { mode: 'live', provider: 'openai', model: 'test-m', maxTokens: 8192, runs: 2, timestamp: '2026-01-01T00:00:00Z' });
+  const summary = summarizeResults(sampleResults, { mode: 'live', provider: 'openai', model: 'test-m', maxTokens: 8192, maxCalls: 3, runs: 2, timestamp: '2026-01-01T00:00:00Z' });
   assert.equal(summary.byScenario[0].passed, 1);
   assert.equal(summary.byScenario[0].total, 2);
   const md = renderMarkdownReport(sampleResults, summary);
@@ -132,7 +147,7 @@ test('eval CLI defaults maxTokens to 8192 and supports --runs multi-run consiste
   assert.match(md, /\| `focused-desc-patch` \| 포커스 · 부분 편집 \| 1\/2 \|/);
 });
 
-test('dist/risuhelper-eval.js boots in a Plugin v3 sandbox, runs all 20 scenarios via runLLMModel without touching real host data, and renders copyable Markdown report', async () => {
+test('dist/risuhelper-eval.js boots in a Plugin v3 sandbox, runs all 31 scenarios (including multi-call loops) via runLLMModel without touching real host data, and renders copyable Markdown report', async () => {
   const fs = await import('node:fs');
   const path = await import('node:path');
   const vm = await import('node:vm');
@@ -155,8 +170,13 @@ test('dist/risuhelper-eval.js boots in a Plugin v3 sandbox, runs all 20 scenario
   const calledModes = [];
   const forbiddenTouch = (name) => () => { throw new Error(`Evaluator plugin must never call host.${name}`); };
 
-  // Match each scenario by user prompt and return its golden reply in RisuAI { type: 'success', result } format
-  const goldenByPrompt = new Map(EVAL_SCENARIOS.map(s => [s.prompt, s.goldenReply]));
+  // Match each scenario by initial user prompt (messages[1]) and serve single or multi-call golden replies
+  const queueByPrompt = new Map(
+    EVAL_SCENARIOS.map(s => [
+      s.prompt,
+      Array.isArray(s.goldenReplies) ? [...s.goldenReplies] : [s.goldenReply],
+    ])
+  );
   const risuai = {
     async getColorScheme() { return { scheme: { type: 'dark' } }; },
     async getRuntimeInfo() { return { apiVersion: '3.0', platform: 'web', saveMethod: 'local' }; },
@@ -168,9 +188,10 @@ test('dist/risuhelper-eval.js boots in a Plugin v3 sandbox, runs all 20 scenario
     async hideContainer() { shown = false; },
     async runLLMModel({ mode, messages }) {
       calledModes.push(mode);
-      const userPrompt = messages[messages.length - 1]?.content || '';
-      const reply = goldenByPrompt.get(userPrompt);
-      assert.ok(reply, `unexpected prompt: ${userPrompt}`);
+      const initialUserPrompt = messages[1]?.content || messages[messages.length - 1]?.content || '';
+      const queue = queueByPrompt.get(initialUserPrompt);
+      assert.ok(queue && queue.length > 0, `unexpected prompt or exhausted queue: ${initialUserPrompt}`);
+      const reply = queue.length > 1 ? queue.shift() : queue[0];
       return { type: 'success', result: reply };
     },
     getCharacter: forbiddenTouch('getCharacter'),
@@ -226,23 +247,24 @@ test('dist/risuhelper-eval.js boots in a Plugin v3 sandbox, runs all 20 scenario
   selects[0].value = 'submodel';
   for (const fn of selects[0].listeners.get('change') || []) fn({ target: selects[0] });
 
-  // Click '▶ 20문항 평가 시작'
+  // Click '▶ 31문항 평가 시작'
   const startBtn = findAll(n => n.tagName === 'BUTTON' && n.textContent.includes('평가 시작'))[0];
   assert.ok(startBtn);
   startBtn.click();
 
-  // Wait for all 26 virtual-host runs to complete
+  // Wait for all 31 virtual-host runs (28 single-call + 3 two-call = 34 LLM calls) to complete
   const started = Date.now();
-  while (Date.now() - started < 8000) {
+  while (Date.now() - started < 10000) {
     if (doc.querySelector('.rhe-textarea')?.value) break;
     await new Promise(r => setTimeout(r, 25));
   }
 
-  assert.equal(calledModes.length, 26);
+  assert.equal(calledModes.length, 34);
   assert.ok(calledModes.every(m => m === 'submodel'));
   const report = doc.querySelector('.rhe-textarea')?.value || '';
-  assert.match(report, /26 \/ 26 \(100%\)/);
+  assert.match(report, /31 \/ 31 \(100%\)/);
   assert.match(report, /modelMode=submodel/);
+  assert.match(report, /maxCalls=3/);
   assert.match(report, /platform=web\/local/);
 
   // Clean unload unregisters both UI parts

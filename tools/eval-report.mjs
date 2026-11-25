@@ -22,6 +22,16 @@ function summarizeResults(results, meta) {
   const totalIn = results.reduce((s, r) => s + (r.usage?.inputTokens || 0), 0);
   const totalOut = results.reduce((s, r) => s + (r.usage?.outputTokens || 0), 0);
 
+  const callsList = results.map(r => (Number.isInteger(r.callsUsed) && r.callsUsed > 0 ? r.callsUsed : 1));
+  const singleCallCount = callsList.filter(c => c === 1).length;
+  const singleCallRate = total ? Number(((singleCallCount / total) * 100).toFixed(1)) : 0;
+  const avgCallsUsed = total ? Number((callsList.reduce((a, b) => a + b, 0) / total).toFixed(2)) : 0;
+  const maxCallsObserved = callsList.length ? Math.max(...callsList) : 0;
+  const totalToolRuns = results.reduce((s, r) => s + (Number(r.toolRunsCount) || 0), 0);
+  const totalRepairs = results.reduce((s, r) => s + (Number(r.repairedCount) || 0), 0);
+  const loopResults = results.filter(r => r.requiresLoop);
+  const loopPassed = loopResults.filter(r => r.ok).length;
+
   const byCategory = new Map();
   const byScenario = new Map();
   for (const r of results) {
@@ -54,6 +64,16 @@ function summarizeResults(results, meta) {
     guardTotal: guard.length,
     guardPassed,
     promptStats: { minSys, avgSys, maxSys },
+    loopStats: {
+      singleCallCount,
+      singleCallRate,
+      avgCallsUsed,
+      maxCallsObserved,
+      totalToolRuns,
+      totalRepairs,
+      loopTotal: loopResults.length,
+      loopPassed,
+    },
     avgLatencyMs,
     tokens: { input: totalIn, output: totalOut },
     byCategory: [...byCategory.entries()].map(([category, v]) => ({ category, ...v })),
@@ -65,12 +85,23 @@ function summarizeResults(results, meta) {
 function renderMarkdownReport(results, summary) {
   const runs = summary.meta.runs || 1;
   const metaParts = [];
+  if (summary.meta.maxCalls) metaParts.push(`\`maxCalls=${summary.meta.maxCalls}\``);
   if (summary.meta.maxTokens) metaParts.push(`\`maxTokens=${summary.meta.maxTokens}\``);
   if (summary.meta.modelMode) metaParts.push(`\`modelMode=${summary.meta.modelMode}\``);
   if (summary.meta.platform) metaParts.push(`\`platform=${summary.meta.platform}\``);
   metaParts.push(`시나리오당 \`${runs}회\` 실행`);
 
   const scenarioCount = new Set(results.map(r => r.id)).size || summary.total;
+  const ls = summary.loopStats || {
+    singleCallCount: summary.total,
+    singleCallRate: 100,
+    avgCallsUsed: 1,
+    maxCallsObserved: 1,
+    totalToolRuns: 0,
+    totalRepairs: 0,
+    loopTotal: 0,
+    loopPassed: 0,
+  };
   const lines = [
     `# RisuHelper 실모델 ${scenarioCount}문항 평가 리포트`,
     '',
@@ -80,6 +111,8 @@ function renderMarkdownReport(results, summary) {
     `- **종합 통과율**: **${summary.passed} / ${summary.total} (${summary.passRate}%)**`,
     `  - 수정·생성 시나리오: **${summary.mutationPassed} / ${summary.mutationTotal}**`,
     `  - 안전·비수정 가드(단순 질문 · 콜드 스토리지): **${summary.guardPassed} / ${summary.guardTotal}**`,
+    ...(ls.loopTotal > 0 ? [`  - 3회 루프 전용 시나리오(전문 조회 · L2 스킬 로드 · 자동 수정): **${ls.loopPassed} / ${ls.loopTotal}**`] : []),
+    `- **호출 루프 지표**: 1회 종료 **${ls.singleCallCount}/${summary.total} (${ls.singleCallRate}%)** · 평균 ${ls.avgCallsUsed}회 · 최대 ${ls.maxCallsObserved}회 · 읽기 도구 ${ls.totalToolRuns}건 · 자동 수정 ${ls.totalRepairs}회`,
     `- **시스템 프롬프트 길이**: 최소 ${summary.promptStats.minSys.toLocaleString()}자 / 평균 ${summary.promptStats.avgSys.toLocaleString()}자 / 최대 ${summary.promptStats.maxSys.toLocaleString()}자`,
   ];
   if (summary.avgLatencyMs > 0) {
@@ -108,12 +141,14 @@ function renderMarkdownReport(results, summary) {
     }
   }
 
-  lines.push('', '## 실행별 상세', '', '| # | ID | 회차 | 결과 | 종료 사유 | 프롬프트(자) | 제안 액션 | 지연(ms) |', '|---:|---|---:|---|---|---:|---|---:|');
+  lines.push('', '## 실행별 상세', '', '| # | ID | 회차 | 결과 | 호출 | 도구/수정 | 종료 사유 | 프롬프트(자) | 제안 액션 | 지연(ms) |', '|---:|---|---:|---|---:|---|---|---:|---|---:|');
   results.forEach((r, idx) => {
     const status = r.ok ? '✅ PASS' : `❌ FAIL (\`${r.failureCategory}\`)`;
     const acts = r.proposalActions.length ? r.proposalActions.join(', ') : '(없음)';
     const finish = r.finishReason || '-';
-    lines.push(`| ${idx + 1} | \`${r.id}\` | ${r.runIndex || 1} | ${status} | ${finish} | ${r.systemChars.toLocaleString()} | ${acts} | ${r.latencyMs} |`);
+    const callsLabel = `${r.callsUsed || 1}/${r.maxCalls || 3}`;
+    const toolMod = `${r.toolRunsCount || 0} / ${r.repairedCount || 0}`;
+    lines.push(`| ${idx + 1} | \`${r.id}\` | ${r.runIndex || 1} | ${status} | ${callsLabel} | ${toolMod} | ${finish} | ${r.systemChars.toLocaleString()} | ${acts} | ${r.latencyMs} |`);
   });
 
   const failed = results.filter(r => !r.ok);

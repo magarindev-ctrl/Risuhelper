@@ -7891,7 +7891,10 @@ class HostAdapter {
       );
     }
 
-    const crossChat = crossCharacter || (Number.isInteger(activeChatIndex) && chatIndex !== activeChatIndex);
+    const currentChatIdx = Number.isInteger(activeChatIndex)
+      ? activeChatIndex
+      : (Number.isInteger(char.chatPage) ? char.chatPage : null);
+    const crossChat = crossCharacter || (Number.isInteger(currentChatIdx) && chatIndex !== currentChatIdx);
     return { chat, char, charIndex, chatIndex, crossCharacter, crossChat };
   }
 
@@ -9695,7 +9698,7 @@ class HostAdapter {
         after: plan.after,
         metaChanges: plan.metaChanges,
         warning: plan.warning,
-        label: proposal.title || defaultTitle,
+        label: defaultTitle,
         target: loaded.target,
         hostBinding: loaded.hostBinding || null,
       };
@@ -9832,7 +9835,7 @@ class HostAdapter {
         after: String(nextEntry.out ?? ''),
         metaChanges,
         regexPreview,
-        label: existing ? `${snap.label} 수정` : (proposal.title || `새 정규식 (${nextEntry.comment})`),
+        label: existing ? `${snap.label} 수정` : `${snap.label} · 새 정규식 (${nextEntry.comment})`,
         target: snap.target,
         hostBinding: snap.hostBinding || null,
       };
@@ -9872,7 +9875,7 @@ class HostAdapter {
         before: '',
         after: String(nextEntry.content ?? ''),
         metaChanges,
-        label: proposal.title || defaultLabel,
+        label: `${loaded.scopeLabel} · ${defaultLabel}`,
         target: loaded.target,
         hostBinding: loaded.hostBinding || null,
       };
@@ -10046,7 +10049,7 @@ class HostAdapter {
         before: '',
         after: afterText,
         metaChanges,
-        label: proposal.title || defaultLabel,
+        label: defaultLabel,
         target: { targetKind: 'general', ...(crossCharacter ? { targetCharIndex: charIndex } : {}) },
         hostBinding: {
           charIndex,
@@ -12593,56 +12596,56 @@ const READ_TOOL_DEFS = [
     id: 'read_item',
     label: '항목 전문 조회',
     summary: '필드·첫메시지·로어북·Lua·정규식·페르소나·모듈 전문(타 캐릭터·채팅 포함)',
-    argsHint: 'kind(char_field|greeting|authorNote|lorebook|lua|regex|persona|module|config), field?/loreIndex?/regexIndex?/personaIndex?/moduleIndex?/charIndex?',
+    argsHint: 'kind,field|loreIndex|regexIndex|charIndex',
     requiresCapabilities: [],
   },
   {
     id: 'list_items',
     label: '목록 분할 조회',
     summary: '로어북·정규식·페르소나·모듈·채팅·캐릭터 페이지네이션/검색',
-    argsHint: 'kind(lorebook|regex|persona|module|chat|character), offset?, limit?, query?',
+    argsHint: 'kind,offset?,limit?,query?',
     requiresCapabilities: [],
   },
   {
     id: 'read_chat',
     label: '채팅 구간 조회',
     summary: '현재/다른 채팅의 지정 구간 메시지·메모리 요약 조회',
-    argsHint: 'chatIndex?, tail?, from?, to?, charIndex?',
+    argsHint: 'chatIndex?,tail?,from?,to?',
     requiresCapabilities: [],
   },
   {
     id: 'read_vars',
     label: '채팅 변수 조회',
     summary: '채팅 변수(scriptstate) 조회(타 채팅 포함)',
-    argsHint: 'chatIndex?, keys?[], charIndex?',
+    argsHint: 'chatIndex?,keys?[]',
     requiresCapabilities: [],
   },
   {
     id: 'test_regex_cbs',
     label: '정규식·CBS 사전 검증',
     summary: '정규식 및 CBS(runVar:false) 사전 실행 테스트',
-    argsHint: 'regex?({in,out,flag}), text?, cbs?, runCbs?',
+    argsHint: 'regex?,text?,cbs?',
     requiresCapabilities: [],
   },
   {
     id: 'active_lorebook',
     label: '발동 로어북 조회',
     summary: '현재 채팅에서 실제로 발동 중인 로어북 확인',
-    argsHint: '(인자 없음)',
+    argsHint: '',
     requiresCapabilities: ['getCurrentLorebookEntries'],
   },
   {
     id: 'audit_workspace',
     label: '워크스페이스 진단',
     summary: '고아 폴더·정규식/Lua/CBS 문법·누락 에셋·chat.id 정적 건강검진',
-    argsHint: 'scope?(all|character|chat|module), charIndex?, moduleIndex?',
+    argsHint: 'scope?',
     requiresCapabilities: [],
   },
   {
     id: 'inspect_assets',
     label: '에셋·인레이 조회',
     summary: '캐릭터·모듈 에셋 목록 및 readImage/readInlay 메타 확인',
-    argsHint: 'scope?(character|module), names?[], inlayId?',
+    argsHint: 'scope?,names?[]',
     requiresCapabilities: [],
   },
   {
@@ -12657,14 +12660,14 @@ const READ_TOOL_DEFS = [
     id: 'host_info',
     label: '호스트 환경 조회',
     summary: '실행 포크·지원 API·현재 테마 확인',
-    argsHint: '(인자 없음)',
+    argsHint: '',
     requiresCapabilities: [],
   },
   {
     id: 'search_translation',
     label: '번역 캐시 검색',
     summary: 'RisuAI 번역 캐시에서 기존 번역 용어 검색',
-    argsHint: 'query, limit?',
+    argsHint: 'query',
     requiresCapabilities: ['translationCache'],
   },
 ];
@@ -12687,7 +12690,7 @@ function getAvailableReadTools(capabilities = null, { allowFetchLog = false } = 
 
 function formatReadToolCatalog(capabilities = null, { allowFetchLog = false } = {}) {
   const tools = getAvailableReadTools(capabilities, { allowFetchLog });
-  return tools.map(t => `- \`${t.id}\`(${t.argsHint}): ${t.summary}`).join('\n');
+  return tools.map(t => `\`${t.id}\`(${t.argsHint})`).join(', ');
 }
 
 function describeToolCall(call) {
@@ -14972,20 +14975,14 @@ function buildConversationMessages({
   let readToolsBlock = '';
   if (enableTools) {
     const toolCatalogText = formatReadToolCatalog(capabilities, { allowFetchLog });
-    const l1Lines = (skillPack.l1Catalog || []).length > 0
-      ? skillPack.l1Catalog.map(s => `- \`${s.id}\` (${s.label}): ${s.summary}`).join('\n')
-      : '- (현재 호스트에서 추가 로드 가능한 미로드 내장 스킬 없음)';
-    readToolsBlock = `\n\n[읽기·진단 도구 및 L1 내장 스킬 (100% Read-Only · 최대 3회 호출 루프)]
-이미 전달된 정보와 action 스키마만으로 충분하면 도구를 부르지 말고 바로 답변하거나 \`\`\`risuhelper-proposal 을 출력하세요(1회 완료 권장).
-추가 스키마, 잘린 항목의 전문, 다른 캐릭터·채팅·변수, 워크스페이스 건강검진, 정규식/CBS 사전 검증이 필요할 때만 아래 \`\`\`risuhelper-tool 블록으로 읽기 도구를 한 번에 묶어 요청하세요(최대 6개 병렬 실행, 데이터는 절대 수정하지 않음):
-\`\`\`risuhelper-tool
-[{"tool":"load_skill","args":{"skillIds":["scripts"]}},{"tool":"read_item","args":{"kind":"lorebook","loreIndex":0}}]
-\`\`\`
-사용 가능한 읽기 도구:
-${toolCatalogText}
-
-추가 로드 가능한 내장 스킬 (L1 카탈로그 — \`load_skill\`로 로드):
-${l1Lines}`;
+    const l1Text = (skillPack.l1Catalog || []).length > 0
+      ? skillPack.l1Catalog.map(s => `\`${s.id}\`(${s.label})`).join(', ')
+      : '(없음)';
+    readToolsBlock = `\n\n[읽기·진단 도구 및 L1 내장 스킬 (Read-Only · 최대 3회 루프)]
+현재 정보·스키마로 충분하면 도구 없이 바로 답하거나 \`\`\`risuhelper-proposal 을 출력하세요(1회 완료 권장).
+빠진 스키마·잘린 전문·타 캐릭터/채팅/변수·진단이 필요할 때만 \`\`\`risuhelper-tool JSON 배열(최대 6개, 예: \`[{"tool":"load_skill","args":{"skillIds":["scripts"]}}]\`)로 조회하세요(쓰기 불가).
+- 도구: ${toolCatalogText}
+- 미로드 L1 스킬(\`load_skill\`): ${l1Text}`;
   }
 
   const systemPrompt = `당신은 RisuAI(및 PocketRisu, RisuBard, 해적리스, RisuNest 등 포크) 안에 내장된 소통형 어시스턴트 "RisuHelper"입니다.
@@ -15196,6 +15193,7 @@ async function runAgentLoop({
   let totalPromptChars = 0;
   const steps = [];
   const toolRuns = [];
+  const repairHistory = [];
   let repairedCount = 0;
   let prevToolSig = null;
   let prevFailedRawReply = null;
@@ -15377,6 +15375,7 @@ async function runAgentLoop({
           steps,
           toolRuns,
           repairedCount,
+          repairHistory,
           loadedSkillIds: [...loadedSkillIds],
           fieldsShownFull: [...fieldsShownFull],
           greetingsShownFull: [...greetingsShownFull],
@@ -15385,11 +15384,22 @@ async function runAgentLoop({
 
       prevFailedRawReply = String(rawReply || '');
       repairedCount++;
+      const repairReasons = [
+        ...(parsed.errors || []).map(e => `파싱 실패: ${e?.error || String(e)}`),
+        ...(parsed.toolErrors || []).map(e => `도구 오류: ${e?.error || String(e)}`),
+        ...failedProposals.map(item => {
+          const act = item?.proposal?.action || 'unknown';
+          const ttl = item?.proposal?.title ? ` (${item.proposal.title})` : '';
+          return `${act}${ttl}: ${item?.preview?.error || '미리보기 실패'}`;
+        }),
+      ];
+      repairHistory.push({ call, reasons: repairReasons });
       steps.push({
         call,
         phase: 'repair',
         promptChars,
-        errorCount: parsed.errors.length + failedProposals.length + parsed.toolErrors.length,
+        errorCount: repairReasons.length,
+        reasons: repairReasons,
       });
 
       onProgress?.({
@@ -15439,6 +15449,7 @@ async function runAgentLoop({
       steps,
       toolRuns,
       repairedCount,
+      repairHistory,
       loadedSkillIds: [...loadedSkillIds],
       fieldsShownFull: [...fieldsShownFull],
       greetingsShownFull: [...greetingsShownFull],
@@ -19558,6 +19569,7 @@ class RisuHelperApp {
         totalPromptChars: loopResult.totalPromptChars,
         toolRuns: loopResult.toolRuns,
         repairedCount: loopResult.repairedCount,
+        repairHistory: loopResult.repairHistory || [],
         loadedSkillIds: loopResult.loadedSkillIds,
         steps: loopResult.steps,
       };
@@ -21165,11 +21177,17 @@ class RisuHelperApp {
           bubble.appendChild(body);
           if (!msg.streaming && msg.loopMeta && (msg.loopMeta.toolRuns?.length > 0 || msg.loopMeta.repairedCount > 0)) {
             const m = msg.loopMeta;
+            const repairEntries = Array.isArray(m.repairHistory) ? m.repairHistory : [];
+            const repairEndedWithoutProposal = m.repairedCount > 0 && (msg.proposals || []).length === 0;
             const summaryParts = [];
             if (m.toolRuns?.length > 0) summaryParts.push(`읽기 도구 ${m.toolRuns.length}건 조회`);
-            if (m.repairedCount > 0) summaryParts.push(`제안 오류 자동 수정 ${m.repairedCount}회`);
+            if (m.repairedCount > 0) {
+              summaryParts.push(repairEndedWithoutProposal
+                ? `이전 제안 거부 후 재응답 ${m.repairedCount}회`
+                : `제안 오류 자동 수정 ${m.repairedCount}회`);
+            }
             bubble.appendChild(
-              h(doc, 'details', { class: 'rh-preview-details rh-loop-trace' },
+              h(doc, 'details', { class: 'rh-preview-details rh-loop-trace', open: repairEndedWithoutProposal },
                 h(doc, 'summary', {}, `${summaryParts.join(' · ')} (자동 단계는 읽기 전용)`),
                 h(doc, 'ul', { class: 'rh-loop-trace-list' },
                   ...(m.toolRuns || []).map(run =>
@@ -21177,7 +21195,14 @@ class RisuHelperApp {
                       `${run.ok ? '✓' : '✗'} [호출 ${run.call}] ${run.label}${!run.ok && run.error ? ` — ${run.error}` : ''}`
                     )
                   ),
-                  m.repairedCount > 0 && h(doc, 'li', { class: 'rh-loop-trace-item ok' },
+                  ...repairEntries.flatMap(entry =>
+                    (entry.reasons || []).map(reason =>
+                      h(doc, 'li', { class: 'rh-loop-trace-item fail' },
+                        `↻ [호출 ${entry.call} 거부 사유] ${reason}`
+                      )
+                    )
+                  ),
+                  m.repairedCount > 0 && repairEntries.length === 0 && h(doc, 'li', { class: 'rh-loop-trace-item ok' },
                     `↻ 파싱·미리보기 오류를 감지해 ${m.repairedCount}회 자동 수정했습니다.`
                   )
                 )

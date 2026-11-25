@@ -35,56 +35,56 @@ const READ_TOOL_DEFS = [
     id: 'read_item',
     label: '항목 전문 조회',
     summary: '필드·첫메시지·로어북·Lua·정규식·페르소나·모듈 전문(타 캐릭터·채팅 포함)',
-    argsHint: 'kind(char_field|greeting|authorNote|lorebook|lua|regex|persona|module|config), field?/loreIndex?/regexIndex?/personaIndex?/moduleIndex?/charIndex?',
+    argsHint: 'kind,field|loreIndex|regexIndex|charIndex',
     requiresCapabilities: [],
   },
   {
     id: 'list_items',
     label: '목록 분할 조회',
     summary: '로어북·정규식·페르소나·모듈·채팅·캐릭터 페이지네이션/검색',
-    argsHint: 'kind(lorebook|regex|persona|module|chat|character), offset?, limit?, query?',
+    argsHint: 'kind,offset?,limit?,query?',
     requiresCapabilities: [],
   },
   {
     id: 'read_chat',
     label: '채팅 구간 조회',
     summary: '현재/다른 채팅의 지정 구간 메시지·메모리 요약 조회',
-    argsHint: 'chatIndex?, tail?, from?, to?, charIndex?',
+    argsHint: 'chatIndex?,tail?,from?,to?',
     requiresCapabilities: [],
   },
   {
     id: 'read_vars',
     label: '채팅 변수 조회',
     summary: '채팅 변수(scriptstate) 조회(타 채팅 포함)',
-    argsHint: 'chatIndex?, keys?[], charIndex?',
+    argsHint: 'chatIndex?,keys?[]',
     requiresCapabilities: [],
   },
   {
     id: 'test_regex_cbs',
     label: '정규식·CBS 사전 검증',
     summary: '정규식 및 CBS(runVar:false) 사전 실행 테스트',
-    argsHint: 'regex?({in,out,flag}), text?, cbs?, runCbs?',
+    argsHint: 'regex?,text?,cbs?',
     requiresCapabilities: [],
   },
   {
     id: 'active_lorebook',
     label: '발동 로어북 조회',
     summary: '현재 채팅에서 실제로 발동 중인 로어북 확인',
-    argsHint: '(인자 없음)',
+    argsHint: '',
     requiresCapabilities: ['getCurrentLorebookEntries'],
   },
   {
     id: 'audit_workspace',
     label: '워크스페이스 진단',
     summary: '고아 폴더·정규식/Lua/CBS 문법·누락 에셋·chat.id 정적 건강검진',
-    argsHint: 'scope?(all|character|chat|module), charIndex?, moduleIndex?',
+    argsHint: 'scope?',
     requiresCapabilities: [],
   },
   {
     id: 'inspect_assets',
     label: '에셋·인레이 조회',
     summary: '캐릭터·모듈 에셋 목록 및 readImage/readInlay 메타 확인',
-    argsHint: 'scope?(character|module), names?[], inlayId?',
+    argsHint: 'scope?,names?[]',
     requiresCapabilities: [],
   },
   {
@@ -99,14 +99,14 @@ const READ_TOOL_DEFS = [
     id: 'host_info',
     label: '호스트 환경 조회',
     summary: '실행 포크·지원 API·현재 테마 확인',
-    argsHint: '(인자 없음)',
+    argsHint: '',
     requiresCapabilities: [],
   },
   {
     id: 'search_translation',
     label: '번역 캐시 검색',
     summary: 'RisuAI 번역 캐시에서 기존 번역 용어 검색',
-    argsHint: 'query, limit?',
+    argsHint: 'query',
     requiresCapabilities: ['translationCache'],
   },
 ];
@@ -129,7 +129,7 @@ function getAvailableReadTools(capabilities = null, { allowFetchLog = false } = 
 
 function formatReadToolCatalog(capabilities = null, { allowFetchLog = false } = {}) {
   const tools = getAvailableReadTools(capabilities, { allowFetchLog });
-  return tools.map(t => `- \`${t.id}\`(${t.argsHint}): ${t.summary}`).join('\n');
+  return tools.map(t => `\`${t.id}\`(${t.argsHint})`).join(', ');
 }
 
 function describeToolCall(call) {

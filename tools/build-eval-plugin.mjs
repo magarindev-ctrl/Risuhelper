@@ -20,7 +20,7 @@ const OUT_FILE = path.join(ROOT, 'dist', 'risuhelper-eval.js');
 
 const HEADER_LINES = [
   '//@name risuhelper-eval',
-  '//@display-name RisuHelper 20문항 평가기 (임시)',
+  '//@display-name RisuHelper 실모델 평가기 (임시)',
   '//@api 3.0',
   `//@version ${VERSION}`,
 ];

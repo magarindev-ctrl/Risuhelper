@@ -1170,20 +1170,14 @@ function buildConversationMessages({
   let readToolsBlock = '';
   if (enableTools) {
     const toolCatalogText = formatReadToolCatalog(capabilities, { allowFetchLog });
-    const l1Lines = (skillPack.l1Catalog || []).length > 0
-      ? skillPack.l1Catalog.map(s => `- \`${s.id}\` (${s.label}): ${s.summary}`).join('\n')
-      : '- (현재 호스트에서 추가 로드 가능한 미로드 내장 스킬 없음)';
-    readToolsBlock = `\n\n[읽기·진단 도구 및 L1 내장 스킬 (100% Read-Only · 최대 3회 호출 루프)]
-이미 전달된 정보와 action 스키마만으로 충분하면 도구를 부르지 말고 바로 답변하거나 \`\`\`risuhelper-proposal 을 출력하세요(1회 완료 권장).
-추가 스키마, 잘린 항목의 전문, 다른 캐릭터·채팅·변수, 워크스페이스 건강검진, 정규식/CBS 사전 검증이 필요할 때만 아래 \`\`\`risuhelper-tool 블록으로 읽기 도구를 한 번에 묶어 요청하세요(최대 6개 병렬 실행, 데이터는 절대 수정하지 않음):
-\`\`\`risuhelper-tool
-[{"tool":"load_skill","args":{"skillIds":["scripts"]}},{"tool":"read_item","args":{"kind":"lorebook","loreIndex":0}}]
-\`\`\`
-사용 가능한 읽기 도구:
-${toolCatalogText}
-
-추가 로드 가능한 내장 스킬 (L1 카탈로그 — \`load_skill\`로 로드):
-${l1Lines}`;
+    const l1Text = (skillPack.l1Catalog || []).length > 0
+      ? skillPack.l1Catalog.map(s => `\`${s.id}\`(${s.label})`).join(', ')
+      : '(없음)';
+    readToolsBlock = `\n\n[읽기·진단 도구 및 L1 내장 스킬 (Read-Only · 최대 3회 루프)]
+현재 정보·스키마로 충분하면 도구 없이 바로 답하거나 \`\`\`risuhelper-proposal 을 출력하세요(1회 완료 권장).
+빠진 스키마·잘린 전문·타 캐릭터/채팅/변수·진단이 필요할 때만 \`\`\`risuhelper-tool JSON 배열(최대 6개, 예: \`[{"tool":"load_skill","args":{"skillIds":["scripts"]}}]\`)로 조회하세요(쓰기 불가).
+- 도구: ${toolCatalogText}
+- 미로드 L1 스킬(\`load_skill\`): ${l1Text}`;
   }
 
   const systemPrompt = `당신은 RisuAI(및 PocketRisu, RisuBard, 해적리스, RisuNest 등 포크) 안에 내장된 소통형 어시스턴트 "RisuHelper"입니다.

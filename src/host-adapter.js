@@ -1603,7 +1603,10 @@ class HostAdapter {
       );
     }
 
-    const crossChat = crossCharacter || (Number.isInteger(activeChatIndex) && chatIndex !== activeChatIndex);
+    const currentChatIdx = Number.isInteger(activeChatIndex)
+      ? activeChatIndex
+      : (Number.isInteger(char.chatPage) ? char.chatPage : null);
+    const crossChat = crossCharacter || (Number.isInteger(currentChatIdx) && chatIndex !== currentChatIdx);
     return { chat, char, charIndex, chatIndex, crossCharacter, crossChat };
   }
 
@@ -3407,7 +3410,7 @@ class HostAdapter {
         after: plan.after,
         metaChanges: plan.metaChanges,
         warning: plan.warning,
-        label: proposal.title || defaultTitle,
+        label: defaultTitle,
         target: loaded.target,
         hostBinding: loaded.hostBinding || null,
       };
@@ -3544,7 +3547,7 @@ class HostAdapter {
         after: String(nextEntry.out ?? ''),
         metaChanges,
         regexPreview,
-        label: existing ? `${snap.label} 수정` : (proposal.title || `새 정규식 (${nextEntry.comment})`),
+        label: existing ? `${snap.label} 수정` : `${snap.label} · 새 정규식 (${nextEntry.comment})`,
         target: snap.target,
         hostBinding: snap.hostBinding || null,
       };
@@ -3584,7 +3587,7 @@ class HostAdapter {
         before: '',
         after: String(nextEntry.content ?? ''),
         metaChanges,
-        label: proposal.title || defaultLabel,
+        label: `${loaded.scopeLabel} · ${defaultLabel}`,
         target: loaded.target,
         hostBinding: loaded.hostBinding || null,
       };
@@ -3758,7 +3761,7 @@ class HostAdapter {
         before: '',
         after: afterText,
         metaChanges,
-        label: proposal.title || defaultLabel,
+        label: defaultLabel,
         target: { targetKind: 'general', ...(crossCharacter ? { targetCharIndex: charIndex } : {}) },
         hostBinding: {
           charIndex,
