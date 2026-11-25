@@ -72,6 +72,113 @@ function makeUuid() {
   return 'rh-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
 }
 
+function loreDeleteFingerprint(entry) {
+  if (!entry || typeof entry !== 'object') return null;
+  return {
+    mode: String(entry.mode || 'normal'),
+    comment: String(entry.comment ?? ''),
+    key: String(entry.key ?? ''),
+    secondkey: String(entry.secondkey ?? ''),
+    content: String(entry.content ?? ''),
+    folder: entry.folder ? String(entry.folder) : '',
+  };
+}
+
+function matchesLoreFingerprint(entry, fp) {
+  if (!entry || typeof entry !== 'object' || !fp) return false;
+  return (
+    String(entry.mode || 'normal') === fp.mode &&
+    String(entry.comment ?? '') === fp.comment &&
+    String(entry.key ?? '') === fp.key &&
+    String(entry.secondkey ?? '') === fp.secondkey &&
+    String(entry.content ?? '') === fp.content &&
+    (entry.folder ? String(entry.folder) : '') === fp.folder
+  );
+}
+
+function regexDeleteFingerprint(entry) {
+  if (!entry || typeof entry !== 'object') return null;
+  return {
+    comment: String(entry.comment ?? ''),
+    in: String(entry.in ?? ''),
+    out: String(entry.out ?? ''),
+    type: String(entry.type || 'editdisplay'),
+    flag: String(entry.flag ?? ''),
+    ableFlag: Boolean(entry.ableFlag),
+  };
+}
+
+function matchesRegexFingerprint(entry, fp) {
+  if (!entry || typeof entry !== 'object' || !fp) return false;
+  return (
+    String(entry.comment ?? '') === fp.comment &&
+    String(entry.in ?? '') === fp.in &&
+    String(entry.out ?? '') === fp.out &&
+    String(entry.type || 'editdisplay') === fp.type &&
+    String(entry.flag ?? '') === fp.flag &&
+    Boolean(entry.ableFlag) === fp.ableFlag
+  );
+}
+
+function personaDeleteFingerprint(entry) {
+  if (!entry || typeof entry !== 'object') return null;
+  return {
+    name: String(entry.name ?? ''),
+    note: String(entry.note ?? ''),
+    personaPrompt: String(entry.personaPrompt ?? ''),
+  };
+}
+
+function matchesPersonaFingerprint(entry, fp) {
+  if (!entry || typeof entry !== 'object' || !fp) return false;
+  return (
+    String(entry.name ?? '') === fp.name &&
+    String(entry.note ?? '') === fp.note &&
+    String(entry.personaPrompt ?? '') === fp.personaPrompt
+  );
+}
+
+/**
+ * Resolves the live index of an item pinned at preview time before deleting it.
+ * If earlier deletions shifted indices, re-locates the exact pinned item rather than
+ * deleting whatever shifted into `rawIndex`. Refuses loudly if the item vanished or is ambiguous.
+ */
+function resolvePinnedDeleteIndex(list, rawIndex, pinned, matchesFn, itemLabel) {
+  const arr = Array.isArray(list) ? list : [];
+  const hasPinned = pinned !== undefined && pinned !== null;
+  const idxValid = Number.isInteger(rawIndex) && rawIndex >= 0 && rawIndex < arr.length;
+
+  if (!hasPinned) {
+    if (!idxValid) {
+      const idxText = Number.isInteger(rawIndex) ? `#${rawIndex + 1}` : `"${String(rawIndex)}"`;
+      return { ok: false, error: `삭제할 ${itemLabel} ${idxText}을(를) 찾을 수 없습니다. (현재 ${arr.length}개)` };
+    }
+    return { ok: true, index: rawIndex };
+  }
+
+  if (idxValid && matchesFn(arr[rawIndex], pinned)) {
+    return { ok: true, index: rawIndex };
+  }
+
+  const hits = [];
+  for (let i = 0; i < arr.length; i++) {
+    if (matchesFn(arr[i], pinned)) hits.push(i);
+  }
+  if (hits.length === 1) {
+    return { ok: true, index: hits[0] };
+  }
+  if (hits.length > 1) {
+    return {
+      ok: false,
+      error: `삭제 대상과 동일한 ${itemLabel} 항목이 여러 개 남아 있고 목록 순서가 바뀌어 안전하게 특정할 수 없습니다. 다시 요청해 주세요.`,
+    };
+  }
+  return {
+    ok: false,
+    error: `삭제하려는 ${itemLabel} 항목이 이미 수정되었거나 삭제되었습니다. 다시 요청해 주세요.`,
+  };
+}
+
 function formatMetaValue(val) {
   if (val === undefined || val === null || val === '') return '(비어 있음)';
   if (typeof val === 'boolean') return val ? '예' : '아니오';
@@ -1592,7 +1699,7 @@ class HostAdapter {
     const name = String(proposal.name ?? '').trim();
     if (!name) return { ok: false, error: '캐릭터 이름(name)이 비어 있습니다.' };
 
-    const char = buildBlankCharacterSkeleton(chaId || makeUuid());
+    const char = buildBlankCharacterSkeleton(chaId || makeUuid(), makeUuid());
     char.name = name;
     const strFields = [
       'desc', 'firstMessage', 'personality', 'scenario', 'exampleMessage',
@@ -2521,7 +2628,11 @@ class HostAdapter {
         return '그룹 채팅에는 첫 메시지 구조가 없어 삭제할 수 없습니다.';
       }
       const list = Array.isArray(char.alternateGreetings) ? char.alternateGreetings : [];
-      if (!Number.isInteger(proposal.greetingIndex) || proposal.greetingIndex < 0 || proposal.greetingIndex >= list.length) {
+      const pinnedText = options?.hostBinding?.deleteGreetingText;
+      if (pinnedText !== undefined && pinnedText !== null) {
+        const res = resolvePinnedDeleteIndex(list, proposal.greetingIndex, pinnedText, (el, fp) => String(el ?? '') === fp, '추가 첫 메시지');
+        if (!res.ok) return res.error;
+      } else if (!Number.isInteger(proposal.greetingIndex) || proposal.greetingIndex < 0 || proposal.greetingIndex >= list.length) {
         return `삭제할 추가 첫 메시지 ${formatBadIndex(proposal.greetingIndex)}을(를) 찾을 수 없습니다. (현재 ${list.length}개 · 기본 첫 메시지는 삭제 불가)`;
       }
     }
@@ -2532,7 +2643,15 @@ class HostAdapter {
       if (personas.length <= 1) {
         return '마지막 남은 페르소나는 삭제할 수 없습니다. (최소 1개 유지 필요)';
       }
-      if (!Number.isInteger(proposal.personaIndex) || !personas[proposal.personaIndex]) {
+      const pinnedId = options?.hostBinding?.personaId || null;
+      const pinnedFp = options?.hostBinding?.deletePersona || null;
+      if (pinnedId) {
+        const res = resolvePinnedDeleteIndex(personas, proposal.personaIndex, pinnedId, (p, id) => Boolean(p && p.id === id), '페르소나');
+        if (!res.ok) return res.error;
+      } else if (pinnedFp) {
+        const res = resolvePinnedDeleteIndex(personas, proposal.personaIndex, pinnedFp, matchesPersonaFingerprint, '페르소나');
+        if (!res.ok) return res.error;
+      } else if (!Number.isInteger(proposal.personaIndex) || !personas[proposal.personaIndex]) {
         return `삭제할 페르소나 ${formatBadIndex(proposal.personaIndex)}을(를) 찾을 수 없습니다. (등록된 페르소나 ${personas.length}개)`;
       }
     }
@@ -2560,7 +2679,10 @@ class HostAdapter {
         const { char } = await this.readActiveCharacter();
         list = Array.isArray(char?.customscript) ? char.customscript : [];
       }
-      if (!Number.isInteger(proposal.regexIndex) || !list[proposal.regexIndex]) {
+      if (proposal.action === 'delete_regex' && options?.hostBinding?.deleteRegex) {
+        const res = resolvePinnedDeleteIndex(list, proposal.regexIndex, options.hostBinding.deleteRegex, matchesRegexFingerprint, '정규식 스크립트');
+        if (!res.ok) return res.error;
+      } else if (!Number.isInteger(proposal.regexIndex) || !list[proposal.regexIndex]) {
         const verb = proposal.action === 'delete_regex' ? '삭제할' : '수정할';
         const suffix = proposal.action === 'delete_regex' ? '' : ' 새로 만들려면 regexIndex를 빼 주세요.';
         return `${verb} 정규식 스크립트 ${formatBadIndex(proposal.regexIndex)}을(를) 찾을 수 없습니다. (현재 ${list.length}개)${suffix}`;
@@ -2571,11 +2693,10 @@ class HostAdapter {
       const scope = this._loreScopeOf(proposal, target);
       const loaded = await this._loadLorebookForPreview(scope, proposal, target);
       if (!loaded.ok) return loaded.error;
-      const idx = proposal.loreIndex;
-      if (!Number.isInteger(idx) || !loaded.list[idx]) {
-        return `삭제할 ${loaded.scopeLabel} ${formatBadIndex(idx)}을(를) 찾을 수 없습니다. (현재 ${loaded.list.length}개)`;
-      }
-      const entry = loaded.list[idx];
+      const pinnedLore = options?.hostBinding?.deleteLore || null;
+      const resolved = resolvePinnedDeleteIndex(loaded.list, proposal.loreIndex, pinnedLore, matchesLoreFingerprint, loaded.scopeLabel);
+      if (!resolved.ok) return resolved.error;
+      const entry = loaded.list[resolved.index];
       if (entry.mode === 'folder' && entry.key) {
         const childCount = loaded.list.filter(e => e && e !== entry && e.folder === entry.key).length;
         if (childCount > 0) {
@@ -3224,7 +3345,7 @@ class HostAdapter {
         ],
         label: `${loaded.scopeLabel} 삭제 (#${idx + 1} · ${entryTitle})`,
         target: { ...loaded.target, loreIndex: idx },
-        hostBinding: loaded.hostBinding,
+        hostBinding: { ...(loaded.hostBinding || {}), deleteLore: loreDeleteFingerprint(entry) },
         warning: `이 작업은 ${loaded.scopeLabel} "${entryTitle}" 항목을 삭제합니다. 적용 시 확인 창이 뜨며, 적용 후에도 되돌리기로 복구할 수 있습니다.`,
       };
     }
@@ -3256,7 +3377,7 @@ class HostAdapter {
         ],
         label: `${snap.label} 삭제 (${name})`,
         target: snap.target,
-        hostBinding: snap.hostBinding || null,
+        hostBinding: { ...(snap.hostBinding || {}), deleteRegex: regexDeleteFingerprint(existing) },
         warning: `이 작업은 정규식 스크립트 "${name}"을(를) 삭제합니다. 적용 시 확인 창이 뜨며, 적용 후에도 되돌리기로 복구할 수 있습니다.`,
       };
     }
@@ -3283,7 +3404,7 @@ class HostAdapter {
         ],
         label: `페르소나 삭제 (#${idx + 1} · ${name})`,
         target: { targetKind: 'persona', personaIndex: idx },
-        hostBinding: { personaId: existing.id || null },
+        hostBinding: { personaId: existing.id || null, deletePersona: personaDeleteFingerprint(existing) },
         warning: notes.join(' '),
       };
     }
@@ -3311,7 +3432,7 @@ class HostAdapter {
         ],
         label: `추가 첫 메시지 #${idx + 1} 삭제`,
         target: { targetKind: 'char_alt_greeting', greetingIndex: idx },
-        hostBinding: { charIndex, chatIndex, ...getCharIdentity(char) },
+        hostBinding: { charIndex, chatIndex, ...getCharIdentity(char), deleteGreetingText: String(list[idx] ?? '') },
         warning: notes.join(' '),
       };
     }
@@ -3392,7 +3513,8 @@ class HostAdapter {
     }
 
     if (proposal.action === 'create_character') {
-      const db = await this.readDbSubset(['characters']);
+      // Check DB permission with a lightweight key instead of pulling every character & chat transcript
+      const db = await this.readDbSubset(['characterOrder']);
       if (!db) return { ok: false, error: DB_PERMISSION_ERROR };
       const built = this._buildNewCharacterFromProposal(proposal);
       if (!built.ok) return { ok: false, error: built.error };
@@ -4280,11 +4402,18 @@ class HostAdapter {
   }
 
   async _applyDeleteLorebook(proposal, target, options = {}) {
-    const loreIndex = proposal.loreIndex;
     const opened = await this._openScope(this._loreScopeOf(proposal, target), proposal, target, options, '로어북 삭제');
     const list = this._scopeList(opened, 'lore');
+    const resolved = resolvePinnedDeleteIndex(
+      list,
+      proposal.loreIndex,
+      options?.hostBinding?.deleteLore || null,
+      matchesLoreFingerprint,
+      `${opened.name} 로어북`
+    );
+    if (!resolved.ok) throw new Error(resolved.error);
+    const loreIndex = resolved.index;
     const existing = list[loreIndex];
-    if (!existing) throw new Error(`${opened.name} 로어북 #${loreIndex + 1}을(를) 찾을 수 없습니다.`);
     if (existing.mode === 'folder' && existing.key) {
       const childCount = list.filter(e => e && e !== existing && e.folder === existing.key).length;
       if (childCount > 0) {
@@ -4299,11 +4428,18 @@ class HostAdapter {
 
   async _applyDeleteRegex(proposal, target, options = {}) {
     const scope = proposal.scope || (target.targetKind === 'module_regex' ? 'module' : 'character');
-    const idx = proposal.regexIndex;
     const opened = await this._openScope(scope, proposal, target, options, '정규식 삭제');
     const list = this._scopeList(opened, 'regex');
+    const resolved = resolvePinnedDeleteIndex(
+      list,
+      proposal.regexIndex,
+      options?.hostBinding?.deleteRegex || null,
+      matchesRegexFingerprint,
+      `${opened.name} 정규식`
+    );
+    if (!resolved.ok) throw new Error(resolved.error);
+    const idx = resolved.index;
     const existing = list[idx];
-    if (!existing) throw new Error(`${opened.name} 정규식 #${idx + 1}을(를) 찾을 수 없습니다.`);
     const labelName = existing.comment || `#${idx + 1}`;
     list.splice(idx, 1);
     const undoId = await opened.commit(`${opened.name} 정규식 삭제 (${labelName})`);
@@ -4314,14 +4450,14 @@ class HostAdapter {
     const { personas, selectedPersona, permissionDenied } = await this.readPersonas();
     if (permissionDenied) throw new Error(DB_PERMISSION_ERROR);
     if (personas.length <= 1) throw new Error('마지막 남은 페르소나는 삭제할 수 없습니다.');
-    let idx = proposal.personaIndex;
-    if (options?.hostBinding?.personaId && personas[idx]?.id !== options.hostBinding.personaId) {
-      const byId = personas.findIndex(p => p && p.id === options.hostBinding.personaId);
-      if (byId === -1) throw new Error('삭제하려는 페르소나가 이미 변경되었거나 삭제되었습니다.');
-      idx = byId;
-    }
+    const pinnedId = options?.hostBinding?.personaId || null;
+    const pinnedFp = options?.hostBinding?.deletePersona || null;
+    const resolved = pinnedId
+      ? resolvePinnedDeleteIndex(personas, proposal.personaIndex, pinnedId, (p, id) => Boolean(p && p.id === id), '페르소나')
+      : resolvePinnedDeleteIndex(personas, proposal.personaIndex, pinnedFp, matchesPersonaFingerprint, '페르소나');
+    if (!resolved.ok) throw new Error(resolved.error);
+    const idx = resolved.index;
     const existing = personas[idx];
-    if (!existing) throw new Error(`페르소나 #${idx + 1}을(를) 찾을 수 없습니다.`);
 
     const name = existing.name || `#${idx + 1}`;
     const nextPersonas = clone(personas);
@@ -4340,11 +4476,17 @@ class HostAdapter {
   async _applyDeleteGreeting(proposal, options = {}) {
     const { char, charIndex } = await this._requireSameActiveCharacter(options.hostBinding, '추가 첫 메시지 삭제');
     if (char.type === 'group') throw new Error('그룹 채팅에는 첫 메시지 구조가 없습니다.');
-    const idx = proposal.greetingIndex;
     const list = Array.isArray(char.alternateGreetings) ? char.alternateGreetings : [];
-    if (idx < 0 || idx >= list.length) {
-      throw new Error(`추가 첫 메시지 #${idx + 1}을(를) 찾을 수 없습니다.`);
-    }
+    const pinnedText = options?.hostBinding?.deleteGreetingText;
+    const resolved = resolvePinnedDeleteIndex(
+      list,
+      proposal.greetingIndex,
+      pinnedText !== undefined && pinnedText !== null ? pinnedText : null,
+      (el, fp) => String(el ?? '') === fp,
+      '추가 첫 메시지'
+    );
+    if (!resolved.ok) throw new Error(resolved.error);
+    const idx = resolved.index;
 
     const nextChar = clone(char);
     nextChar.alternateGreetings.splice(idx, 1);
@@ -4434,14 +4576,14 @@ class HostAdapter {
     if (!built.ok) throw new Error(built.error);
 
     const newChar = built.character;
-    const nextCharacters = clone(characters);
-    nextCharacters.push(newChar);
+    // Shallow-copy existing character references so diffValues() short-circuits via `a === b`
+    // instead of deep-comparing millions of characters of untouched chat transcripts.
+    const nextCharacters = [...characters, newChar];
 
     const prevDb = { characters };
     const nextDb = { characters: nextCharacters };
     if (Array.isArray(db.characterOrder)) {
-      const nextOrder = clone(db.characterOrder);
-      nextOrder.push(newChar.chaId);
+      const nextOrder = [...db.characterOrder, newChar.chaId];
       prevDb.characterOrder = db.characterOrder;
       nextDb.characterOrder = nextOrder;
     }

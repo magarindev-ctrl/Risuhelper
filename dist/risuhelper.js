@@ -1,21 +1,21 @@
 //@name risuhelper
 //@display-name RisuHelper
 //@api 3.0
-//@version 0.5.0
+//@version 0.5.1
 //@update-url https://raw.githubusercontent.com/magarindev-ctrl/Risuhelper/main/dist/risuhelper.js
 //@link https://github.com/magarindev-ctrl/Risuhelper RisuHelper GitHub
 
 /*
- * RisuHelper v0.5.0 — RisuAI Plugin API v3
+ * RisuHelper v0.5.1 — RisuAI Plugin API v3
  * License: GPL-3.0-only
  * https://github.com/magarindev-ctrl/Risuhelper
  */
 (() => {
   'use strict';
-  const __RISUHELPER_VERSION__ = "0.5.0";
+  const __RISUHELPER_VERSION__ = "0.5.1";
   const __modules = {
   "src/version.js"(__require, __exports) {
-const VERSION = '0.5.0';
+const VERSION = '0.5.1';
 const PLUGIN_NAME = 'risuhelper';
 const STORAGE_KEY = 'risuhelper_state_v1';
 const PRESET_STORAGE_KEY = 'risuhelper_preset_v1';
@@ -4437,6 +4437,43 @@ function indexSegment(index, element) {
 }
 
 /**
+ * For non-id arrays where `after` is strictly shorter than `before`, checks whether `after` is
+ * an ordered subsequence of `before` (i.e. a pure deletion of one or more entries).
+ * Returns the ascending list of removed indices in `before`, or null if elements were rewritten.
+ */
+function findRemovedIndices(before, after) {
+  if (after.length >= before.length) return null;
+  // Match common prefix and suffix first so deleting one of two identical adjacent entries
+  // records the exact removed slot.
+  let pre = 0;
+  while (pre < after.length && deepEqual(before[pre], after[pre])) pre++;
+  let suf = 0;
+  while (
+    suf < after.length - pre &&
+    deepEqual(before[before.length - 1 - suf], after[after.length - 1 - suf])
+  ) {
+    suf++;
+  }
+  if (pre + suf === after.length) {
+    const removed = [];
+    for (let i = pre; i < before.length - suf; i++) removed.push(i);
+    return removed;
+  }
+  const removed = [];
+  let ai = pre;
+  const afterEnd = after.length - suf;
+  const beforeEnd = before.length - suf;
+  for (let bi = pre; bi < beforeEnd; bi++) {
+    if (ai < afterEnd && deepEqual(before[bi], after[ai])) {
+      ai++;
+    } else {
+      removed.push(bi);
+    }
+  }
+  return ai === afterEnd ? removed : null;
+}
+
+/**
  * Computes the operations that turn `before` into `after`.
  * Path segments: object key (string), list index (number), `{ k, v }` (list element whose
  * id-like property `k` equals `v`), or `{ i, a }` (list index plus identifying properties).
@@ -4466,9 +4503,16 @@ function diffValues(before, after, path = [], ops = []) {
     if (idKey) {
       const afterById = new Map(after.map(el => [el[idKey], el]));
       const beforeIds = new Set(before.map(el => el[idKey]));
-      if (before.every(el => afterById.has(el[idKey]))) {
-        for (const el of before) {
+      const survived = before.filter(el => afterById.has(el[idKey]));
+      if (survived.length > 0 || before.length === 0 || after.length === 0) {
+        for (const el of survived) {
           diffValues(el, afterById.get(el[idKey]), [...path, { k: idKey, v: el[idKey] }], ops);
+        }
+        // Emit removals in descending index order so reverse-order revert re-inserts in ascending order.
+        for (let i = before.length - 1; i >= 0; i--) {
+          if (!afterById.has(before[i][idKey])) {
+            ops.push({ op: 'remove', path: [...path], index: i, value: cloneJson(before[i]), idKey });
+          }
         }
         after.forEach((el, index) => {
           if (!beforeIds.has(el[idKey])) ops.push({ op: 'insert', path: [...path], index, value: cloneJson(el) });
@@ -4483,6 +4527,16 @@ function diffValues(before, after, path = [], ops = []) {
         ops.push({ op: 'insert', path: [...path], index: i, value: cloneJson(after[i]) });
       }
       return ops;
+    } else {
+      const removedIndices = findRemovedIndices(before, after);
+      if (removedIndices && removedIndices.length > 0) {
+        // Emit in descending order so reverse-order revert restores original positions cleanly.
+        for (let i = removedIndices.length - 1; i >= 0; i--) {
+          const idx = removedIndices[i];
+          ops.push({ op: 'remove', path: [...path], index: idx, value: cloneJson(before[idx]) });
+        }
+        return ops;
+      }
     }
   }
 
@@ -4602,6 +4656,29 @@ function revertOps(current, ops) {
         continue;
       }
       list.splice(at, 1);
+      reverted++;
+      continue;
+    }
+
+    if (op.op === 'remove') {
+      const target = resolveValue(root, op.path, anchorCache);
+      if (!target.found || !Array.isArray(target.value)) {
+        conflicts.push({ path: where, reason: '삭제했던 항목이 들어 있던 목록을 찾을 수 없습니다.' });
+        continue;
+      }
+      const list = target.value;
+      if (
+        op.idKey &&
+        isPlainObject(op.value) &&
+        typeof op.value[op.idKey] === 'string' &&
+        op.value[op.idKey] &&
+        list.some(el => isPlainObject(el) && el[op.idKey] === op.value[op.idKey])
+      ) {
+        conflicts.push({ path: where, reason: '삭제했던 항목과 같은 ID의 항목이 이미 목록에 존재합니다.' });
+        continue;
+      }
+      const at = Math.max(0, Math.min(Number.isInteger(op.index) ? op.index : list.length, list.length));
+      list.splice(at, 0, cloneJson(op.value));
       reverted++;
       continue;
     }
@@ -5447,10 +5524,18 @@ const DEFAULT_SD_DATA = [
   ['current location', ''],
 ];
 
+function makeChatUuid() {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return 'rh-chat-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+}
+
 /**
- * Builds a complete blank RisuAI character object matching upstream `createBlankChar()`.
+ * Builds a complete blank RisuAI character object matching upstream `createBlankChar()`,
+ * plus a UUID on `chats[0].id` required by PocketRisu/RisuBard persistence and RisuNest validation.
  */
-function buildBlankCharacterSkeleton(chaId) {
+function buildBlankCharacterSkeleton(chaId, firstChatId = '') {
   return {
     type: 'character',
     name: '',
@@ -5458,6 +5543,7 @@ function buildBlankCharacterSkeleton(chaId) {
     desc: '',
     notes: '',
     chats: [{
+      id: String(firstChatId || makeChatUuid()),
       message: [],
       note: '',
       name: 'Chat 1',
@@ -5920,6 +6006,113 @@ function makeUuid() {
     return crypto.randomUUID();
   }
   return 'rh-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+}
+
+function loreDeleteFingerprint(entry) {
+  if (!entry || typeof entry !== 'object') return null;
+  return {
+    mode: String(entry.mode || 'normal'),
+    comment: String(entry.comment ?? ''),
+    key: String(entry.key ?? ''),
+    secondkey: String(entry.secondkey ?? ''),
+    content: String(entry.content ?? ''),
+    folder: entry.folder ? String(entry.folder) : '',
+  };
+}
+
+function matchesLoreFingerprint(entry, fp) {
+  if (!entry || typeof entry !== 'object' || !fp) return false;
+  return (
+    String(entry.mode || 'normal') === fp.mode &&
+    String(entry.comment ?? '') === fp.comment &&
+    String(entry.key ?? '') === fp.key &&
+    String(entry.secondkey ?? '') === fp.secondkey &&
+    String(entry.content ?? '') === fp.content &&
+    (entry.folder ? String(entry.folder) : '') === fp.folder
+  );
+}
+
+function regexDeleteFingerprint(entry) {
+  if (!entry || typeof entry !== 'object') return null;
+  return {
+    comment: String(entry.comment ?? ''),
+    in: String(entry.in ?? ''),
+    out: String(entry.out ?? ''),
+    type: String(entry.type || 'editdisplay'),
+    flag: String(entry.flag ?? ''),
+    ableFlag: Boolean(entry.ableFlag),
+  };
+}
+
+function matchesRegexFingerprint(entry, fp) {
+  if (!entry || typeof entry !== 'object' || !fp) return false;
+  return (
+    String(entry.comment ?? '') === fp.comment &&
+    String(entry.in ?? '') === fp.in &&
+    String(entry.out ?? '') === fp.out &&
+    String(entry.type || 'editdisplay') === fp.type &&
+    String(entry.flag ?? '') === fp.flag &&
+    Boolean(entry.ableFlag) === fp.ableFlag
+  );
+}
+
+function personaDeleteFingerprint(entry) {
+  if (!entry || typeof entry !== 'object') return null;
+  return {
+    name: String(entry.name ?? ''),
+    note: String(entry.note ?? ''),
+    personaPrompt: String(entry.personaPrompt ?? ''),
+  };
+}
+
+function matchesPersonaFingerprint(entry, fp) {
+  if (!entry || typeof entry !== 'object' || !fp) return false;
+  return (
+    String(entry.name ?? '') === fp.name &&
+    String(entry.note ?? '') === fp.note &&
+    String(entry.personaPrompt ?? '') === fp.personaPrompt
+  );
+}
+
+/**
+ * Resolves the live index of an item pinned at preview time before deleting it.
+ * If earlier deletions shifted indices, re-locates the exact pinned item rather than
+ * deleting whatever shifted into `rawIndex`. Refuses loudly if the item vanished or is ambiguous.
+ */
+function resolvePinnedDeleteIndex(list, rawIndex, pinned, matchesFn, itemLabel) {
+  const arr = Array.isArray(list) ? list : [];
+  const hasPinned = pinned !== undefined && pinned !== null;
+  const idxValid = Number.isInteger(rawIndex) && rawIndex >= 0 && rawIndex < arr.length;
+
+  if (!hasPinned) {
+    if (!idxValid) {
+      const idxText = Number.isInteger(rawIndex) ? `#${rawIndex + 1}` : `"${String(rawIndex)}"`;
+      return { ok: false, error: `삭제할 ${itemLabel} ${idxText}을(를) 찾을 수 없습니다. (현재 ${arr.length}개)` };
+    }
+    return { ok: true, index: rawIndex };
+  }
+
+  if (idxValid && matchesFn(arr[rawIndex], pinned)) {
+    return { ok: true, index: rawIndex };
+  }
+
+  const hits = [];
+  for (let i = 0; i < arr.length; i++) {
+    if (matchesFn(arr[i], pinned)) hits.push(i);
+  }
+  if (hits.length === 1) {
+    return { ok: true, index: hits[0] };
+  }
+  if (hits.length > 1) {
+    return {
+      ok: false,
+      error: `삭제 대상과 동일한 ${itemLabel} 항목이 여러 개 남아 있고 목록 순서가 바뀌어 안전하게 특정할 수 없습니다. 다시 요청해 주세요.`,
+    };
+  }
+  return {
+    ok: false,
+    error: `삭제하려는 ${itemLabel} 항목이 이미 수정되었거나 삭제되었습니다. 다시 요청해 주세요.`,
+  };
 }
 
 function formatMetaValue(val) {
@@ -7442,7 +7635,7 @@ class HostAdapter {
     const name = String(proposal.name ?? '').trim();
     if (!name) return { ok: false, error: '캐릭터 이름(name)이 비어 있습니다.' };
 
-    const char = buildBlankCharacterSkeleton(chaId || makeUuid());
+    const char = buildBlankCharacterSkeleton(chaId || makeUuid(), makeUuid());
     char.name = name;
     const strFields = [
       'desc', 'firstMessage', 'personality', 'scenario', 'exampleMessage',
@@ -8371,7 +8564,11 @@ class HostAdapter {
         return '그룹 채팅에는 첫 메시지 구조가 없어 삭제할 수 없습니다.';
       }
       const list = Array.isArray(char.alternateGreetings) ? char.alternateGreetings : [];
-      if (!Number.isInteger(proposal.greetingIndex) || proposal.greetingIndex < 0 || proposal.greetingIndex >= list.length) {
+      const pinnedText = options?.hostBinding?.deleteGreetingText;
+      if (pinnedText !== undefined && pinnedText !== null) {
+        const res = resolvePinnedDeleteIndex(list, proposal.greetingIndex, pinnedText, (el, fp) => String(el ?? '') === fp, '추가 첫 메시지');
+        if (!res.ok) return res.error;
+      } else if (!Number.isInteger(proposal.greetingIndex) || proposal.greetingIndex < 0 || proposal.greetingIndex >= list.length) {
         return `삭제할 추가 첫 메시지 ${formatBadIndex(proposal.greetingIndex)}을(를) 찾을 수 없습니다. (현재 ${list.length}개 · 기본 첫 메시지는 삭제 불가)`;
       }
     }
@@ -8382,7 +8579,15 @@ class HostAdapter {
       if (personas.length <= 1) {
         return '마지막 남은 페르소나는 삭제할 수 없습니다. (최소 1개 유지 필요)';
       }
-      if (!Number.isInteger(proposal.personaIndex) || !personas[proposal.personaIndex]) {
+      const pinnedId = options?.hostBinding?.personaId || null;
+      const pinnedFp = options?.hostBinding?.deletePersona || null;
+      if (pinnedId) {
+        const res = resolvePinnedDeleteIndex(personas, proposal.personaIndex, pinnedId, (p, id) => Boolean(p && p.id === id), '페르소나');
+        if (!res.ok) return res.error;
+      } else if (pinnedFp) {
+        const res = resolvePinnedDeleteIndex(personas, proposal.personaIndex, pinnedFp, matchesPersonaFingerprint, '페르소나');
+        if (!res.ok) return res.error;
+      } else if (!Number.isInteger(proposal.personaIndex) || !personas[proposal.personaIndex]) {
         return `삭제할 페르소나 ${formatBadIndex(proposal.personaIndex)}을(를) 찾을 수 없습니다. (등록된 페르소나 ${personas.length}개)`;
       }
     }
@@ -8410,7 +8615,10 @@ class HostAdapter {
         const { char } = await this.readActiveCharacter();
         list = Array.isArray(char?.customscript) ? char.customscript : [];
       }
-      if (!Number.isInteger(proposal.regexIndex) || !list[proposal.regexIndex]) {
+      if (proposal.action === 'delete_regex' && options?.hostBinding?.deleteRegex) {
+        const res = resolvePinnedDeleteIndex(list, proposal.regexIndex, options.hostBinding.deleteRegex, matchesRegexFingerprint, '정규식 스크립트');
+        if (!res.ok) return res.error;
+      } else if (!Number.isInteger(proposal.regexIndex) || !list[proposal.regexIndex]) {
         const verb = proposal.action === 'delete_regex' ? '삭제할' : '수정할';
         const suffix = proposal.action === 'delete_regex' ? '' : ' 새로 만들려면 regexIndex를 빼 주세요.';
         return `${verb} 정규식 스크립트 ${formatBadIndex(proposal.regexIndex)}을(를) 찾을 수 없습니다. (현재 ${list.length}개)${suffix}`;
@@ -8421,11 +8629,10 @@ class HostAdapter {
       const scope = this._loreScopeOf(proposal, target);
       const loaded = await this._loadLorebookForPreview(scope, proposal, target);
       if (!loaded.ok) return loaded.error;
-      const idx = proposal.loreIndex;
-      if (!Number.isInteger(idx) || !loaded.list[idx]) {
-        return `삭제할 ${loaded.scopeLabel} ${formatBadIndex(idx)}을(를) 찾을 수 없습니다. (현재 ${loaded.list.length}개)`;
-      }
-      const entry = loaded.list[idx];
+      const pinnedLore = options?.hostBinding?.deleteLore || null;
+      const resolved = resolvePinnedDeleteIndex(loaded.list, proposal.loreIndex, pinnedLore, matchesLoreFingerprint, loaded.scopeLabel);
+      if (!resolved.ok) return resolved.error;
+      const entry = loaded.list[resolved.index];
       if (entry.mode === 'folder' && entry.key) {
         const childCount = loaded.list.filter(e => e && e !== entry && e.folder === entry.key).length;
         if (childCount > 0) {
@@ -9074,7 +9281,7 @@ class HostAdapter {
         ],
         label: `${loaded.scopeLabel} 삭제 (#${idx + 1} · ${entryTitle})`,
         target: { ...loaded.target, loreIndex: idx },
-        hostBinding: loaded.hostBinding,
+        hostBinding: { ...(loaded.hostBinding || {}), deleteLore: loreDeleteFingerprint(entry) },
         warning: `이 작업은 ${loaded.scopeLabel} "${entryTitle}" 항목을 삭제합니다. 적용 시 확인 창이 뜨며, 적용 후에도 되돌리기로 복구할 수 있습니다.`,
       };
     }
@@ -9106,7 +9313,7 @@ class HostAdapter {
         ],
         label: `${snap.label} 삭제 (${name})`,
         target: snap.target,
-        hostBinding: snap.hostBinding || null,
+        hostBinding: { ...(snap.hostBinding || {}), deleteRegex: regexDeleteFingerprint(existing) },
         warning: `이 작업은 정규식 스크립트 "${name}"을(를) 삭제합니다. 적용 시 확인 창이 뜨며, 적용 후에도 되돌리기로 복구할 수 있습니다.`,
       };
     }
@@ -9133,7 +9340,7 @@ class HostAdapter {
         ],
         label: `페르소나 삭제 (#${idx + 1} · ${name})`,
         target: { targetKind: 'persona', personaIndex: idx },
-        hostBinding: { personaId: existing.id || null },
+        hostBinding: { personaId: existing.id || null, deletePersona: personaDeleteFingerprint(existing) },
         warning: notes.join(' '),
       };
     }
@@ -9161,7 +9368,7 @@ class HostAdapter {
         ],
         label: `추가 첫 메시지 #${idx + 1} 삭제`,
         target: { targetKind: 'char_alt_greeting', greetingIndex: idx },
-        hostBinding: { charIndex, chatIndex, ...getCharIdentity(char) },
+        hostBinding: { charIndex, chatIndex, ...getCharIdentity(char), deleteGreetingText: String(list[idx] ?? '') },
         warning: notes.join(' '),
       };
     }
@@ -9242,7 +9449,8 @@ class HostAdapter {
     }
 
     if (proposal.action === 'create_character') {
-      const db = await this.readDbSubset(['characters']);
+      // Check DB permission with a lightweight key instead of pulling every character & chat transcript
+      const db = await this.readDbSubset(['characterOrder']);
       if (!db) return { ok: false, error: DB_PERMISSION_ERROR };
       const built = this._buildNewCharacterFromProposal(proposal);
       if (!built.ok) return { ok: false, error: built.error };
@@ -10130,11 +10338,18 @@ class HostAdapter {
   }
 
   async _applyDeleteLorebook(proposal, target, options = {}) {
-    const loreIndex = proposal.loreIndex;
     const opened = await this._openScope(this._loreScopeOf(proposal, target), proposal, target, options, '로어북 삭제');
     const list = this._scopeList(opened, 'lore');
+    const resolved = resolvePinnedDeleteIndex(
+      list,
+      proposal.loreIndex,
+      options?.hostBinding?.deleteLore || null,
+      matchesLoreFingerprint,
+      `${opened.name} 로어북`
+    );
+    if (!resolved.ok) throw new Error(resolved.error);
+    const loreIndex = resolved.index;
     const existing = list[loreIndex];
-    if (!existing) throw new Error(`${opened.name} 로어북 #${loreIndex + 1}을(를) 찾을 수 없습니다.`);
     if (existing.mode === 'folder' && existing.key) {
       const childCount = list.filter(e => e && e !== existing && e.folder === existing.key).length;
       if (childCount > 0) {
@@ -10149,11 +10364,18 @@ class HostAdapter {
 
   async _applyDeleteRegex(proposal, target, options = {}) {
     const scope = proposal.scope || (target.targetKind === 'module_regex' ? 'module' : 'character');
-    const idx = proposal.regexIndex;
     const opened = await this._openScope(scope, proposal, target, options, '정규식 삭제');
     const list = this._scopeList(opened, 'regex');
+    const resolved = resolvePinnedDeleteIndex(
+      list,
+      proposal.regexIndex,
+      options?.hostBinding?.deleteRegex || null,
+      matchesRegexFingerprint,
+      `${opened.name} 정규식`
+    );
+    if (!resolved.ok) throw new Error(resolved.error);
+    const idx = resolved.index;
     const existing = list[idx];
-    if (!existing) throw new Error(`${opened.name} 정규식 #${idx + 1}을(를) 찾을 수 없습니다.`);
     const labelName = existing.comment || `#${idx + 1}`;
     list.splice(idx, 1);
     const undoId = await opened.commit(`${opened.name} 정규식 삭제 (${labelName})`);
@@ -10164,14 +10386,14 @@ class HostAdapter {
     const { personas, selectedPersona, permissionDenied } = await this.readPersonas();
     if (permissionDenied) throw new Error(DB_PERMISSION_ERROR);
     if (personas.length <= 1) throw new Error('마지막 남은 페르소나는 삭제할 수 없습니다.');
-    let idx = proposal.personaIndex;
-    if (options?.hostBinding?.personaId && personas[idx]?.id !== options.hostBinding.personaId) {
-      const byId = personas.findIndex(p => p && p.id === options.hostBinding.personaId);
-      if (byId === -1) throw new Error('삭제하려는 페르소나가 이미 변경되었거나 삭제되었습니다.');
-      idx = byId;
-    }
+    const pinnedId = options?.hostBinding?.personaId || null;
+    const pinnedFp = options?.hostBinding?.deletePersona || null;
+    const resolved = pinnedId
+      ? resolvePinnedDeleteIndex(personas, proposal.personaIndex, pinnedId, (p, id) => Boolean(p && p.id === id), '페르소나')
+      : resolvePinnedDeleteIndex(personas, proposal.personaIndex, pinnedFp, matchesPersonaFingerprint, '페르소나');
+    if (!resolved.ok) throw new Error(resolved.error);
+    const idx = resolved.index;
     const existing = personas[idx];
-    if (!existing) throw new Error(`페르소나 #${idx + 1}을(를) 찾을 수 없습니다.`);
 
     const name = existing.name || `#${idx + 1}`;
     const nextPersonas = clone(personas);
@@ -10190,11 +10412,17 @@ class HostAdapter {
   async _applyDeleteGreeting(proposal, options = {}) {
     const { char, charIndex } = await this._requireSameActiveCharacter(options.hostBinding, '추가 첫 메시지 삭제');
     if (char.type === 'group') throw new Error('그룹 채팅에는 첫 메시지 구조가 없습니다.');
-    const idx = proposal.greetingIndex;
     const list = Array.isArray(char.alternateGreetings) ? char.alternateGreetings : [];
-    if (idx < 0 || idx >= list.length) {
-      throw new Error(`추가 첫 메시지 #${idx + 1}을(를) 찾을 수 없습니다.`);
-    }
+    const pinnedText = options?.hostBinding?.deleteGreetingText;
+    const resolved = resolvePinnedDeleteIndex(
+      list,
+      proposal.greetingIndex,
+      pinnedText !== undefined && pinnedText !== null ? pinnedText : null,
+      (el, fp) => String(el ?? '') === fp,
+      '추가 첫 메시지'
+    );
+    if (!resolved.ok) throw new Error(resolved.error);
+    const idx = resolved.index;
 
     const nextChar = clone(char);
     nextChar.alternateGreetings.splice(idx, 1);
@@ -10284,14 +10512,14 @@ class HostAdapter {
     if (!built.ok) throw new Error(built.error);
 
     const newChar = built.character;
-    const nextCharacters = clone(characters);
-    nextCharacters.push(newChar);
+    // Shallow-copy existing character references so diffValues() short-circuits via `a === b`
+    // instead of deep-comparing millions of characters of untouched chat transcripts.
+    const nextCharacters = [...characters, newChar];
 
     const prevDb = { characters };
     const nextDb = { characters: nextCharacters };
     if (Array.isArray(db.characterOrder)) {
-      const nextOrder = clone(db.characterOrder);
-      nextOrder.push(newChar.chaId);
+      const nextOrder = [...db.characterOrder, newChar.chaId];
       prevDb.characterOrder = db.characterOrder;
       nextDb.characterOrder = nextOrder;
     }
@@ -10643,8 +10871,8 @@ const SKILL_KEYWORDS = {
   char_fields: /설명|디스크립션|desc|시스템\s*프롬프트|글로벌\s*노트|깊이\s*프롬프트|작가(?:의)?\s*노트|작노|author\s*note|성격|시나리오|예시\s*대화|백그라운드|번역가|제작자|닉네임|기본\s*변수|커스텀\s*토글/i,
   greetings: /첫\s*메시지|추가\s*첫|인사말|오프닝|greeting|alternate\s*greeting|first\s*message/i,
   lorebook: /로어북|lorebook|lore\b|폴더|folder|세계관|요약|이사|insertorder|@@depth/i,
-  scripts: /lua|루아|트리거|trigger|정규식|regex|customscript|상태창|hud|배지|editdisplay|editoutput|editinput|editprocess|cbs|\{\{/i,
-  persona: /페르소나|persona|바인딩|bindedPersona|유저\s*설정|유저\s*프로필/i,
+  scripts: /lua|루아|트리거|trigger|정규식|regex|customscript|상태창|hud|배지|editdisplay|editoutput|editinput|editprocess|cbs|\{\{|스크립트|script|꾸며|표시\s*형식|치환|턴\s*수|응답마다|출력마다|html|css/i,
+  persona: /페르소나|persona|바인딩|bindedPersona|유저\s*(?:설정|프로필|정보|소개|캐릭터)|(?:내|플레이어|주인공)\s*(?:캐릭터\s*)?프로필/i,
   config: /설정|컨피그|config|temperature|온도|maxResponse|maxContext|페널티|penalty|customCSS|guiHTML|테마|theme|모듈\s*활성|enabledModules/i,
   chat_migration: /이사|옮겨|가져와|이관|참조\s*채팅|\d+\s*번\s*채팅|채팅\s*#?\d+|이전\s*채팅|다른\s*채팅|콜드\s*스토리지/i,
   chat_vars: /변수|scriptstate|호감도|affection|\bhp\b|\bmp\b|스탯|상태값|플래그|카운터|\bvar\b|getvar|setvar|초기화/i,
@@ -10657,6 +10885,7 @@ const SKILL_DEFS = [
   {
     id: 'core_text',
     label: '현재 칸 편집',
+    actions: ['patch_text', 'replace_text'],
     knowledge: [],
     rules: [
       '기존 긴 원문의 일부만 바꿀 때는 반드시 `patch_text`를 사용하고, `before`에는 위 [현재 대상의 실제 원문]에서 **공백과 줄바꿈까지 정확히 일치하는 고유 구간**을 복사하세요.',
@@ -10671,6 +10900,7 @@ const SKILL_DEFS = [
   {
     id: 'chat_input',
     label: '유저 대필',
+    actions: ['replace_text'],
     knowledge: ['cbs'],
     rules: [
       '현재 대상이 `chat_input`(채팅 입력창 · 유저 대필)일 때 대필·문장 다듬기 요청에는 `replace_text`의 `content`에 바로 전송할 유저 대사/서술 본문만 담아 제안하세요(불필요한 해설·인사말을 `content` 안에 넣지 마세요).',
@@ -10683,6 +10913,7 @@ const SKILL_DEFS = [
   {
     id: 'char_fields',
     label: '캐릭터 필드 · 작노',
+    actions: ['update_field'],
     knowledge: ['character', 'cbs'],
     rules: [
       '캐릭터 설명·시스템 프롬프트 등 캐릭터 필드나 작가의 노트를 고칠 때, 그 필드가 현재 대상이 아니면 `update_field`를 사용하세요. 그 필드가 현재 대상이면 `patch_text` / `replace_text`도 됩니다.',
@@ -10695,6 +10926,7 @@ const SKILL_DEFS = [
   {
     id: 'greetings',
     label: '첫 메시지',
+    actions: ['update_greeting', 'create_greeting', 'delete_greeting'],
     knowledge: ['character', 'cbs'],
     rules: [
       '첫 메시지(기본·추가)를 고치거나 새로 추가하거나 삭제할 때는 현재 대상이 무엇이든 `update_greeting` / `create_greeting` / `delete_greeting`을 사용하세요. "추가 첫 메시지를 새로 만들어 달라"는 요청에 기존 항목을 `replace_text`로 덮어쓰지 마세요.',
@@ -10709,6 +10941,7 @@ const SKILL_DEFS = [
   {
     id: 'lorebook',
     label: '로어북',
+    actions: ['create_lorebook', 'update_lorebook', 'organize_lorebook', 'delete_lorebook'],
     knowledge: ['lorebook', 'cbs'],
     rules: [
       '로어북 폴더를 새로 만들어 로어북을 옮기거나 기존 폴더에 여러 로어북을 담을 때는 절대 `update_lorebook`을 여러 개로 쪼개거나 `\\uf000folder:...` 키를 임의로 지어내지 말고, 반드시 **단일 `organize_lorebook` 블록 하나**로 제안하세요.',
@@ -10724,6 +10957,7 @@ const SKILL_DEFS = [
   {
     id: 'scripts',
     label: 'Lua · 정규식',
+    actions: ['update_lua', 'upsert_regex', 'delete_regex'],
     knowledge: ['lua', 'regex', 'cbs'],
     rules: [],
     schemas: [
@@ -10736,6 +10970,7 @@ const SKILL_DEFS = [
   {
     id: 'module_create',
     label: '모듈 신규 생성',
+    actions: ['create_module'],
     knowledge: ['module_create', 'lua', 'regex', 'lorebook', 'cbs'],
     rules: [
       '사용자가 새 모듈(정규식+Lua+토글+임베딩+로어북 패키지)을 통째로 만들어 달라고 하면 반드시 단일 `create_module` 제안으로 구성하고, "지금 채팅에 바로 켜줘"라고 하면 `enableInCurrentChat: true`, "전역으로 켜줘"라고 하면 `enableGlobally: true`를 설정하세요.',
@@ -10748,6 +10983,7 @@ const SKILL_DEFS = [
   {
     id: 'persona',
     label: '페르소나',
+    actions: ['create_persona', 'update_persona', 'delete_persona'],
     knowledge: ['persona', 'cbs'],
     rules: [],
     schemas: [
@@ -10760,6 +10996,7 @@ const SKILL_DEFS = [
   {
     id: 'config',
     label: '설정 · 컨피그',
+    actions: ['update_config'],
     knowledge: ['config'],
     rules: [],
     schemas: [
@@ -10770,6 +11007,7 @@ const SKILL_DEFS = [
   {
     id: 'char_settings',
     label: '캐릭터 고급 튜닝',
+    actions: ['update_char_settings'],
     knowledge: ['char_advanced'],
     rules: [
       '현재 캐릭터의 로어북 예산·스캔 깊이(`loreSettings`), 로짓 바이어스(`bias`), 태그(`tags`)를 조정할 때는 `update_char_settings`를 사용하세요. 기존 바이어스나 태그를 유지하면서 일부만 추가·삭제할 때는 `addBias`/`removeBias`, `addTags`/`removeTags`를 쓰세요.',
@@ -10782,6 +11020,7 @@ const SKILL_DEFS = [
   {
     id: 'char_create_port',
     label: '캐릭터 생성 · 포팅',
+    actions: ['create_character', 'port_from_character'],
     knowledge: ['character', 'char_advanced', 'cbs'],
     rules: [
       '새 캐릭터 카드를 처음부터 만들 때는 `create_character`를 사용하세요(현재 캐릭터를 덮어쓰지 않고 새 캐릭터로 추가됩니다).',
@@ -10796,6 +11035,7 @@ const SKILL_DEFS = [
   {
     id: 'chat_vars',
     label: '채팅 변수',
+    actions: ['update_chat_vars'],
     knowledge: ['chat_vars', 'cbs'],
     rules: [
       '현재 진행 중인 채팅의 변수(`chat.scriptstate`) 값을 추가·수정·삭제할 때는 `update_chat_vars`를 사용하세요(새 채팅의 기본값은 `update_field`의 `defaultVariables`).',
@@ -10808,6 +11048,7 @@ const SKILL_DEFS = [
   {
     id: 'chat_migration',
     label: '채팅 이사',
+    actions: ['import_chat'],
     knowledge: [],
     rules: [
       '같은 캐릭터의 다른 채팅에서 지금 채팅으로 "이사"(변수·작가의 노트·채팅 로어북·연결 페르소나·채팅 모듈·첫 메시지 번호 옮기기)할 때는 `import_chat`을 사용하세요. 값은 플러그인이 원본 그대로 복사하므로 변수 값이나 노트 내용을 직접 받아 적지 마세요. 원본 채팅이 어느 것인지 불분명하면 [같은 캐릭터의 채팅 목록]을 보여 주고 먼저 물어보세요. 변경은 항상 지금 열려 있는 채팅에만 적용되며, 새 채팅을 만들 수는 없으니 필요하면 RisuAI에서 새 채팅을 만들어 연 뒤 요청하라고 안내하세요.',
@@ -10821,6 +11062,7 @@ const SKILL_DEFS = [
   {
     id: 'fetch_logs',
     label: '요청 로그 진단',
+    actions: [],
     knowledge: ['fetch_logs'],
     rules: [],
     schemas: [],
@@ -10829,18 +11071,79 @@ const SKILL_DEFS = [
 ];
 
 const SKILL_BY_ID = new Map(SKILL_DEFS.map(s => [s.id, s]));
+const SKILL_ID_BY_ACTION = new Map();
+for (const def of SKILL_DEFS) {
+  if (def.id === 'core_text' || def.id === 'chat_input') continue;
+  for (const act of def.actions || []) {
+    SKILL_ID_BY_ACTION.set(act, def.id);
+  }
+}
+
+// On chat/unknown free-talk, always expose lightweight scripts/persona schemas so follow-ups or
+// indirect phrasing never lose v0.4.x action coverage, while deferring heavy Lua/regex/persona
+// knowledge guides until triggered by screen, keyword, or recent turn context.
+const FREE_TALK_SCHEMA_BASELINE_SKILLS = ['scripts', 'persona'];
+
+/**
+ * Combines the current user input with the most recent 2 user messages from `history` so
+ * short follow-ups ("응 그렇게 해줘", "2번에서 가져와줘") retain the prior turn's skill & context.
+ */
+function collectRoutingText(userInput = '', history = [], maxRecentUserTurns = 2) {
+  const parts = [];
+  if (Array.isArray(history) && history.length > 0 && maxRecentUserTurns > 0) {
+    const recentUsers = [];
+    for (let i = history.length - 1; i >= 0 && recentUsers.length < maxRecentUserTurns; i--) {
+      const msg = history[i];
+      if (msg && msg.role === 'user') {
+        const text = String(msg.rawText ?? msg.content ?? '').trim();
+        if (text) recentUsers.unshift(text);
+      }
+    }
+    parts.push(...recentUsers);
+  }
+  const cur = String(userInput ?? '').trim();
+  if (cur) parts.push(cur);
+  return parts.join('\n');
+}
+
+/**
+ * Extracts skill IDs for any proposals emitted in the immediately preceding assistant message
+ * so follow-up tweaks ("조금만 바꿔줘") keep that action's schema & knowledge active.
+ */
+function extractRecentAssistantSkillIds(history = []) {
+  const ids = new Set();
+  if (!Array.isArray(history) || history.length === 0) return ids;
+  for (let i = history.length - 1; i >= 0; i--) {
+    const msg = history[i];
+    if (!msg || msg.role !== 'assistant') continue;
+    if (Array.isArray(msg.proposals)) {
+      for (const item of msg.proposals) {
+        const act = item?.proposal?.action || item?.action;
+        const sid = act ? SKILL_ID_BY_ACTION.get(act) : null;
+        if (sid) ids.add(sid);
+      }
+    }
+    const raw = String(msg.rawText ?? msg.content ?? '');
+    for (const m of raw.matchAll(/"action"\s*:\s*"([a-z_]+)"/g)) {
+      const sid = SKILL_ID_BY_ACTION.get(m[1]);
+      if (sid) ids.add(sid);
+    }
+    break; // only inspect the immediately preceding assistant turn
+  }
+  return ids;
+}
 
 /**
  * Deterministically selects the subset of internal skills for a request based on
- * current cursor/screen, user message keywords, and attached context.
+ * current cursor/screen, user message + recent follow-up turns, and attached context.
  * @returns {string[]} ordered list of active skill IDs
  */
-function selectSkills({ context, snapshot, userInput = '', extraContext = {} } = {}) {
+function selectSkills({ context, snapshot, userInput = '', history = [], extraContext = {} } = {}) {
   const screen = context?.screen || 'unknown';
   const kind = snapshot?.target?.targetKind || context?.targetKind || 'general';
   const isFreeTalk = Boolean(context?.freeTalk) || kind === 'general';
   const isChatInput = kind === 'chat_input';
-  const text = String(userInput || '');
+  const text = collectRoutingText(userInput, history);
   const active = new Set();
 
   // 1. Primary target / screen routing
@@ -10885,8 +11188,7 @@ function selectSkills({ context, snapshot, userInput = '', extraContext = {} } =
   }
 
   // Free talk on chat/unknown screen: keep the common lightweight authoring baseline,
-  // while leaving heavier specialized packs (scripts, persona, chat_migration, module_create,
-  // char_create_port, char_settings) keyword/context-driven.
+  // while leaving heavier specialized knowledge packs keyword/context-driven.
   if (isFreeTalk && (screen === 'chat' || screen === 'unknown')) {
     active.add('char_fields');
     active.add('greetings');
@@ -10915,20 +11217,39 @@ function selectSkills({ context, snapshot, userInput = '', extraContext = {} } =
     active.add('char_create_port');
   }
 
-  // 3. Keyword-driven activations (works from ANY screen/focus!)
+  // 3. Keyword-driven activations across current + recent user turns (works from ANY screen/focus!)
   for (const [id, re] of Object.entries(SKILL_KEYWORDS)) {
     if (re.test(text)) active.add(id);
+  }
+
+  // 4. Carry over skills for proposals emitted in the immediately preceding assistant turn
+  for (const id of extractRecentAssistantSkillIds(history)) {
+    active.add(id);
   }
 
   // Keep canonical definition order
   return SKILL_DEFS.filter(s => active.has(s.id)).map(s => s.id);
 }
 
-function buildSkillPromptSections({ context, snapshot, userInput = '', extraContext = {} } = {}) {
-  const activeSkillIds = selectSkills({ context, snapshot, userInput, extraContext });
+function buildSkillPromptSections({ context, snapshot, userInput = '', history = [], extraContext = {} } = {}) {
+  const activeSkillIds = selectSkills({ context, snapshot, userInput, history, extraContext });
+  const activeSet = new Set(activeSkillIds);
+  const screen = context?.screen || 'unknown';
+  const kind = snapshot?.target?.targetKind || context?.targetKind || 'general';
+  const isFreeTalk = Boolean(context?.freeTalk) || kind === 'general';
+
+  // On chat/unknown free-talk, include compact scripts & persona schemas even without keywords
+  // (v0.4.x action parity) without paying for heavy Lua/regex/persona knowledge guides.
+  const schemaOnlySkillIds = isFreeTalk && (screen === 'chat' || screen === 'unknown')
+    ? FREE_TALK_SCHEMA_BASELINE_SKILLS.filter(id => !activeSet.has(id))
+    : [];
+  const schemaSkillSet = new Set([...activeSkillIds, ...schemaOnlySkillIds]);
+
   const knowledgeKeys = new Set(['core']);
   const rules = [];
   const schemas = [];
+  const activeActions = [];
+  const seenActions = new Set();
   let includeRawDelimiters = false;
 
   const fieldKey = snapshot?.target?.fieldKey || context?.fieldKey || '';
@@ -10936,13 +11257,25 @@ function buildSkillPromptSections({ context, snapshot, userInput = '', extraCont
     knowledgeKeys.add('cbs');
   }
 
-  for (const id of activeSkillIds) {
-    const def = SKILL_BY_ID.get(id);
-    if (!def) continue;
-    for (const k of def.knowledge) knowledgeKeys.add(k);
-    for (const r of def.rules) rules.push(r);
-    for (const s of def.schemas) schemas.push(s);
-    if (def.rawDelimiters) includeRawDelimiters = true;
+  for (const def of SKILL_DEFS) {
+    const isActive = activeSet.has(def.id);
+    const includeSchema = schemaSkillSet.has(def.id);
+    if (!isActive && !includeSchema) continue;
+
+    if (isActive) {
+      for (const k of def.knowledge) knowledgeKeys.add(k);
+      for (const r of def.rules) rules.push(r);
+    }
+    if (includeSchema) {
+      for (const s of def.schemas) schemas.push(s);
+      for (const a of def.actions || []) {
+        if (!seenActions.has(a)) {
+          seenActions.add(a);
+          activeActions.push(a);
+        }
+      }
+      if (def.rawDelimiters) includeRawDelimiters = true;
+    }
   }
 
   const knowledgeText = [...knowledgeKeys]
@@ -10953,6 +11286,7 @@ function buildSkillPromptSections({ context, snapshot, userInput = '', extraCont
   return {
     activeSkillIds,
     activeSkillLabels: activeSkillIds.map(id => SKILL_BY_ID.get(id)?.label || id),
+    activeActions,
     knowledgeText,
     rules,
     schemas,
@@ -10961,6 +11295,7 @@ function buildSkillPromptSections({ context, snapshot, userInput = '', extraCont
 }
 
   __exports.SKILL_DEFS = SKILL_DEFS;
+  __exports.collectRoutingText = collectRoutingText;
   __exports.selectSkills = selectSkills;
   __exports.buildSkillPromptSections = buildSkillPromptSections;
 
@@ -11737,7 +12072,7 @@ function formatAttachedFetchLog(log) {
  */
 function buildConversationMessages({ context, snapshot, extraContext, history, userInput, maxHistoryTurns = 12, maxContentChars = DEFAULT_MAX_CONTENT_CHARS }) {
   const contentLimit = Number.isFinite(Number(maxContentChars)) && Number(maxContentChars) > 0 ? Number(maxContentChars) : DEFAULT_MAX_CONTENT_CHARS;
-  const skillPack = buildSkillPromptSections({ context, snapshot, userInput, extraContext });
+  const skillPack = buildSkillPromptSections({ context, snapshot, userInput, history, extraContext });
   const knowledge = skillPack.knowledgeText;
   const targetLabel = snapshot?.label || context?.labelText || '일반 화면';
   const currentText = snapshot?.content ?? '';
@@ -11866,9 +12201,13 @@ function buildConversationMessages({ context, snapshot, extraContext, history, u
   const isFreeTalk = Boolean(context?.freeTalk) || activeKind === 'general';
   const isChatInput = activeKind === 'chat_input';
   const screenHintText = context?.screenHint || (context?.screen === 'chat' ? '채팅 화면' : '');
+  const freeTalkActions = (skillPack.activeActions || []).filter(a => a !== 'patch_text' && a !== 'replace_text');
+  const freeTalkActionText = freeTalkActions.length > 0
+    ? `활성화된 전용 동작(${freeTalkActions.join(', ')})`
+    : '아래 지원 action 스키마의 전용 동작';
   const screenNote = isFreeTalk
     ? '\n- 모드: 자유대화 — 사용자가 특정 입력칸을 선택하지 않았습니다. 현재 대상이 없으므로 patch_text / replace_text는 쓸 수 없고, ' +
-      '아래 요약들을 바탕으로 질문에 답하거나 활성화된 전용 동작(update_field, update_char_settings, create_character, port_from_character, update_greeting / create_greeting / delete_greeting, create_lorebook / update_lorebook / organize_lorebook / delete_lorebook, upsert_regex / delete_regex, update_lua, create_module, create_persona / update_persona / delete_persona, update_chat_vars, update_config, import_chat)으로 바로 제안하세요. ' +
+      `아래 요약들을 바탕으로 질문에 답하거나 ${freeTalkActionText}으로 바로 제안하세요. ` +
       '채팅 말풍선과 기존 모듈 기본 필드는 전용 동작이 없으니, 해당 칸을 클릭하거나 상단에서 대상을 고른 뒤 요청하라고 안내하세요.' +
       (screenHintText ? `\n- 화면 힌트(참고용, 편집 대상 아님): ${screenHintText}` : '')
     : isChatInput
@@ -14741,6 +15080,7 @@ const { planGreetingContext, wantsGreetingText } = __require("src/greetings.js")
 const { planFieldContext, mentionedFields, AUTHOR_NOTE_FIELD } = __require("src/fields.js");
 const { summarizeChatList, mentionedChatIndex, isColdStoredChat } = __require("src/chat-transfer.js");
 const { summarizeChatVariables, previewRegexApplication, hasCbsSyntax } = __require("src/runtime-tools.js");
+const { collectRoutingText } = __require("src/skills.js");
 
 const DEFAULT_SETTINGS = {
   modelMode: 'model',
@@ -15579,8 +15919,9 @@ class RisuHelperApp {
     }, 2800);
   }
 
-  async gatherExtraContext(ctx, userInput = '') {
+  async gatherExtraContext(ctx, userInput = '', historyMessages = []) {
     const extra = {};
+    const routingText = collectRoutingText(userInput, historyMessages);
     // Chat migration: the list of this character's chats (short), and the attached reference
     // chat's state and transcript (as much as the content limit allows, newest first).
     if (this.chatList.length > 1) {
@@ -15610,9 +15951,9 @@ class RisuHelperApp {
     // chat/greeting screen for first messages), otherwise short previews when char summary is on.
     const wantGreetingText = wantsGreetingText(ctx, userInput);
     const wantFields = mentionedFields(userInput);
-    const wantChatVars = /변수|scriptstate|호감도|affection|\bhp\b|\bmp\b|스탯|상태값|플래그|카운터|\bvar\b|getvar|setvar|초기화/i.test(String(userInput || ''));
-    const wantCharRegex = ctx.screen === 'scripts' || ctx.targetKind === 'char_regex' || /정규식|regex|customscript|상태창|hud/i.test(String(userInput || ''));
-    const wantCharSettings = /로어북\s*(?:설정|예산|토큰|깊이)|토큰\s*예산|tokenBudget|스캔\s*깊이|scanDepth|재귀\s*스캔|recursiveScanning|전체\s*단어|fullWordMatching|바이어스|로짓|bias|태그|tags/i.test(String(userInput || ''));
+    const wantChatVars = /변수|scriptstate|호감도|affection|\bhp\b|\bmp\b|스탯|상태값|플래그|카운터|\bvar\b|getvar|setvar|초기화/i.test(routingText);
+    const wantCharRegex = ctx.screen === 'scripts' || ctx.targetKind === 'char_regex' || /정규식|regex|customscript|상태창|hud|스크립트|꾸며|치환/i.test(routingText);
+    const wantCharSettings = /로어북\s*(?:설정|예산|토큰|깊이)|토큰\s*예산|tokenBudget|스캔\s*깊이|scanDepth|재귀\s*스캔|recursiveScanning|전체\s*단어|fullWordMatching|바이어스|로짓|bias|태그|tags/i.test(routingText);
     if (this.settings.includeCharSummary || this.settings.includeLoreSummary || wantGreetingText || wantFields.length > 0 || wantChatVars || wantCharRegex || wantCharSettings) {
       try {
         const { char } = await this.adapter.readActiveCharacter();
@@ -15810,7 +16151,11 @@ class RisuHelperApp {
       }
     }
 
-    if (ctx.targetKind === 'persona' || ctx.screen === 'persona') {
+    const wantPersonaSummary =
+      ctx.targetKind === 'persona' ||
+      ctx.screen === 'persona' ||
+      /페르소나|persona|바인딩|bindedPersona|유저\s*(?:설정|프로필|정보|소개|캐릭터)|(?:내|플레이어|주인공)\s*(?:캐릭터\s*)?프로필/i.test(routingText);
+    if (wantPersonaSummary) {
       try {
         const p = await this.adapter.readPersonas();
         if (!p.permissionDenied) {
@@ -15831,7 +16176,7 @@ class RisuHelperApp {
       } catch {}
     }
 
-    if (/포팅|다른\s*캐릭터|캐릭터\s*목록|교차\s*포팅|port_from_character/i.test(String(userInput || ''))) {
+    if (/포팅|다른\s*캐릭터|캐릭터\s*목록|교차\s*포팅|port_from_character/i.test(routingText)) {
       try {
         const res = await this.adapter.readCharacterCatalog();
         if (!res.permissionDenied && res.catalog.length > 0) {
@@ -15847,7 +16192,7 @@ class RisuHelperApp {
   }
 
   async assembleRequestPayload(ctx, historyMessages, userInput) {
-    const extraContext = await this.gatherExtraContext(ctx, userInput);
+    const extraContext = await this.gatherExtraContext(ctx, userInput, historyMessages);
     const directMessages = buildConversationMessages({
       context: ctx,
       snapshot: this.activeSnapshot,

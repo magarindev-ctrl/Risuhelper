@@ -266,10 +266,18 @@ const DEFAULT_SD_DATA = [
   ['current location', ''],
 ];
 
+function makeChatUuid() {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return 'rh-chat-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+}
+
 /**
- * Builds a complete blank RisuAI character object matching upstream `createBlankChar()`.
+ * Builds a complete blank RisuAI character object matching upstream `createBlankChar()`,
+ * plus a UUID on `chats[0].id` required by PocketRisu/RisuBard persistence and RisuNest validation.
  */
-function buildBlankCharacterSkeleton(chaId) {
+function buildBlankCharacterSkeleton(chaId, firstChatId = '') {
   return {
     type: 'character',
     name: '',
@@ -277,6 +285,7 @@ function buildBlankCharacterSkeleton(chaId) {
     desc: '',
     notes: '',
     chats: [{
+      id: String(firstChatId || makeChatUuid()),
       message: [],
       note: '',
       name: 'Chat 1',

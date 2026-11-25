@@ -775,7 +775,7 @@ function formatAttachedFetchLog(log) {
  */
 function buildConversationMessages({ context, snapshot, extraContext, history, userInput, maxHistoryTurns = 12, maxContentChars = DEFAULT_MAX_CONTENT_CHARS }) {
   const contentLimit = Number.isFinite(Number(maxContentChars)) && Number(maxContentChars) > 0 ? Number(maxContentChars) : DEFAULT_MAX_CONTENT_CHARS;
-  const skillPack = buildSkillPromptSections({ context, snapshot, userInput, extraContext });
+  const skillPack = buildSkillPromptSections({ context, snapshot, userInput, history, extraContext });
   const knowledge = skillPack.knowledgeText;
   const targetLabel = snapshot?.label || context?.labelText || '일반 화면';
   const currentText = snapshot?.content ?? '';
@@ -904,9 +904,13 @@ function buildConversationMessages({ context, snapshot, extraContext, history, u
   const isFreeTalk = Boolean(context?.freeTalk) || activeKind === 'general';
   const isChatInput = activeKind === 'chat_input';
   const screenHintText = context?.screenHint || (context?.screen === 'chat' ? '채팅 화면' : '');
+  const freeTalkActions = (skillPack.activeActions || []).filter(a => a !== 'patch_text' && a !== 'replace_text');
+  const freeTalkActionText = freeTalkActions.length > 0
+    ? `활성화된 전용 동작(${freeTalkActions.join(', ')})`
+    : '아래 지원 action 스키마의 전용 동작';
   const screenNote = isFreeTalk
     ? '\n- 모드: 자유대화 — 사용자가 특정 입력칸을 선택하지 않았습니다. 현재 대상이 없으므로 patch_text / replace_text는 쓸 수 없고, ' +
-      '아래 요약들을 바탕으로 질문에 답하거나 활성화된 전용 동작(update_field, update_char_settings, create_character, port_from_character, update_greeting / create_greeting / delete_greeting, create_lorebook / update_lorebook / organize_lorebook / delete_lorebook, upsert_regex / delete_regex, update_lua, create_module, create_persona / update_persona / delete_persona, update_chat_vars, update_config, import_chat)으로 바로 제안하세요. ' +
+      `아래 요약들을 바탕으로 질문에 답하거나 ${freeTalkActionText}으로 바로 제안하세요. ` +
       '채팅 말풍선과 기존 모듈 기본 필드는 전용 동작이 없으니, 해당 칸을 클릭하거나 상단에서 대상을 고른 뒤 요청하라고 안내하세요.' +
       (screenHintText ? `\n- 화면 힌트(참고용, 편집 대상 아님): ${screenHintText}` : '')
     : isChatInput

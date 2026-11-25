@@ -96,6 +96,43 @@ function indexSegment(index, element) {
 }
 
 /**
+ * For non-id arrays where `after` is strictly shorter than `before`, checks whether `after` is
+ * an ordered subsequence of `before` (i.e. a pure deletion of one or more entries).
+ * Returns the ascending list of removed indices in `before`, or null if elements were rewritten.
+ */
+function findRemovedIndices(before, after) {
+  if (after.length >= before.length) return null;
+  // Match common prefix and suffix first so deleting one of two identical adjacent entries
+  // records the exact removed slot.
+  let pre = 0;
+  while (pre < after.length && deepEqual(before[pre], after[pre])) pre++;
+  let suf = 0;
+  while (
+    suf < after.length - pre &&
+    deepEqual(before[before.length - 1 - suf], after[after.length - 1 - suf])
+  ) {
+    suf++;
+  }
+  if (pre + suf === after.length) {
+    const removed = [];
+    for (let i = pre; i < before.length - suf; i++) removed.push(i);
+    return removed;
+  }
+  const removed = [];
+  let ai = pre;
+  const afterEnd = after.length - suf;
+  const beforeEnd = before.length - suf;
+  for (let bi = pre; bi < beforeEnd; bi++) {
+    if (ai < afterEnd && deepEqual(before[bi], after[ai])) {
+      ai++;
+    } else {
+      removed.push(bi);
+    }
+  }
+  return ai === afterEnd ? removed : null;
+}
+
+/**
  * Computes the operations that turn `before` into `after`.
  * Path segments: object key (string), list index (number), `{ k, v }` (list element whose
  * id-like property `k` equals `v`), or `{ i, a }` (list index plus identifying properties).
@@ -125,9 +162,16 @@ function diffValues(before, after, path = [], ops = []) {
     if (idKey) {
       const afterById = new Map(after.map(el => [el[idKey], el]));
       const beforeIds = new Set(before.map(el => el[idKey]));
-      if (before.every(el => afterById.has(el[idKey]))) {
-        for (const el of before) {
+      const survived = before.filter(el => afterById.has(el[idKey]));
+      if (survived.length > 0 || before.length === 0 || after.length === 0) {
+        for (const el of survived) {
           diffValues(el, afterById.get(el[idKey]), [...path, { k: idKey, v: el[idKey] }], ops);
+        }
+        // Emit removals in descending index order so reverse-order revert re-inserts in ascending order.
+        for (let i = before.length - 1; i >= 0; i--) {
+          if (!afterById.has(before[i][idKey])) {
+            ops.push({ op: 'remove', path: [...path], index: i, value: cloneJson(before[i]), idKey });
+          }
         }
         after.forEach((el, index) => {
           if (!beforeIds.has(el[idKey])) ops.push({ op: 'insert', path: [...path], index, value: cloneJson(el) });
@@ -142,6 +186,16 @@ function diffValues(before, after, path = [], ops = []) {
         ops.push({ op: 'insert', path: [...path], index: i, value: cloneJson(after[i]) });
       }
       return ops;
+    } else {
+      const removedIndices = findRemovedIndices(before, after);
+      if (removedIndices && removedIndices.length > 0) {
+        // Emit in descending order so reverse-order revert restores original positions cleanly.
+        for (let i = removedIndices.length - 1; i >= 0; i--) {
+          const idx = removedIndices[i];
+          ops.push({ op: 'remove', path: [...path], index: idx, value: cloneJson(before[idx]) });
+        }
+        return ops;
+      }
     }
   }
 
@@ -261,6 +315,29 @@ function revertOps(current, ops) {
         continue;
       }
       list.splice(at, 1);
+      reverted++;
+      continue;
+    }
+
+    if (op.op === 'remove') {
+      const target = resolveValue(root, op.path, anchorCache);
+      if (!target.found || !Array.isArray(target.value)) {
+        conflicts.push({ path: where, reason: '삭제했던 항목이 들어 있던 목록을 찾을 수 없습니다.' });
+        continue;
+      }
+      const list = target.value;
+      if (
+        op.idKey &&
+        isPlainObject(op.value) &&
+        typeof op.value[op.idKey] === 'string' &&
+        op.value[op.idKey] &&
+        list.some(el => isPlainObject(el) && el[op.idKey] === op.value[op.idKey])
+      ) {
+        conflicts.push({ path: where, reason: '삭제했던 항목과 같은 ID의 항목이 이미 목록에 존재합니다.' });
+        continue;
+      }
+      const at = Math.max(0, Math.min(Number.isInteger(op.index) ? op.index : list.length, list.length));
+      list.splice(at, 0, cloneJson(op.value));
       reverted++;
       continue;
     }

@@ -1,4 +1,4 @@
-const VERSION = '0.5.0';
+const VERSION = '0.5.1';
 const PLUGIN_NAME = 'risuhelper';
 const STORAGE_KEY = 'risuhelper_state_v1';
 const PRESET_STORAGE_KEY = 'risuhelper_preset_v1';

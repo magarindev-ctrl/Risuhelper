@@ -100,3 +100,71 @@ test('reverting simultaneous edits to anchor keys (key + comment + content) succ
   assert.equal(resB.conflicts.length, 0);
   assert.deepEqual(resB.value, beforeB);
 });
+
+test('deleting an entry from a plain list records a surgical remove op and undoes cleanly even after later additions', () => {
+  const before = { globalLore: [lore('A'), lore('B'), lore('C'), lore('D'), lore('E')] };
+  const after = { globalLore: [lore('A'), lore('C'), lore('D'), lore('E')] };
+  const ops = diffValues(before, after);
+  assert.equal(ops.length, 1);
+  assert.equal(ops[0].op, 'remove');
+  assert.equal(ops[0].index, 1);
+  assert.equal(ops[0].value.comment, 'B');
+
+  // User adds F after the deletion: surgical Undo restores B at index 1 and keeps F intact
+  const later = { globalLore: [lore('A'), lore('C'), lore('D'), lore('E'), lore('F')] };
+  const res = revertOps(later, JSON.parse(JSON.stringify(ops)));
+  assert.equal(res.conflicts.length, 0);
+  assert.equal(res.reverted, 1);
+  assert.deepEqual(res.value.globalLore.map(e => e.comment), ['A', 'B', 'C', 'D', 'E', 'F']);
+});
+
+test('deleting multiple non-contiguous entries in one commit restores exact original order on revert', () => {
+  const before = { globalLore: [lore('A'), lore('B'), lore('C'), lore('D'), lore('E')] };
+  const after = { globalLore: [lore('A'), lore('D')] };
+  const ops = diffValues(before, after);
+  assert.equal(ops.every(o => o.op === 'remove'), true);
+  assert.equal(ops.length, 3);
+
+  const later = { globalLore: [lore('A'), lore('D'), lore('F')] };
+  const res = revertOps(later, JSON.parse(JSON.stringify(ops)));
+  assert.equal(res.conflicts.length, 0);
+  assert.deepEqual(res.value.globalLore.map(e => e.comment), ['A', 'B', 'C', 'D', 'E', 'F']);
+});
+
+test('deleting an entry from an id-keyed list records a surgical remove op and guards against duplicate IDs on revert', () => {
+  const before = {
+    personas: [
+      { id: 'p-1', name: 'P1', personaPrompt: 'a' },
+      { id: 'p-2', name: 'P2', personaPrompt: 'b' },
+      { id: 'p-3', name: 'P3', personaPrompt: 'c' },
+    ],
+  };
+  const after = {
+    personas: [
+      { id: 'p-1', name: 'P1', personaPrompt: 'a' },
+      { id: 'p-3', name: 'P3', personaPrompt: 'c' },
+    ],
+  };
+  const ops = diffValues(before, after);
+  assert.equal(ops.length, 1);
+  assert.equal(ops[0].op, 'remove');
+  assert.equal(ops[0].idKey, 'id');
+
+  // After adding p-4, revert restores p-2 at index 1 and keeps p-4
+  const later = {
+    personas: [
+      { id: 'p-1', name: 'P1', personaPrompt: 'a' },
+      { id: 'p-3', name: 'P3', personaPrompt: 'c' },
+      { id: 'p-4', name: 'P4', personaPrompt: 'd' },
+    ],
+  };
+  const res = revertOps(later, JSON.parse(JSON.stringify(ops)));
+  assert.equal(res.conflicts.length, 0);
+  assert.deepEqual(res.value.personas.map(p => p.id), ['p-1', 'p-2', 'p-3', 'p-4']);
+
+  // If p-2 already exists again, revert reports conflict instead of duplicating
+  const dup = revertOps(before, JSON.parse(JSON.stringify(ops)));
+  assert.equal(dup.reverted, 0);
+  assert.equal(dup.conflicts.length, 1);
+});
+

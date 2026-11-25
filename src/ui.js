@@ -12,6 +12,7 @@ import { planGreetingContext, wantsGreetingText } from './greetings.js';
 import { planFieldContext, mentionedFields, AUTHOR_NOTE_FIELD } from './fields.js';
 import { summarizeChatList, mentionedChatIndex, isColdStoredChat } from './chat-transfer.js';
 import { summarizeChatVariables, previewRegexApplication, hasCbsSyntax } from './runtime-tools.js';
+import { collectRoutingText } from './skills.js';
 
 const DEFAULT_SETTINGS = {
   modelMode: 'model',
@@ -850,8 +851,9 @@ class RisuHelperApp {
     }, 2800);
   }
 
-  async gatherExtraContext(ctx, userInput = '') {
+  async gatherExtraContext(ctx, userInput = '', historyMessages = []) {
     const extra = {};
+    const routingText = collectRoutingText(userInput, historyMessages);
     // Chat migration: the list of this character's chats (short), and the attached reference
     // chat's state and transcript (as much as the content limit allows, newest first).
     if (this.chatList.length > 1) {
@@ -881,9 +883,9 @@ class RisuHelperApp {
     // chat/greeting screen for first messages), otherwise short previews when char summary is on.
     const wantGreetingText = wantsGreetingText(ctx, userInput);
     const wantFields = mentionedFields(userInput);
-    const wantChatVars = /변수|scriptstate|호감도|affection|\bhp\b|\bmp\b|스탯|상태값|플래그|카운터|\bvar\b|getvar|setvar|초기화/i.test(String(userInput || ''));
-    const wantCharRegex = ctx.screen === 'scripts' || ctx.targetKind === 'char_regex' || /정규식|regex|customscript|상태창|hud/i.test(String(userInput || ''));
-    const wantCharSettings = /로어북\s*(?:설정|예산|토큰|깊이)|토큰\s*예산|tokenBudget|스캔\s*깊이|scanDepth|재귀\s*스캔|recursiveScanning|전체\s*단어|fullWordMatching|바이어스|로짓|bias|태그|tags/i.test(String(userInput || ''));
+    const wantChatVars = /변수|scriptstate|호감도|affection|\bhp\b|\bmp\b|스탯|상태값|플래그|카운터|\bvar\b|getvar|setvar|초기화/i.test(routingText);
+    const wantCharRegex = ctx.screen === 'scripts' || ctx.targetKind === 'char_regex' || /정규식|regex|customscript|상태창|hud|스크립트|꾸며|치환/i.test(routingText);
+    const wantCharSettings = /로어북\s*(?:설정|예산|토큰|깊이)|토큰\s*예산|tokenBudget|스캔\s*깊이|scanDepth|재귀\s*스캔|recursiveScanning|전체\s*단어|fullWordMatching|바이어스|로짓|bias|태그|tags/i.test(routingText);
     if (this.settings.includeCharSummary || this.settings.includeLoreSummary || wantGreetingText || wantFields.length > 0 || wantChatVars || wantCharRegex || wantCharSettings) {
       try {
         const { char } = await this.adapter.readActiveCharacter();
@@ -1081,7 +1083,11 @@ class RisuHelperApp {
       }
     }
 
-    if (ctx.targetKind === 'persona' || ctx.screen === 'persona') {
+    const wantPersonaSummary =
+      ctx.targetKind === 'persona' ||
+      ctx.screen === 'persona' ||
+      /페르소나|persona|바인딩|bindedPersona|유저\s*(?:설정|프로필|정보|소개|캐릭터)|(?:내|플레이어|주인공)\s*(?:캐릭터\s*)?프로필/i.test(routingText);
+    if (wantPersonaSummary) {
       try {
         const p = await this.adapter.readPersonas();
         if (!p.permissionDenied) {
@@ -1102,7 +1108,7 @@ class RisuHelperApp {
       } catch {}
     }
 
-    if (/포팅|다른\s*캐릭터|캐릭터\s*목록|교차\s*포팅|port_from_character/i.test(String(userInput || ''))) {
+    if (/포팅|다른\s*캐릭터|캐릭터\s*목록|교차\s*포팅|port_from_character/i.test(routingText)) {
       try {
         const res = await this.adapter.readCharacterCatalog();
         if (!res.permissionDenied && res.catalog.length > 0) {
@@ -1118,7 +1124,7 @@ class RisuHelperApp {
   }
 
   async assembleRequestPayload(ctx, historyMessages, userInput) {
-    const extraContext = await this.gatherExtraContext(ctx, userInput);
+    const extraContext = await this.gatherExtraContext(ctx, userInput, historyMessages);
     const directMessages = buildConversationMessages({
       context: ctx,
       snapshot: this.activeSnapshot,
