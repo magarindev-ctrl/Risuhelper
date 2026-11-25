@@ -1,6 +1,6 @@
 # RisuAI 및 5대 포크 Plugin API v3 전수 커버리지 매트릭스
 
-> 기준 버전: `0.8.0` (M2 반영) · 대조 대상:
+> 기준 버전: `0.9.9` (1.0.0 RC · M0~M3 전 API 구현 완료 · 미분류 API 0개) · 대조 대상:
 > - **원본** [`kwaroran/Risuai`](https://github.com/kwaroran/Risuai)
 > - **PocketRisu** [`PocketRisu/PocketRisu`](https://github.com/PocketRisu/PocketRisu)
 > - **RisuBard** [`rpaddict/RisuBard`](https://github.com/rpaddict/RisuBard)
@@ -12,14 +12,14 @@
 
 > **검증 범위 안내**
 > - 아래 표의 `✅` / `❌`는 **6개 공개 저장소 실소스 대조 기준의 API 제공 여부**를 뜻합니다.
-> - **포크 시뮬레이션 E2E** (`npm run e2e:sim`, [`tools/e2e/run-fork-e2e.mjs`](../tools/e2e/run-fork-e2e.mjs)): 6개 호스트 프로파일(PocketRisu `_placeholder`, RisuNest `setDatabaseLite` 제약 등) 전체 자동 통과.
-> - **실제 브라우저(Chromium) 실구동 E2E**: 원본 RisuAI 핵심 흐름 확인 완료 · 포크 5종(PocketRisu · RisuBard · RisuNest · 해적리스 · Hardened)은 실호스트 실행 기록 미확보 상태이며 M3/M4에서 [`tools/e2e/run-fork-e2e.mjs`](../tools/e2e/run-fork-e2e.mjs) `--mode playwright`로 순차 기록합니다.
+> - **포크 시뮬레이션 E2E** (`npm run e2e:sim`, [`docs/e2e-results/v0.9.9-simulated-6hosts.md`](e2e-results/v0.9.9-simulated-6hosts.md)): 6개 호스트 프로파일(PocketRisu `_placeholder`·`createInlay` 차단, RisuBard BardWiki, RisuNest `query*`·`risunestPatchConversation`·`MessageButtonTarget`, 해적리스, Hardened) 전체 자동 통과.
+> - **실제 브라우저(Chromium) 실구동 E2E**: 원본 RisuAI 핵심 흐름 + 실모델 49/49 통과([`docs/eval-baselines/v0.8.0-risuai-submodel-49.md`](eval-baselines/v0.8.0-risuai-submodel-49.md)) 확인 완료 · 포크 5종 실서버 Chromium 실행은 [`tools/e2e/run-fork-e2e.mjs`](../tools/e2e/run-fork-e2e.mjs) `--mode playwright`로 기록합니다.
 
 ---
 
 ## 1. 표준 Plugin v3 API 전수표
 
-### ① 기존 핵심 (24개 — 사용 중)
+### ① 기존 핵심 (24개 — 지원 완료)
 
 | API | 범위 | 원본 | Pocket | Bard | Nest | 해적 | Hardened | RisuHelper 상태 |
 |---|---|:---:|:---:|:---:|:---:|:---:|:---:|---|
@@ -37,53 +37,53 @@
 | `getFetchLogs` | 전역 로그 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | **지원** (수동 1회성 옵트인 + 비밀값 마스킹) |
 | `sendChat` | 현재 채팅 전송 | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | **지원** (확인 팝업 후 전송) |
 | `getRootDocument` | 호스트 DOM | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | **지원** (포커스 감지·도킹) |
-| `getColorScheme` | 전역 테마 | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | **지원** (UI 테마 자동 동기화) |
-| `pluginStorage` | 플러그인 저장소 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | **지원** (설정·프리셋·Undo 영속화) |
-| `registerButton` | 호스트 버튼 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | **지원** |
+| `getColorScheme` | 전역 테마 | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | **지원** (UI 테마 동기화 + `update_theme` Undo) |
+| `pluginStorage` | 플러그인 저장소 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | **지원** (설정·프리셋·Undo·상주 확장 영속화) |
+| `registerButton` | 호스트 버튼 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | **지원** (햄버거 + RisuNest `MessageButtonTarget`) |
 | `registerSetting` | 호스트 설정 탭 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | **지원** |
 | `unregisterUIPart` | UI 정리 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | **지원** |
 | `showContainer` / `hideContainer` | 패널 표시 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | **지원** |
-| `onUnload` | 라이프사이클 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | **지원** |
+| `onUnload` | 라이프사이클 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | **지원** (상주 확장·리스너·UI 100% 해제) |
 
-### ② 읽기 · 진단 도구 (10개 — 전원 구현 완료)
+### ② 읽기 · 진단 도구 (10개 — 전원 지원 완료)
 
-| API | 범위 | 원본 | Pocket | Bard | Nest | 해적 | Hardened | 상태 / 마일스톤 |
+| API | 범위 | 원본 | Pocket | Bard | Nest | 해적 | Hardened | 상태 |
 |---|---|:---:|:---:|:---:|:---:|:---:|:---:|---|
-| `getRuntimeInfo` | 호스트 런타임 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | **지원 (`0.7.0`)** — `host-capabilities.js` 탐지 + `host_info` 도구 |
-| `apiVersion` / `apiVersionCompatibleWith` | 버전 정보 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | **지원 (`0.7.0`)** — 기능 탐지 및 `host_info` 메타데이터 |
+| `getRuntimeInfo` | 호스트 런타임 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | **지원 (`0.7.0`)** — `host-capabilities.js` 탐지 + `host_info` |
+| `apiVersion` / `apiVersionCompatibleWith` | 버전 정보 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | **지원 (`0.7.0`)** — 기능 탐지 및 `host_info` |
 | `getCharacterFromIndex` | 임의 캐릭터 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | **지원 (`0.7.0`)** — 경계 없는 타 캐릭터 읽기·포팅·`read_item` |
 | `getCurrentLorebookEntries` | 현재 채팅 로어북 | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | **지원 (`0.7.0`)** — `active_lorebook` 진단 도구 |
-| `getTextTheme` | 전역 테마 | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | **지원 (`0.7.0`)** — `host_info` 조회 (**M3 `0.9.0`** 테마 Undo 연동) |
+| `getTextTheme` | 전역 테마 | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | **지원 (`0.9.9`)** — `host_info` + `read_item(theme)` + Undo |
 | `getTranslationCache` | 전역 번역 캐시 | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | **지원 (`0.7.0`)** — `search_translation` 도구 |
 | `searchTranslationCache` | 전역 번역 캐시 | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | **지원 (`0.7.0`)** — `search_translation` 도구 |
 | `readImage` | 에셋 조회 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | **지원 (`0.7.0`)** — `inspect_assets` 메타/존재 확인 |
 | `readInlay` | 인레이 조회 | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | **지원 (`0.7.0`)** — `inspect_assets` 메타 확인 |
 
-### ③ 승인형 쓰기 동작 (9개)
+### ③ 승인형 쓰기 동작 (9개 — 전원 지원 완료)
 
-| API | 범위 | 원본 | Pocket | Bard | Nest | 해적 | Hardened | 상태 / 마일스톤 |
+| API | 범위 | 원본 | Pocket | Bard | Nest | 해적 | Hardened | 상태 |
 |---|---|:---:|:---:|:---:|:---:|:---:|:---:|---|
 | `setCharacterToIndex` | 임의 캐릭터 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | **지원 (`0.6.0`)** — `targetCharIndex` 경계 없는 타 캐릭터 수정·Undo |
-| `changeColorScheme` | 전역 테마 | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | **M3 (`0.9.0`)** — 승인 카드 + Undo |
-| `setColorScheme` | 전역 테마 | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | **M3 (`0.9.0`)** — 승인 카드 + Undo |
-| `changeTextTheme` | 전역 테마 | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | **M3 (`0.9.0`)** — 승인 카드 + Undo |
-| `setCustomTextTheme` | 전역 테마 | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | **M3 (`0.9.0`)** — 승인 카드 + Undo |
-| `saveAsset` | 에셋 등록 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | **M3 (`0.9.0`)** — 에셋 등록 카드 |
-| `createInlay` | 인레이 등록 | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | **M3 (`0.9.0`)** — `capabilities.createInlay` 게이팅 (원본 전용) |
-| `checkCharOrder` | 캐릭터 정렬 복구 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | **M3 (`0.9.0`)** — 캐릭터 목록 정합성 복구 |
-| `setChatPanel` | 채팅 화면 HUD | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | **M3 (`0.9.0`)** — 정화된 HTML/CBS 라이브 HUD·진단 패널 |
+| `changeColorScheme` | 전역 테마 | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | **지원 (`0.9.9`)** — `update_theme` 승인 카드 + 충돌 감지 Undo |
+| `setColorScheme` | 전역 테마 | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | **지원 (`0.9.9`)** — `update_theme` 커스텀 스킴 + Undo |
+| `changeTextTheme` | 전역 테마 | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | **지원 (`0.9.9`)** — `update_theme` 텍스트 테마 + Undo |
+| `setCustomTextTheme` | 전역 테마 | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | **지원 (`0.9.9`)** — `update_theme` 커스텀 텍스트 테마 + Undo |
+| `saveAsset` | 에셋 등록 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | **지원 (`0.9.9`)** — `register_asset` (캐릭터·모듈 에셋 + Undo) |
+| `createInlay` | 인레이 등록 | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | **지원 (`0.9.9`)** — `register_asset(inlay)` · `capabilities.createInlay` 게이팅 (원본 전용) |
+| `checkCharOrder` | 캐릭터 정렬 복구 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | **지원 (`0.9.9`)** — `repair_workspace` 일괄 수리 카드 + Undo |
+| `setChatPanel` | 채팅 화면 HUD | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | **지원 (`0.9.9`)** — `set_chat_panel` HTML/CBS 보안 정화 HUD + 원클릭 닫기·Undo |
 
-### ④ 선언형 상주 확장 (14개 — 임의 JS 실행 없음, 설정값/규칙 기반)
+### ④ 선언형 상주 확장 (14개 — 전원 지원 완료, 임의 JS 실행 없음)
 
-| API | 범위 | 원본 | Pocket | Bard | Nest | 해적 | Hardened | 상태 / 마일스톤 |
+| API | 범위 | 원본 | Pocket | Bard | Nest | 해적 | Hardened | 상태 |
 |---|---|:---:|:---:|:---:|:---:|:---:|:---:|---|
-| `addRisuScriptHandler` / `removeRisuScriptHandler` | 전역 스크립트 훅 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | **M3 (`0.9.2`)** — 선언형 전역 정규식/치환 규칙 |
-| `addRisuReplacer` / `removeRisuReplacer` | 전역 요청/응답 치환 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | **M3 (`0.9.2`)** — 선언형 치환 규칙 |
-| `addRisuChatListener` / `removeRisuChatListener` | 응답 완료 감시 | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | **M3 (`0.9.2`)** — 태그/변수 이상 자동 점검 알림 |
-| `registerBodyIntercepter` / `unregisterBodyIntercepter` | 요청 본문 패치 | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | **M3 (`0.9.2`)** — 조건부 JSON 패치 규칙 + 드라이런 |
-| `registerMCP` / `unregisterMCP` | MCP 읽기 도구 제공 | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | **M3 (`0.9.2`)** — RisuHelper Read-Only 도구 노출 |
-| `addTTSPreprocessor` / `addTTSPostprocessor` | TTS 전/후처리 | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | **M3 (`0.9.2`)** — 선언형 지문/태그 정리 규칙 |
-| `addPluginChannelListener` / `postPluginChannelMessage` | 플러그인 간 통신 | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | **M3 (`0.9.2`)** — V3 플러그인 연동 채널 |
+| `addRisuScriptHandler` / `removeRisuScriptHandler` | 전역 스크립트 훅 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | **지원 (`0.9.9`)** — `manage_extensions` (`script_handler`) + 드라이런 + 언로드 해제 |
+| `addRisuReplacer` / `removeRisuReplacer` | 전역 요청/응답 치환 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | **지원 (`0.9.9`)** — `manage_extensions` (`replacer`) + 언로드 해제 |
+| `addRisuChatListener` / `removeRisuChatListener` | 응답 완료 감시 | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | **지원 (`0.9.9`)** — `manage_extensions` (`chat_listener`) 태그/변수 이상 알림 |
+| `registerBodyIntercepter` / `unregisterBodyIntercepter` | 요청 본문 패치 | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | **지원 (`0.9.9`)** — `manage_extensions` (`body_intercepter`) 비밀키 차단 + 드라이런 |
+| `registerMCP` / `unregisterMCP` | MCP 읽기 도구 제공 | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | **지원 (`0.9.9`)** — `manage_extensions` (`mcp_server`) Read-Only 진단 도구 노출 |
+| `addTTSPreprocessor` / `addTTSPostprocessor` | TTS 전/후처리 | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | **지원 (`0.9.9`)** — `manage_extensions` (`tts_processor`) 지문/태그/코드블록 정리 |
+| `addPluginChannelListener` / `postPluginChannelMessage` | 플러그인 간 통신 | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | **지원 (`0.9.9`)** — `manage_extensions` (`plugin_channel`) V3 연동 채널 |
 
 ### ⑤ 플러그인 내부 · UX 전용 (13개 — 모델 미노출)
 
@@ -107,23 +107,23 @@
 
 ---
 
-## 2. 포크 전용 API 매트릭스
+## 2. 포크 전용 API 매트릭스 (전원 지원 완료)
 
-| 포크 | API | 범위 | 상태 / 마일스톤 |
+| 포크 | API | 범위 | 상태 |
 |---|---|---|---|
-| **RisuBard** | `bardWiki.getContext` (`_getBardWikiContext`) | 현재 스코프 | **M3 (`0.9.3`)** — BardWiki 읽기 도구 |
-| **RisuBard** | `bardWiki.getDocuments` (`_getBardWikiDocuments`) | 현재 스코프 | **M3 (`0.9.3`)** — BardWiki 문서 목록·검색 |
-| **RisuBard** | `bardWiki.saveDocument` (`_saveBardWikiDocument`) | 현재 스코프 | **M3 (`0.9.3`)** — 승인 카드 + Undo |
-| **RisuBard** | `bardWiki.setContextMode` (`_setBardWikiContextMode`) | 현재 스코프 | **M3 (`0.9.3`)** — 승인 카드 + Undo |
-| **RisuBard** | `bardWiki.setGrade` (`_setBardWikiGrade`) | 현재 스코프 | **M3 (`0.9.3`)** — 승인 카드 + Undo |
-| **RisuBard** | `bardWiki.trashDocument` (`_trashBardWikiDocument`) | 현재 스코프 | **M3 (`0.9.3`)** — 확인 창 + Undo |
+| **RisuBard** | `bardWiki.getContext` (`_getBardWikiContext`) | 현재 스코프 | **지원 (`0.9.9`)** — `read_bard_wiki` 읽기 도구 |
+| **RisuBard** | `bardWiki.getDocuments` (`_getBardWikiDocuments`) | 현재 스코프 | **지원 (`0.9.9`)** — `read_bard_wiki` 문서 목록·검색 |
+| **RisuBard** | `bardWiki.saveDocument` (`_saveBardWikiDocument`) | 현재 스코프 | **지원 (`0.9.9`)** — `manage_bard_wiki` 승인 카드 + Undo |
+| **RisuBard** | `bardWiki.setContextMode` (`_setBardWikiContextMode`) | 현재 스코프 | **지원 (`0.9.9`)** — `manage_bard_wiki` 승인 카드 + Undo |
+| **RisuBard** | `bardWiki.setGrade` (`_setBardWikiGrade`) | 현재 스코프 | **지원 (`0.9.9`)** — `manage_bard_wiki` 승인 카드 + Undo |
+| **RisuBard** | `bardWiki.trashDocument` (`_trashBardWikiDocument`) | 현재 스코프 | **지원 (`0.9.9`)** — `manage_bard_wiki` 확인 창 + Undo |
 | **RisuNest** | `queryCharacters` | 전역 (페이지네이션) | **지원 (`0.6.0`)** — `readCharacterCatalog` 고속 경로 |
-| **RisuNest** | `queryConversations` / `queryConversationMessages` | 임의 캐릭터·채팅 | **M1 (`0.7.0`)** / **M3 (`0.9.3`)** — `list_items`·`read_chat` 고속 경로 |
-| **RisuNest** | `risunestReadConversationContext` / `risunestPatchConversation` | 임의 채팅 패치 | **M3 (`0.9.3`)** — RisuNest 대화 정밀 패치 |
-| **RisuNest** | `risunestListHostTools` / `risunestCallHostTool` | 호스트 툴 | **M3 (`0.9.3`)** — 읽기 전용 호스트 툴 연동 |
-| **RisuNest** | `risunestOnChatView` / `risunestOnGenerationEnd` | 라이프사이클 | **M3 (`0.9.3`)** — 포커스·응답 완료 이벤트 최적화 |
-| **RisuNest** | `registerButton` (`MessageButtonTarget`) | 메시지별 버튼 | **M3 (`0.9.3`)** — 말풍선 원클릭 편집/디버깅 |
-| **RisuNest** | `save(name, bytes)` | 파일 다운로드 | **M3 (`0.9.3`)** — 진단 리포트/프리셋 내보내기 |
+| **RisuNest** | `queryConversations` / `queryConversationMessages` | 임의 캐릭터·채팅 | **지원 (`0.9.9`)** — `list_items(chat)`·`read_chat` 고속 경로 |
+| **RisuNest** | `risunestReadConversationContext` / `risunestPatchConversation` | 임의 채팅 패치 | **지원 (`0.9.9`)** — `patch_risunest_conversation` + 충돌 감지 Undo |
+| **RisuNest** | `risunestListHostTools` / `risunestCallHostTool` | 호스트 툴 | **지원 (`0.9.9`)** — `inspect_host_tools` 읽기 전용 목록 조회(자동 쓰기 차단) |
+| **RisuNest** | `risunestOnChatView` / `risunestOnGenerationEnd` | 라이프사이클 | **지원 (`0.9.9`)** — 패널 실시간 컨텍스트 동기화 + 언로드 정리 |
+| **RisuNest** | `registerButton` (`MessageButtonTarget`) | 메시지별 버튼 | **지원 (`0.9.9`)** — 말풍선 원클릭 RisuHelper 편집 버튼 |
+| **RisuNest** | `save(name, bytes)` | 파일 다운로드 | **지원 (`0.9.9`)** — `💾 진단 리포트 저장` 내보내기 |
 
 ---
 

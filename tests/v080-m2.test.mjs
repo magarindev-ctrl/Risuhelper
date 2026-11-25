@@ -22,11 +22,21 @@ const FULL_CAPS = {
   getFetchLogs: true,
   getCurrentLorebookEntries: true,
   translationCache: true,
+  colorScheme: true,
+  textTheme: true,
+  setChatPanel: true,
+  saveAsset: true,
+  createInlay: true,
+  checkCharOrder: true,
+  bardWiki: true,
+  risunestQuery: true,
+  risunestPatch: true,
+  risunestHostTools: true,
 };
 
-test('M2 100% reachability: every VALID_ACTION belongs to exactly one skill, every skill satisfies metadata/maxChars, and capability gating hides unsupported skills across L0/L1/L2', () => {
+test('M2/M3 100% reachability: every VALID_ACTION belongs to exactly one skill, every skill satisfies metadata/maxChars, and capability gating hides unsupported skills across L0/L1/L2', () => {
   const actions = [...VALID_ACTIONS];
-  assert.equal(actions.length, 24);
+  assert.equal(actions.length, 36);
 
   const check = validateSkillRegistry(actions);
   assert.equal(check.ok, true, `skill registry issues:\n- ${check.issues.join('\n- ')}`);
@@ -108,8 +118,8 @@ test('M2 prompt-schema consistency: every action name mentioned in system prompt
   }
 });
 
-test('M2 224-utterance Korean routing corpus achieves >=95% L0 recall and 100% combined L0+L2 reachability', () => {
-  assert.ok(ROUTING_CORPUS.length >= 200, `corpus must have >=200 utterances, got ${ROUTING_CORPUS.length}`);
+test('M2/M3 336-utterance Korean routing corpus achieves >=95% L0 recall and 100% combined L0+L2 reachability', () => {
+  assert.ok(ROUTING_CORPUS.length >= 300, `corpus must have >=300 utterances, got ${ROUTING_CORPUS.length}`);
 
   // Verify every built-in skill is well represented in the corpus
   const countsBySkill = new Map();
@@ -157,7 +167,7 @@ test('M2 224-utterance Korean routing corpus achieves >=95% L0 recall and 100% c
   assert.equal(combinedRecall, 100, `combined L0+L2 reachability must be 100%, got ${combinedRecall.toFixed(1)}%`);
 });
 
-test('M2 per-skill evaluation coverage: every one of the 14 built-in skills has >=3 eval scenarios (>=2 positive, >=1 guard)', () => {
+test('M2/M3 per-skill evaluation coverage: every one of the 21 built-in skills has >=3 eval scenarios (>=2 positive, >=1 guard)', () => {
   const stats = new Map(SKILL_DEFS.map(d => [d.id, { positive: 0, guard: 0 }]));
   for (const sc of EVAL_SCENARIOS) {
     assert.ok(sc.skillId && stats.has(sc.skillId), `scenario ${sc.id} missing valid skillId (${sc.skillId})`);
@@ -171,7 +181,7 @@ test('M2 per-skill evaluation coverage: every one of the 14 built-in skills has 
   }
 });
 
-test('M2 system prompt size budget stays strictly at or below v0.5.1 level (<=9,232 chars avg) even with 12 Read-Only tools & L1 catalog enabled', async () => {
+test('M2/M3 system prompt size budget stays strictly at or below v0.5.1 level (<=9,232 chars avg) even with 21 skills & 14 Read-Only tools enabled', async () => {
   const V051_AVG_SYS_CHARS = 9232;
   const allSys = [];
   for (const sc of EVAL_SCENARIOS) {

@@ -1,8 +1,9 @@
-const VERSION = '0.8.0';
+const VERSION = '0.9.9';
 const PLUGIN_NAME = 'risuhelper';
 const STORAGE_KEY = 'risuhelper_state_v1';
 const PRESET_STORAGE_KEY = 'risuhelper_preset_v1';
 const UNDO_STORAGE_KEY = 'risuhelper_undo_v1';
+const EXTENSIONS_STORAGE_KEY = 'risuhelper_extensions_v1';
 
 /**
  * Editable configuration keys present in RisuAI's allowedDbKeys
@@ -109,6 +110,7 @@ export {
   STORAGE_KEY,
   PRESET_STORAGE_KEY,
   UNDO_STORAGE_KEY,
+  EXTENSIONS_STORAGE_KEY,
   DEFAULT_MAX_CONTENT_CHARS,
   DEFAULT_GHOSTWRITE_CHAT_CHARS,
   DEFAULT_GHOSTWRITE_MAX_MESSAGES,

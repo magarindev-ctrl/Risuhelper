@@ -322,10 +322,10 @@ test('L0/L1/L2 built-in skill router and tool catalog adapt to capabilities and 
   assert.doesNotMatch(msgNoTools[0].content, /risuhelper-tool/);
 });
 
-test('all 12 Read-Only tools work safely, unlock full-text flags, respect opt-in log guard, and never invoke write APIs', async () => {
+test('all Read-Only tools work safely, unlock full-text flags, respect opt-in log guard, and never invoke write APIs', async () => {
   const writes = [];
   const { adapter, parseCalls } = makeRichHostFixture({ writeSpy: (fn) => writes.push(fn) });
-  assert.equal(READ_TOOL_DEFS.length, 12);
+  assert.equal(READ_TOOL_DEFS.length, 14);
 
   // 1. load_skill
   const r1 = await executeReadTool(adapter, { tool: 'load_skill', args: { skillIds: ['module_create'] } });

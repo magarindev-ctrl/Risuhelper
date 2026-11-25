@@ -152,7 +152,7 @@ async function bootSimulatedFork(hostId, state, { scriptedReplies }) {
   const bodyText = () => doc.body.textContent;
   const unload = async () => { if (onUnloadRef.fn) await onUnloadRef.fn(); };
 
-  return { ui: { doc, findAll, buttons, click, clickConfirm, send, bodyText, unload }, llmCalls };
+  return { ui: { doc, findAll, buttons, click, clickConfirm, send, bodyText, unload, registeredButtons }, llmCalls };
 }
 
 async function runSimulatedHost(hostId) {
@@ -175,6 +175,7 @@ async function runSimulatedHost(hostId) {
   }
 
   for (const sc of E2E_SCENARIOS) {
+    if (Array.isArray(sc.onlyHosts) && !sc.onlyHosts.includes(hostId)) continue;
     const t0 = Date.now();
     const state = createE2eState();
     let ui = null;
@@ -182,7 +183,7 @@ async function runSimulatedHost(hostId) {
       const booted = await bootSimulatedFork(hostId, state, { scriptedReplies: sc.scriptedReplies });
       ui = booted.ui;
       await ui.send(sc.prompt);
-      await sc.verify({ ui, state, llmCalls: booted.llmCalls, assert });
+      await sc.verify({ ui, state, llmCalls: booted.llmCalls, assert, hostId });
       results.push({ id: sc.id, title: sc.title, ok: true, ms: Date.now() - t0, error: '' });
     } catch (err) {
       results.push({ id: sc.id, title: sc.title, ok: false, ms: Date.now() - t0, error: err?.message || String(err) });

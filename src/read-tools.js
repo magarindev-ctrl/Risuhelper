@@ -17,6 +17,7 @@ import {
   previewRegexApplication,
   hasCbsSyntax,
 } from './runtime-tools.js';
+import { getBardWikiApi } from './m3-actions.js';
 
 const MAX_TOOLS_PER_CALL = 6;
 const MAX_TOOL_RESULT_CHARS = 10000;
@@ -109,6 +110,20 @@ const READ_TOOL_DEFS = [
     argsHint: 'query',
     requiresCapabilities: ['translationCache'],
   },
+  {
+    id: 'read_bard_wiki',
+    label: 'BardWiki 조회',
+    summary: 'RisuBard BardWiki 문서 목록·컨텍스트 조회',
+    argsHint: 'query?,documentId?',
+    requiresCapabilities: ['bardWiki'],
+  },
+  {
+    id: 'inspect_host_tools',
+    label: 'RisuNest 호스트 툴 조회',
+    summary: 'RisuNest가 노출하는 호스트 툴 목록 읽기 전용 확인',
+    argsHint: '',
+    requiresCapabilities: ['risunestHostTools'],
+  },
 ];
 
 const READ_TOOL_BY_ID = new Map(READ_TOOL_DEFS.map(t => [t.id, t]));
@@ -158,6 +173,8 @@ function describeToolCall(call) {
     case 'read_fetch_log': return '요청 로그 조회';
     case 'host_info': return '호스트 환경 확인';
     case 'search_translation': return `번역 캐시 검색(${String(args.query || '').slice(0, 16)})`;
+    case 'read_bard_wiki': return 'BardWiki 문서·컨텍스트 조회';
+    case 'inspect_host_tools': return 'RisuNest 호스트 툴 목록 조회';
     default: return READ_TOOL_BY_ID.get(tool)?.label || tool || '도구 실행';
   }
 }
@@ -507,6 +524,107 @@ async function runReadItem(adapter, args, unlocks) {
     return { ok: true, kind, config: cfg };
   }
 
+  if (kind === 'memory') {
+    const { chat, char, charIndex, chatIndex } = await adapter._resolveTargetChat(chatHint, null, '메모리 조회');
+    return {
+      ok: true,
+      kind,
+      charIndex,
+      charName: char.name || '(무제)',
+      chatIndex,
+      chatName: chatName(chat, chatIndex),
+      supaMemoryData: clipText(chat.supaMemoryData || '', 4000).text,
+      hypaV3Summaries: Array.isArray(chat.hypaV3Data?.summaries)
+        ? chat.hypaV3Data.summaries.slice(0, 30).map((s, i) => ({
+            summaryIndex: i,
+            isImportant: Boolean(s?.isImportant),
+            tags: Array.isArray(s?.tags) ? s.tags : [],
+            text: clipText(s?.text || '', 800).text,
+          }))
+        : [],
+      hypaV2Chunks: Array.isArray(chat.hypaV2Data?.chunks)
+        ? chat.hypaV2Data.chunks.slice(0, 30).map((c, i) => ({
+            summaryIndex: i,
+            text: clipText(c?.text || '', 800).text,
+          }))
+        : [],
+    };
+  }
+
+  if (kind === 'onboarding') {
+    const { char, charIndex } = await adapter._resolveTargetCharacter(charHint, null, '온보딩 조회');
+    return {
+      ok: true,
+      kind,
+      charIndex,
+      charName: char.name || '(무제)',
+      onboarding: char.onboarding || null,
+    };
+  }
+
+  if (kind === 'group') {
+    const { char, charIndex } = await adapter._resolveTargetCharacter(charHint, null, '그룹챗 조회');
+    return {
+      ok: true,
+      kind,
+      charIndex,
+      isGroup: char?.type === 'group',
+      name: char?.name || '(무제)',
+      characters: Array.isArray(char?.characters) ? char.characters : [],
+      characterActive: Array.isArray(char?.characterActive) ? char.characterActive : [],
+      characterTalks: Array.isArray(char?.characterTalks) ? char.characterTalks : [],
+      orderByOrder: Boolean(char?.orderByOrder),
+      useCharacterLore: Boolean(char?.useCharacterLore),
+      autoMode: Boolean(char?.autoMode),
+    };
+  }
+
+  if (kind === 'chat_folders') {
+    const { char, charIndex } = await adapter._resolveTargetCharacter(charHint, null, '채팅 폴더 조회');
+    return {
+      ok: true,
+      kind,
+      charIndex,
+      charName: char?.name || '(무제)',
+      chatFolders: Array.isArray(char?.chatFolders) ? char.chatFolders : [],
+      chats: (Array.isArray(char?.chats) ? char.chats : []).map((c, i) => ({
+        chatIndex: i,
+        id: c?.id || null,
+        name: chatName(c, i),
+        folderId: c?.folderId || null,
+      })),
+    };
+  }
+
+  if (kind === 'theme') {
+    const db = (await adapter.readDbSubset(['colorSchemeName', 'textTheme', 'theme', 'customCSS', 'guiHTML'])) || {};
+    let colorScheme = null;
+    let textTheme = null;
+    try { if (adapter.hasCapability('colorScheme')) colorScheme = await adapter.api?.getColorScheme?.(); } catch {}
+    try { if (adapter.hasCapability('textTheme')) textTheme = await adapter.api?.getTextTheme?.(); } catch {}
+    return {
+      ok: true,
+      kind,
+      colorSchemeName: db.colorSchemeName ?? null,
+      textThemeName: db.textTheme ?? null,
+      theme: db.theme ?? null,
+      colorScheme,
+      textTheme,
+      customCSS: clipText(db.customCSS || '', 2000).text,
+      guiHTML: clipText(db.guiHTML || '', 2000).text,
+      activeChatPanel: adapter._chatPanelState || null,
+    };
+  }
+
+  if (kind === 'extensions') {
+    return {
+      ok: true,
+      kind,
+      rules: adapter.extensionRuntime ? adapter.extensionRuntime.list() : [],
+      recentAlerts: adapter.extensionRuntime ? adapter.extensionRuntime.recentAlerts.slice(-5) : [],
+    };
+  }
+
   return { ok: false, error: `알 수 없는 read_item kind입니다: ${kind}` };
 }
 
@@ -608,22 +726,64 @@ async function runListItems(adapter, args) {
   }
 
   if (kind === 'chat') {
-    const { char, activeChatIndex, crossCharacter } = await adapter._resolveTargetCharacter(charHint, null, '채팅 목록 조회');
+    const { char, charIndex, activeChatIndex, crossCharacter } = await adapter._resolveTargetCharacter(charHint, null, '채팅 목록 조회');
     const curIdx = !crossCharacter && Number.isInteger(activeChatIndex) ? activeChatIndex : (char.chatPage ?? 0);
+    // RisuNest fast path: paginated queryConversations without loading every full chat payload
+    if (adapter.hasCapability('risunestQuery') && typeof adapter.api?.queryConversations === 'function') {
+      try {
+        const res = await adapter.api.queryConversations({
+          charId: char?.chaId || undefined,
+          charIndex,
+          offset,
+          limit,
+          query: q || undefined,
+        });
+        const items = Array.isArray(res) ? res : (Array.isArray(res?.items) ? res.items : null);
+        if (items) {
+          const rows = items.map((c, idx) => ({
+            chatIndex: Number.isInteger(c?.chatIndex) ? c.chatIndex : (offset + idx),
+            id: c?.id || c?.conversationId || null,
+            name: c?.name || `채팅 ${offset + idx + 1}`,
+            messages: Number(c?.messageCount ?? c?.messages ?? 0),
+            folderId: c?.folderId || null,
+            coldStored: Boolean(c?.coldStored),
+            current: (Number.isInteger(c?.chatIndex) ? c.chatIndex : offset + idx) === curIdx,
+          }));
+          return {
+            ok: true,
+            kind,
+            usedQueryConversations: true,
+            charName: char.name || '(무제)',
+            total: Number(res?.total ?? rows.length),
+            offset,
+            limit,
+            hasMore: Boolean(res?.hasMore ?? (offset + rows.length < Number(res?.total ?? rows.length))),
+            items: rows,
+          };
+        }
+      } catch {}
+    }
     const chats = listChats(char, curIdx).map(c => ({
       chatIndex: c.index,
+      id: char.chats?.[c.index]?.id || null,
       name: c.name,
+      folderId: char.chats?.[c.index]?.folderId || null,
       messages: c.messages,
       coldStored: c.coldStored,
       current: c.current,
     }));
-    return { ok: true, kind, charName: char.name || '(무제)', ...paginate(chats) };
+    return { ok: true, kind, charName: char.name || '(무제)', chatFolders: char.chatFolders || [], ...paginate(chats) };
   }
 
   if (kind === 'character') {
-    const res = await adapter.readCharacterCatalog();
+    const res = await adapter.readCharacterCatalog({ maxItems: 500 });
     if (res.permissionDenied) return { ok: false, error: 'DB 읽기 권한이 없습니다.' };
     return { ok: true, kind, usedQueryCharacters: Boolean(res.usedQueryCharacters), ...paginate(res.catalog) };
+  }
+
+  if (kind === 'extension' || kind === 'extensions') {
+    const rows = adapter.extensionRuntime ? adapter.extensionRuntime.list() : [];
+    return { ok: true, kind: 'extensions', ...paginate(rows) };
   }
 
   return { ok: false, error: `알 수 없는 list_items kind입니다: ${kind}` };
@@ -648,7 +808,32 @@ async function runReadChat(adapter, args) {
   if (isColdStoredChat(chat)) {
     return { ok: false, coldStored: true, error: '콜드 스토리지에 보관된 채팅입니다. RisuAI에서 먼저 열어 복원한 뒤 조회해 주세요.' };
   }
-  const messages = Array.isArray(chat.message) ? chat.message : [];
+
+  // RisuNest fast path: paginated queryConversationMessages when chat.message is not fully hydrated
+  let messages = Array.isArray(chat.message) ? chat.message : [];
+  let usedQueryMessages = false;
+  if (
+    adapter.hasCapability('risunestQuery') &&
+    typeof adapter.api?.queryConversationMessages === 'function' &&
+    (args.conversationId || chat.id)
+  ) {
+    try {
+      const qRes = await adapter.api.queryConversationMessages({
+        conversationId: args.conversationId || chat.id,
+        charIndex,
+        chatIndex,
+        from: optionalInt(args.from),
+        to: optionalInt(args.to),
+        tail: optionalInt(args.tail),
+      });
+      const qItems = Array.isArray(qRes) ? qRes : (Array.isArray(qRes?.items) ? qRes.items : null);
+      if (qItems && qItems.length > 0 && messages.length === 0) {
+        messages = qItems;
+        usedQueryMessages = true;
+      }
+    } catch {}
+  }
+
   const maxChars = Math.max(500, Math.min(12000, Number(args.maxChars) || 8000));
 
   let startIdx;
@@ -671,17 +856,32 @@ async function runReadChat(adapter, args) {
   let usedChars = 0;
   let truncated = false;
   for (let i = startIdx; i < endIdx; i++) {
-    const text = String(messages[i]?.data ?? '');
-    const role = messages[i]?.role === 'user' ? '유저' : '캐릭터';
+    const m = messages[i] || {};
+    const text = String(m.data ?? '');
+    const role = m.role === 'user' ? '유저' : '캐릭터';
+    const meta = {
+      ...(m.chatId ? { chatId: m.chatId } : {}),
+      ...(m.disabled ? { disabled: m.disabled } : {}),
+      ...(m.bookmarked || m.isComment ? { bookmarked: true } : {}),
+      ...(m.generationInfo && typeof m.generationInfo === 'object'
+        ? {
+            generationInfo: {
+              model: m.generationInfo.model || null,
+              inputTokens: m.generationInfo.generationId ? undefined : m.generationInfo.inputTokens,
+              outputTokens: m.generationInfo.outputTokens,
+            },
+          }
+        : {}),
+    };
     if (usedChars + text.length > maxChars) {
       const rem = maxChars - usedChars;
       if (rem > 80) {
-        slice.push({ n: i + 1, role, text: text.slice(0, rem) + '…', truncated: true });
+        slice.push({ n: i + 1, messageIndex: i, role, ...meta, text: text.slice(0, rem) + '…', truncated: true });
       }
       truncated = true;
       break;
     }
-    slice.push({ n: i + 1, role, text });
+    slice.push({ n: i + 1, messageIndex: i, role, ...meta, text });
     usedChars += text.length;
   }
 
@@ -693,13 +893,17 @@ async function runReadChat(adapter, args) {
     charIndex,
     charName: char.name || '(무제)',
     chatIndex,
+    chatId: chat.id || null,
     chatName: chatName(chat, chatIndex),
+    usedQueryMessages,
     totalMessages: messages.length,
     range: slice.length > 0 ? `${slice[0].n}~${slice[slice.length - 1].n}` : '없음',
     truncated,
     authorNote: clipText(chat.note || '', 1500).text,
     variablesCount: vars.total,
     memorySummaries: memories,
+    hypaV3Count: Array.isArray(chat.hypaV3Data?.summaries) ? chat.hypaV3Data.summaries.length : 0,
+    hypaV2Count: Array.isArray(chat.hypaV2Data?.chunks) ? chat.hypaV2Data.chunks.length : 0,
     messages: slice,
   };
 }
@@ -892,6 +1096,16 @@ async function runAuditWorkspace(adapter, args) {
       });
       const noteErr = checkCbsBalance(chat.note);
       if (noteErr) pushFinding('warn', 'cbs', '작가의 노트', noteErr);
+    } catch {}
+    try {
+      const { char: c } = await adapter._resolveTargetCharacter(charHint, null, '진단');
+      if (Array.isArray(c?.chats) && c.chats.some(ch => ch?.folderId)) {
+        const folderIds = new Set((Array.isArray(c.chatFolders) ? c.chatFolders : []).map(f => f?.id).filter(Boolean));
+        const orphanChats = c.chats.filter(ch => ch?.folderId && !folderIds.has(ch.folderId));
+        if (orphanChats.length > 0) {
+          pushFinding('warn', 'chat_folders', '채팅 폴더 참조', `존재하지 않는 폴더 ID를 가리키는 채팅 ${orphanChats.length}개`);
+        }
+      }
     } catch {}
   }
 
@@ -1098,6 +1312,75 @@ async function runSearchTranslation(adapter, args) {
   return { ok: false, error: '번역 캐시 조회 메서드를 찾을 수 없습니다.' };
 }
 
+async function runReadBardWiki(adapter, args) {
+  if (!adapter.hasCapability('bardWiki')) {
+    return { ok: false, error: '이 호스트는 RisuBard BardWiki API를 지원하지 않습니다.' };
+  }
+  const bw = getBardWikiApi(adapter.api);
+  if (!bw) return { ok: false, error: 'BardWiki 조회 메서드를 찾을 수 없습니다.' };
+
+  let context = null;
+  if (bw.getContext) {
+    try { context = await bw.getContext(); } catch {}
+  }
+  let docs = [];
+  if (bw.getDocuments) {
+    try {
+      const raw = await bw.getDocuments();
+      docs = Array.isArray(raw) ? raw : (Array.isArray(raw?.documents) ? raw.documents : []);
+    } catch {}
+  }
+
+  const docId = String(args.documentId || args.id || '').trim();
+  if (docId) {
+    const found = docs.find(d => d && String(d.id) === docId);
+    if (!found) return { ok: false, error: `BardWiki 문서(${docId})를 찾을 수 없습니다.` };
+    const clipped = clipText(found.content || '', 6000);
+    return {
+      ok: true,
+      context,
+      document: { ...found, content: clipped.text, truncated: clipped.truncated },
+    };
+  }
+
+  const q = String(args.query || '').trim().toLowerCase();
+  const filtered = q
+    ? docs.filter(d => JSON.stringify(d).toLowerCase().includes(q))
+    : docs;
+  return {
+    ok: true,
+    scopeNote: '현재 열린 캐릭터·채팅 스코프 기준',
+    context,
+    totalDocuments: filtered.length,
+    documents: filtered.slice(0, 30).map(d => ({
+      id: d?.id || '',
+      title: d?.title || '(무제)',
+      grade: d?.grade ?? null,
+      category: d?.category ?? null,
+      tags: Array.isArray(d?.tags) ? d.tags : [],
+      preview: clipText(d?.content || '', 240).text,
+    })),
+  };
+}
+
+async function runInspectHostTools(adapter) {
+  if (!adapter.hasCapability('risunestHostTools') || typeof adapter.api?.risunestListHostTools !== 'function') {
+    return { ok: false, error: '이 호스트는 RisuNest risunestListHostTools API를 지원하지 않습니다.' };
+  }
+  const raw = await adapter.api.risunestListHostTools();
+  const list = Array.isArray(raw) ? raw : (Array.isArray(raw?.tools) ? raw.tools : []);
+  return {
+    ok: true,
+    readOnlyNote: 'RisuHelper 자동 단계는 호스트 툴 목록 조회만 수행하며 쓰기 툴을 자동 실행하지 않습니다.',
+    total: list.length,
+    tools: list.slice(0, 40).map(t => ({
+      name: String(t?.name || t?.id || ''),
+      description: clipText(t?.description || '', 200).text,
+      readOnly: Boolean(t?.readOnly ?? t?.annotations?.readOnlyHint),
+    })),
+  };
+}
+
 /**
  * Executes a single validated Read-Only tool call. Never invokes any write API.
  */
@@ -1166,6 +1449,12 @@ async function executeReadTool(adapter, call, toolContext = {}, unlocks = null) 
         break;
       case 'search_translation':
         result = await runSearchTranslation(adapter, args);
+        break;
+      case 'read_bard_wiki':
+        result = await runReadBardWiki(adapter, args);
+        break;
+      case 'inspect_host_tools':
+        result = await runInspectHostTools(adapter);
         break;
       default:
         result = { ok: false, error: `지원하지 않는 도구입니다: ${tool}` };

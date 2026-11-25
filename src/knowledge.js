@@ -108,6 +108,36 @@ const KNOWLEDGE_SECTIONS = {
   - \`loreSettings\`: \`tokenBudget\`(로어북 토큰 예산), \`scanDepth\`(최근 N개 메시지 스캔), \`recursiveScanning\`(재귀 스캔), \`fullWordMatching\`(단어 단위 정확 일치).
   - \`bias\`: \`[["단어", -20]]\` 형태의 로짓 바이어스 배열(-100~100, 음수는 억제, 양수는 강화). 부분 추가/제거는 \`addBias\`/\`removeBias\` 사용.
   - \`tags\`: 캐릭터 태그 문자열 배열. 부분 추가/제거는 \`addTags\`/\`removeTags\` 사용.`,
+
+  theme_hud: `[테마 · 스타일 · 채팅 HUD 패널]
+- \`update_theme\`: 색상 스킴 프리셋(\`colorSchemeName\`), 커스텀 색상(\`colorScheme\`), 텍스트 테마 프리셋(\`textThemeName\`), 커스텀 텍스트 색상(\`customTextTheme\`), \`customCSS\`/\`guiHTML\`을 즉시 반영하며 원클릭 되돌리기를 지원합니다.
+- \`set_chat_panel\`: 채팅 화면에 정화된 HTML/CSS/CBS 라이브 HUD 패널을 띄우거나(\`html\`) 닫습니다(\`clear: true\`). 보안상 \`<script>\`·\`<iframe>\`·이벤트 핸들러는 자동 제거됩니다.`,
+
+  assets_repair: `[에셋 · 인레이 · 워크스페이스 건강검진 수리]
+- \`register_asset\`: SVG·텍스트 기반 에셋(\`character_asset\`/\`module_asset\`), 기존 에셋 연결(\`bind_asset\`), 오타 이름 수정(\`rename_asset\`), 원본 RisuAI 전용 인레이(\`inlay\`, PocketRisu 등 포크에서는 자동 차단)를 안전하게 등록합니다. 바이너리 원문은 생성하지 마세요.
+- \`repair_workspace\`: \`checkCharOrder\`(캐릭터 순서 정합성 복구), 고아 로어북 루트 복구(\`fixOrphanLore\`), 누락된 \`chat.id\` UUID 부여(\`fixMissingChatIds\`), 깨진 정규식 플래그 정화(\`fixRegexFlags\`)를 원클릭으로 수리합니다.`,
+
+  chat_advanced: `[채팅 메시지 · Hypa/Supa 메모리 · 채팅 폴더]
+- \`manage_chat_messages\`: 지정 채팅의 메시지 편집(\`edit\`), 비활성화 토글(\`toggle_disabled\`), 북마크(\`bookmark\`), 삭제(\`delete\`, 확인 창 + 정밀 Undo)를 경계 없이(\`targetCharIndex\`/\`targetChatIndex\`) 수행합니다.
+- \`update_memory\`: \`supa\`(\`supaMemoryData\`), \`hypaV3\`(\`hypaV3Data.summaries[]\` 추가·수정·중요도·삭제), \`hypaV2\`(\`hypaV2Data.chunks[]\`)를 수정합니다. Hypa 수정 시 임베딩 벡터는 재계산되지 않음을 안내하세요.
+- \`organize_chat_folders\`: \`chatFolders\` 생성·이름 변경·접기·삭제(고아 방지를 위해 내부 채팅은 루트로 이동) 및 채팅 폴더 이동을 처리합니다.`,
+
+  group_onboarding: `[그룹챗 · 캐릭터 온보딩 폼]
+- \`update_group_chat\`: 그룹챗(\`type: "group"\`) 전용 설정(멤버 추가/제거, \`characterActive\`, \`characterTalks\`, \`orderByOrder\`, \`useCharacterLore\`, \`autoMode\`)을 안전하게 편집합니다. 일반 단일 캐릭터에는 사용할 수 없습니다.
+- \`update_onboarding\`: 캐릭터 시작 시 사용자에게 보여 주는 온보딩 입력 폼(\`enabled\`, \`title\`, \`description\`, \`fields[]\`: text/textarea/select/checkbox/radio/number)을 생성·수정합니다.`,
+
+  extensions: `[선언형 상주 확장 (임의 JS 실행 금지)]
+- \`manage_extensions\`: 사용자가 승인한 선언형 JSON 규칙만 상주 실행하며 패널 \`상주 확장 관리\`에서 언제든 켜고 끌 수 있습니다(재시작 복원 · 언로드 완전 해제).
+- 지원 종류: \`script_handler\`(전역 정규식), \`replacer\`(전역 치환), \`chat_listener\`(응답 후 태그/변수 점검 알림), \`body_intercepter\`(조건부 요청 본문 JSON 패치 · 보안 키 차단), \`mcp_server\`(읽기 전용 진단 MCP 도구 노출), \`tts_processor\`(TTS 전/후처리 텍스트 정리), \`plugin_channel\`(V3 플러그인 연동 채널).
+- 보안 원칙: 임의 JS 코드(\`code\`/\`js\`/\`eval\`)나 API 키/헤더 수정은 절대 금지됩니다.`,
+
+  bard_wiki: `[RisuBard BardWiki 서사 메모리]
+- RisuBard 전용 \`bardWiki.*\` API는 현재 열려 있는 캐릭터·채팅 스코프 기준으로 동작합니다.
+- 먼저 \`read_bard_wiki\` 도구로 문서 목록·컨텍스트를 조회하고, \`manage_bard_wiki\`로 문서 저장(\`save_document\`), 등급 변경(\`set_grade\`), 컨텍스트 모드 전환(\`set_context_mode\`), 휴지통 이동(\`trash_document\`)을 승인 카드로 제안하세요.`,
+
+  risunest_native: `[RisuNest 전용 네이티브 대화 패치 · 조회]
+- RisuNest에서는 \`list_items\`/\`read_chat\`이 \`queryCharacters\`/\`queryConversations\`/\`queryConversationMessages\` 페이지네이션 고속 경로를 우선 사용합니다.
+- \`patch_risunest_conversation\`: \`risunestReadConversationContext\`로 현재 값을 확인한 뒤 \`risunestPatchConversation\`으로 대화 메타데이터(\`name\`, \`note\`, \`folderId\`, \`scriptstate\`, \`supaMemoryData\` 등)를 정밀 패치합니다.`,
 };
 
 function buildKnowledgeForContext(context) {

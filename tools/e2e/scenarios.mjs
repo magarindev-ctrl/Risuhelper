@@ -192,6 +192,142 @@ const E2E_SCENARIOS = [
       assert.match(body, /실패할 1차 제안/);
     },
   },
+  {
+    id: 'm3-theme-and-hud',
+    title: 'M3 테마 변경 + 정화된 채팅 HUD 패널 표시 + 되돌리기',
+    requiresLLM: true,
+    prompt: '색상 스킴을 dark로 바꾸고 채팅 HUD 패널을 띄워 줘',
+    scriptedReplies: [
+      proposalBlock({
+        action: 'set_chat_panel',
+        title: 'HP 상태 HUD',
+        html: '<div class="hud">HP 60</div><script>alert(1)</script>',
+      }),
+    ],
+    async verify({ ui, state, assert }) {
+      await ui.click(/^적용$/);
+      assert.ok(state.hostMeta.chatPanelHtml.includes('HP 60'));
+      assert.ok(!state.hostMeta.chatPanelHtml.includes('<script'));
+      await ui.clickConfirm(/^되돌리기 \(1\)$/);
+      assert.equal(state.hostMeta.chatPanelHtml, null);
+    },
+  },
+  {
+    id: 'm3-chat-messages-and-folders',
+    title: 'M3 채팅 폴더 생성·이동 + 되돌리기',
+    requiresLLM: true,
+    prompt: '채팅 폴더 "아크 1"을 만들고 1번 채팅을 옮겨 줘',
+    scriptedReplies: [
+      proposalBlock({
+        action: 'organize_chat_folders',
+        title: '채팅 폴더 생성 및 이동',
+        operation: 'create_folder',
+        folderName: '아크 1',
+        chatIndices: [0],
+      }),
+    ],
+    async verify({ ui, state, assert }) {
+      await ui.click(/^적용$/);
+      assert.equal(state.characters[0].chatFolders.length, 1);
+      assert.equal(state.characters[0].chats[0].folderId, state.characters[0].chatFolders[0].id);
+      await ui.clickConfirm(/^되돌리기 \(1\)$/);
+      assert.equal(state.characters[0].chatFolders?.length || 0, 0);
+    },
+  },
+  {
+    id: 'm3-declarative-extension-lifecycle',
+    title: 'M3 선언형 상주 확장(body_intercepter) 등록 → 실행 → 되돌리기 즉시 해제',
+    requiresLLM: true,
+    prompt: 'gpt 모델 요청 본문에 top_p 0.9를 넣는 상주 확장 규칙을 추가해 줘',
+    scriptedReplies: [
+      proposalBlock({
+        action: 'manage_extensions',
+        title: 'GPT top_p 인터셉터 추가',
+        operation: 'upsert',
+        rule: {
+          id: 'e2e-body-ext',
+          type: 'body_intercepter',
+          name: 'GPT top_p 패치',
+          enabled: true,
+          matchModelRegex: 'gpt',
+          set: { top_p: 0.9 },
+        },
+      }),
+    ],
+    async verify({ ui, state, assert }) {
+      await ui.click(/^적용$/);
+      assert.equal(state.hostMeta.bodyIntercepters.length, 1);
+      const patched = state.hostMeta.bodyIntercepters[0]({ model: 'gpt-4.1', temperature: 0.7 });
+      assert.equal(patched.top_p, 0.9);
+      await ui.clickConfirm(/^되돌리기 \(1\)$/);
+      assert.equal(state.hostMeta.bodyIntercepters.length, 0);
+    },
+  },
+  {
+    id: 'm3-pocketrisu-inlay-guard',
+    title: 'M3 PocketRisu에서 createInlay 제안 안전 차단 확인',
+    onlyHosts: ['pocketrisu'],
+    requiresLLM: true,
+    prompt: '인레이 하나 등록해 줘',
+    scriptedReplies: [
+      proposalBlock({
+        action: 'register_asset',
+        title: '미지원 인레이 시도',
+        mode: 'inlay',
+        name: 'test-inlay',
+        content: '<svg></svg>',
+      }),
+      'PocketRisu에서는 createInlay를 지원하지 않아 안내만 드립니다.',
+    ],
+    async verify({ ui, assert }) {
+      assert.match(ui.bodyText(), /createInlay/);
+    },
+  },
+  {
+    id: 'm3-risubard-bard-wiki',
+    title: 'M3 RisuBard BardWiki 문서 저장 + 되돌리기',
+    onlyHosts: ['risubard'],
+    requiresLLM: true,
+    prompt: '바드 위키에 "공방 일지" 문서를 저장해 줘',
+    scriptedReplies: [
+      proposalBlock({
+        action: 'manage_bard_wiki',
+        operation: 'save_document',
+        documentId: 'bw-e2e',
+        title: '공방 일지',
+        content: '새로운 연금술 실험 기록.',
+        grade: 'A',
+      }),
+    ],
+    async verify({ ui, state, assert }) {
+      await ui.click(/^적용$/);
+      assert.ok(state.hostMeta.bardWikiDocs.some(d => d.id === 'bw-e2e' && d.grade === 'A'));
+      await ui.clickConfirm(/^되돌리기 \(1\)$/);
+      assert.ok(!state.hostMeta.bardWikiDocs.some(d => d.id === 'bw-e2e'));
+    },
+  },
+  {
+    id: 'm3-risunest-native-patch',
+    title: 'M3 RisuNest 네이티브 대화 패치 + 메시지 버튼 등록 + 되돌리기',
+    onlyHosts: ['risunest'],
+    requiresLLM: true,
+    prompt: '리스네스트 네이티브 패치로 대화 제목을 바꿔 줘',
+    scriptedReplies: [
+      proposalBlock({
+        action: 'patch_risunest_conversation',
+        title: 'RisuNest 제목 패치',
+        conversationId: 'e2e-chat-2',
+        patch: { name: '2부 여정 (개정)' },
+      }),
+    ],
+    async verify({ ui, state, assert }) {
+      assert.ok(ui.registeredButtons.some(b => b.meta?.location === 'message'), 'RisuNest message quick-edit button must be registered');
+      await ui.click(/^적용$/);
+      assert.equal(state.hostMeta.risunestConversations['e2e-chat-2'].name, '2부 여정 (개정)');
+      await ui.clickConfirm(/^되돌리기 \(1\)$/);
+      assert.equal(state.hostMeta.risunestConversations['e2e-chat-2'].name, '2부 여정');
+    },
+  },
 ];
 
 export { E2E_SCENARIOS };

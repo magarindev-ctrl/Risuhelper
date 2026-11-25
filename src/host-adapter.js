@@ -32,6 +32,13 @@ import {
   planCharSettingsUpdate,
   planCharacterPort,
 } from './runtime-tools.js';
+import { ExtensionRuntime } from './extensions-runtime.js';
+import {
+  M3_ACTIONS,
+  previewM3Proposal,
+  applyM3Proposal,
+  revertHostApiRecord,
+} from './m3-actions.js';
 
 const BAD_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 const DB_PERMISSION_ERROR =
@@ -1092,6 +1099,8 @@ class HostAdapter {
     this._capabilities = null;
     this._runtimeInfo = null;
     this._lastMatchedModuleId = null;
+    this._chatPanelState = null;
+    this.extensionRuntime = new ExtensionRuntime(api, { adapter: this });
   }
 
   _resolveWriteModuleIndex(modules, proposal, target, options = {}) {
@@ -1735,17 +1744,18 @@ class HostAdapter {
    * Uses RisuNest's paginated `queryCharacters` + `getCharacterFromIndex` fast path when supported to
    * avoid loading the full `db.characters` array; falls back to `getDatabase(['characters'])` otherwise.
    */
-  async readCharacterCatalog() {
+  async readCharacterCatalog({ maxItems = 60 } = {}) {
+    const cap = Math.max(1, Math.min(1000, Number(maxItems) || 60));
     const { charIndex } = await this._getActiveIndices();
     const activeIndex = Number.isInteger(charIndex) ? charIndex : null;
 
     if (this.hasCapability('risunestQuery') && typeof this.api.queryCharacters === 'function') {
       try {
-        const page = await this.api.queryCharacters({ trash: false, limit: 60 });
+        const page = await this.api.queryCharacters({ trash: false, limit: cap });
         const rawItems = Array.isArray(page) ? page : (Array.isArray(page?.items) ? page.items : null);
         if (rawItems) {
           const catalog = [];
-          for (let i = 0; i < rawItems.length && catalog.length < 60; i++) {
+          for (let i = 0; i < rawItems.length && catalog.length < cap; i++) {
             const item = rawItems[i];
             if (!item || item.trashTime) continue;
             const cIdx = Number.isInteger(item.index)
@@ -1772,7 +1782,7 @@ class HostAdapter {
       const c = characters[i];
       if (!c || c.trashTime || c.chaId === '§temp' || c.chaId === '§playground') continue;
       catalog.push(this._summarizeCatalogCharacter(c, i, activeIndex));
-      if (catalog.length >= 60) break;
+      if (catalog.length >= cap) break;
     }
     return { characters, catalog, activeIndex, permissionDenied: false, usedQueryCharacters: false };
   }
@@ -2718,6 +2728,10 @@ class HostAdapter {
           }
           if (Object.keys(partial).length > 0) await this.writeDbSubset(partial);
         }
+        reverted += res.reverted;
+        conflicts.push(...res.conflicts);
+      } else if (entity.type === 'host_api') {
+        const res = await revertHostApiRecord(this, entity, ops);
         reverted += res.reverted;
         conflicts.push(...res.conflicts);
       }
@@ -4135,6 +4149,10 @@ class HostAdapter {
       };
     }
 
+    if (M3_ACTIONS.has(proposal.action)) {
+      return await previewM3Proposal(this, proposal, target);
+    }
+
     return { ok: false, error: `지원하지 않는 작업 종류입니다: ${proposal.action}` };
   }
 
@@ -4145,6 +4163,10 @@ class HostAdapter {
     const target = this._resolveSafeTarget(proposal, activeTarget);
     const referenceError = await this._findReferenceError(proposal, target, options);
     if (referenceError) throw new Error(referenceError);
+
+    if (M3_ACTIONS.has(proposal.action)) {
+      return await applyM3Proposal(this, proposal, target, options);
+    }
 
     switch (proposal.action) {
       case 'patch_text':

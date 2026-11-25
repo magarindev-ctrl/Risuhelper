@@ -172,11 +172,26 @@ function createE2eState() {
       temperature: 80,
       maxContext: 8000,
       maxResponse: 1000,
+      colorSchemeName: 'default',
+      textTheme: 'standard',
       selectedPersona: 0,
       personas: [{ id: 'e2e-p0', name: '모험가', note: '', personaPrompt: '탐색가' }],
       modules: [],
       enabledModules: [],
       characterOrder: [aria.chaId, otherChar.chaId],
+    },
+    hostMeta: {
+      colorScheme: { name: 'Dark', bgcolor: '#1e1e2e', scheme: { type: 'dark' } },
+      textTheme: { FontColorStandard: '#cdd6f4', name: 'standard' },
+      chatPanelHtml: null,
+      savedAssets: [],
+      bodyIntercepters: [],
+      scriptHandlers: [],
+      ttsPreInstalled: false,
+      bardWikiDocs: [{ id: 'bw-1', title: '왕국 연대기', content: '초기 기록', grade: 'B' }],
+      bardWikiContext: { mode: 'auto' },
+      risunestConversations: { 'e2e-chat-2': { name: '2부 여정', note: '2부 노트' } },
+      risunestSavedFiles: [],
     },
   };
 }
@@ -287,11 +302,38 @@ function createSimulatedForkApi(hostId, state, { storage, runLLMModel, registere
         state.characters[ci].chats[chIdx] = deepClone(chat);
       }
     };
-    handlers.getColorScheme = async () => ({ name: 'Dark', scheme: { type: 'dark' } });
-    handlers.getTextTheme = async () => 'standard';
+    handlers.getColorScheme = async () => deepClone(state.hostMeta.colorScheme);
+    handlers.changeColorScheme = async (name) => { state.db.colorSchemeName = String(name); };
+    handlers.setColorScheme = async (scheme) => { state.hostMeta.colorScheme = deepClone(scheme); };
+    handlers.getTextTheme = async () => deepClone(state.hostMeta.textTheme);
+    handlers.changeTextTheme = async (name) => { state.db.textTheme = String(name); };
+    handlers.setCustomTextTheme = async (theme) => { state.hostMeta.textTheme = deepClone(theme); };
+    handlers.setChatPanel = async (html) => { state.hostMeta.chatPanelHtml = html ? String(html) : null; };
+    handlers.saveAsset = async (bytes, customId, fileName) => {
+      const id = customId || `e2e_asset_${state.hostMeta.savedAssets.length + 1}`;
+      state.hostMeta.savedAssets.push({ id, fileName, bytes: bytes?.length || 0 });
+      return id;
+    };
+    handlers.checkCharOrder = async () => {
+      state.db.characterOrder = state.characters.map(c => c.chaId);
+    };
+    handlers.addRisuScriptHandler = async (mode, fn) => { state.hostMeta.scriptHandlers.push({ mode, fn }); };
+    handlers.removeRisuScriptHandler = async (mode, fn) => {
+      const i = state.hostMeta.scriptHandlers.findIndex(x => x.mode === mode && x.fn === fn);
+      if (i >= 0) state.hostMeta.scriptHandlers.splice(i, 1);
+    };
+    handlers.registerBodyIntercepter = async (fn) => { state.hostMeta.bodyIntercepters.push(fn); };
+    handlers.unregisterBodyIntercepter = async (fn) => {
+      const i = state.hostMeta.bodyIntercepters.indexOf(fn);
+      if (i >= 0) state.hostMeta.bodyIntercepters.splice(i, 1);
+    };
+    handlers.addTTSPreprocessor = async () => { state.hostMeta.ttsPreInstalled = true; };
     handlers.parseRisuChat = async (text) => String(text ?? '');
     handlers.sendChat = async () => {};
     handlers.runLLMModel = runLLMModel;
+  }
+  if (hostId === 'risuai') {
+    handlers.createInlay = async (p) => `inlay_${p?.name || 'e2e'}`;
   }
   if (hostId === 'risunest') {
     handlers.queryCharacters = async ({ offset = 0, limit = 50 } = {}) => ({
@@ -303,10 +345,53 @@ function createSimulatedForkApi(hostId, state, { storage, runLLMModel, registere
       })),
       total: state.characters.length,
     });
+    handlers.queryConversations = async ({ charIndex = 0 } = {}) => {
+      const chats = state.characters[charIndex]?.chats || [];
+      return {
+        items: chats.map((c, i) => ({ chatIndex: i, id: c.id, name: c.name, messageCount: c.message?.length || 0 })),
+        total: chats.length,
+        hasMore: false,
+      };
+    };
+    handlers.queryConversationMessages = async ({ charIndex = 0, chatIndex = 0 } = {}) => ({
+      items: deepClone(state.characters[charIndex]?.chats?.[chatIndex]?.message || []),
+    });
+    handlers.risunestReadConversationContext = async (ref) => {
+      const id = ref?.conversationId || 'e2e-chat-2';
+      return deepClone(state.hostMeta.risunestConversations[id] || {});
+    };
+    handlers.risunestPatchConversation = async (ref, patch) => {
+      const id = ref?.conversationId || 'e2e-chat-2';
+      state.hostMeta.risunestConversations[id] = {
+        ...(state.hostMeta.risunestConversations[id] || {}),
+        ...deepClone(patch),
+      };
+    };
+    handlers.risunestListHostTools = async () => [{ name: 'search_docs', description: 'Read-only search', readOnly: true }];
+    handlers.risunestOnChatView = async () => () => {};
+    handlers.risunestOnGenerationEnd = async () => () => {};
+    handlers.save = async (name, bytes) => { state.hostMeta.risunestSavedFiles.push({ name, size: bytes?.length || 0 }); };
   }
   if (hostId === 'risubard') {
-    handlers._getBardWikiContext = async () => ({ mode: 'auto', documents: [] });
-    handlers._getBardWikiDocuments = async () => [];
+    handlers._getBardWikiContext = async () => deepClone(state.hostMeta.bardWikiContext);
+    handlers._getBardWikiDocuments = async () => deepClone(state.hostMeta.bardWikiDocs);
+    handlers._saveBardWikiDocument = async (doc) => {
+      const id = doc.id || `bw_${state.hostMeta.bardWikiDocs.length + 1}`;
+      const next = { ...deepClone(doc), id };
+      const idx = state.hostMeta.bardWikiDocs.findIndex(d => d.id === id);
+      if (idx >= 0) state.hostMeta.bardWikiDocs[idx] = next;
+      else state.hostMeta.bardWikiDocs.push(next);
+      return next;
+    };
+    handlers._setBardWikiGrade = async (id, grade) => {
+      const d = state.hostMeta.bardWikiDocs.find(x => x.id === id);
+      if (d) d.grade = String(grade);
+    };
+    handlers._setBardWikiContextMode = async (mode) => { state.hostMeta.bardWikiContext.mode = String(mode); };
+    handlers._trashBardWikiDocument = async (id) => {
+      const idx = state.hostMeta.bardWikiDocs.findIndex(d => d.id === id);
+      if (idx >= 0) state.hostMeta.bardWikiDocs.splice(idx, 1);
+    };
   }
 
   if (!profile.catchAllProxy) {

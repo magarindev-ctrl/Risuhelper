@@ -132,6 +132,16 @@ const DELETE_ACTIONS = new Set([
   'delete_greeting',
 ]);
 
+function requiresConfirmation(proposal) {
+  if (!proposal || typeof proposal !== 'object') return false;
+  if (DELETE_ACTIONS.has(proposal.action)) return true;
+  if (proposal.action === 'manage_chat_messages' && proposal.operation === 'delete') return true;
+  if (proposal.action === 'manage_bard_wiki' && proposal.operation === 'trash_document') return true;
+  if (proposal.action === 'manage_extensions' && proposal.operation === 'remove') return true;
+  if (proposal.action === 'organize_chat_folders' && proposal.operation === 'delete_folder') return true;
+  return false;
+}
+
 const VALID_ACTIONS = new Set([
   'patch_text',
   'replace_text',
@@ -157,6 +167,19 @@ const VALID_ACTIONS = new Set([
   'create_character',
   'update_char_settings',
   'port_from_character',
+  // M3 (v0.9.9) approval-gated APIs, missing data domains, declarative extensions, & fork APIs
+  'update_theme',
+  'set_chat_panel',
+  'register_asset',
+  'repair_workspace',
+  'manage_chat_messages',
+  'update_memory',
+  'update_onboarding',
+  'update_group_chat',
+  'organize_chat_folders',
+  'manage_extensions',
+  'manage_bard_wiki',
+  'patch_risunest_conversation',
 ]);
 
 /**
@@ -519,6 +542,18 @@ const PROPOSAL_KEYS_BY_ACTION = {
   ],
   update_char_settings: ['loreSettings', 'bias', 'addBias', 'removeBias', 'tags', 'addTags', 'removeTags'],
   port_from_character: ['sourceCharIndex', 'items', 'loreIndices', 'regexIndices'],
+  update_theme: ['colorSchemeName', 'colorScheme', 'textThemeName', 'customTextTheme', 'customCSS', 'guiHTML'],
+  set_chat_panel: ['html', 'visible', 'clear'],
+  register_asset: ['mode', 'name', 'oldName', 'content', 'mimeType', 'ext', 'assetId', 'targetField'],
+  repair_workspace: ['checkCharOrder', 'fixOrphanLore', 'fixMissingChatIds', 'fixRegexFlags'],
+  manage_chat_messages: ['operation', 'messageIndex', 'content', 'disabled', 'bookmarked', 'bookmarkNote', 'expectedSnippet'],
+  update_memory: ['memoryType', 'operation', 'summaryIndex', 'text', 'isImportant', 'tags', 'chatMemos'],
+  update_onboarding: ['enabled', 'title', 'description', 'fields', 'merge'],
+  update_group_chat: ['name', 'firstMessage', 'orderByOrder', 'useCharacterLore', 'autoMode', 'characters', 'characterActive', 'characterTalks', 'addMembers', 'removeMembers', 'setMemberActive', 'setMemberTalk'],
+  organize_chat_folders: ['operation', 'folderId', 'folderName', 'newName', 'folded', 'chatIndices', 'moveToRoot'],
+  manage_extensions: ['operation', 'rule', 'ruleId', 'enabled', 'dryRunSample'],
+  manage_bard_wiki: ['operation', 'documentId', 'id', 'title', 'content', 'grade', 'category', 'tags', 'contextMode', 'mode'],
+  patch_risunest_conversation: ['conversationId', 'patch'],
 };
 
 function findUnknownProposalKeys(item) {
@@ -842,6 +877,98 @@ function validateProposal(item) {
       return `허용되지 않는 설정 키입니다: ${invalid.join(', ')}`;
     }
   }
+  if (item.action === 'update_theme') {
+    const hasAny =
+      item.colorSchemeName !== undefined ||
+      item.colorScheme !== undefined ||
+      item.textThemeName !== undefined ||
+      item.customTextTheme !== undefined ||
+      item.customCSS !== undefined ||
+      item.guiHTML !== undefined;
+    if (!hasAny) {
+      return 'update_theme에는 colorSchemeName, colorScheme, textThemeName, customTextTheme, customCSS, guiHTML 중 하나 이상이 필요합니다.';
+    }
+  }
+  if (item.action === 'set_chat_panel') {
+    const isClear = item.clear === true || item.visible === false;
+    if (!isClear && (typeof item.html !== 'string' || !item.html.trim())) {
+      return 'set_chat_panel에는 html 문자열 또는 clear: true가 필요합니다.';
+    }
+  }
+  if (item.action === 'register_asset') {
+    const validModes = ['character_asset', 'module_asset', 'inlay', 'bind_asset', 'rename_asset'];
+    const mode = item.mode || 'character_asset';
+    if (!validModes.includes(mode)) {
+      return `register_asset의 mode는 ${validModes.join('/')} 중 하나여야 합니다.`;
+    }
+    if (mode !== 'inlay' && (typeof item.name !== 'string' || !item.name.trim())) {
+      return 'register_asset에는 비어 있지 않은 에셋 name이 필요합니다.';
+    }
+  }
+  if (item.action === 'repair_workspace') {
+    if (!item.checkCharOrder && !item.fixOrphanLore && !item.fixMissingChatIds && !item.fixRegexFlags) {
+      return 'repair_workspace에는 checkCharOrder, fixOrphanLore, fixMissingChatIds, fixRegexFlags 중 하나 이상이 true여야 합니다.';
+    }
+  }
+  if (item.action === 'manage_chat_messages') {
+    if (!['edit', 'toggle_disabled', 'bookmark', 'delete'].includes(item.operation)) {
+      return 'manage_chat_messages의 operation은 edit, toggle_disabled, bookmark, delete 중 하나여야 합니다.';
+    }
+    if (!Number.isInteger(item.messageIndex) || item.messageIndex < 0) {
+      return 'manage_chat_messages에는 0 이상의 정수 messageIndex가 필요합니다.';
+    }
+    if (item.operation === 'edit' && typeof item.content !== 'string') {
+      return 'manage_chat_messages(edit)에는 content 문자열이 필요합니다.';
+    }
+  }
+  if (item.action === 'update_memory') {
+    if (!['supa', 'hypaV3', 'hypaV2'].includes(item.memoryType || 'supa')) {
+      return 'update_memory의 memoryType은 supa, hypaV3, hypaV2 중 하나여야 합니다.';
+    }
+  }
+  if (item.action === 'update_onboarding') {
+    if (item.fields !== undefined && !Array.isArray(item.fields)) {
+      return 'update_onboarding의 fields는 배열이어야 합니다.';
+    }
+  }
+  if (item.action === 'update_group_chat') {
+    const hasAny =
+      item.name !== undefined || item.firstMessage !== undefined ||
+      item.orderByOrder !== undefined || item.useCharacterLore !== undefined || item.autoMode !== undefined ||
+      item.characters !== undefined || item.characterActive !== undefined || item.characterTalks !== undefined ||
+      item.addMembers !== undefined || item.removeMembers !== undefined ||
+      item.setMemberActive !== undefined || item.setMemberTalk !== undefined;
+    if (!hasAny) {
+      return 'update_group_chat에는 수정할 그룹 설정 항목이 1개 이상 필요합니다.';
+    }
+  }
+  if (item.action === 'organize_chat_folders') {
+    if (!['create_folder', 'rename_folder', 'delete_folder', 'move_chats', 'toggle_fold'].includes(item.operation)) {
+      return 'organize_chat_folders의 operation은 create_folder, rename_folder, delete_folder, move_chats, toggle_fold 중 하나여야 합니다.';
+    }
+  }
+  if (item.action === 'manage_extensions') {
+    const op = item.operation || 'upsert';
+    if (!['upsert', 'toggle', 'remove'].includes(op)) {
+      return 'manage_extensions의 operation은 upsert, toggle, remove 중 하나여야 합니다.';
+    }
+    if (op === 'upsert' && (!item.rule || typeof item.rule !== 'object' || Array.isArray(item.rule))) {
+      return 'manage_extensions(upsert)에는 rule 객체가 필요합니다.';
+    }
+    if ((op === 'toggle' || op === 'remove') && (typeof item.ruleId !== 'string' || !item.ruleId.trim())) {
+      return `manage_extensions(${op})에는 ruleId 문자열이 필요합니다.`;
+    }
+  }
+  if (item.action === 'manage_bard_wiki') {
+    if (!['save_document', 'set_grade', 'set_context_mode', 'trash_document'].includes(item.operation)) {
+      return 'manage_bard_wiki의 operation은 save_document, set_grade, set_context_mode, trash_document 중 하나여야 합니다.';
+    }
+  }
+  if (item.action === 'patch_risunest_conversation') {
+    if (!item.patch || typeof item.patch !== 'object' || Array.isArray(item.patch) || Object.keys(item.patch).length === 0) {
+      return 'patch_risunest_conversation에는 1개 이상의 키를 포함한 patch 객체가 필요합니다.';
+    }
+  }
   return null;
 }
 
@@ -1140,7 +1267,7 @@ function buildConversationMessages({
   const screenNote = isFreeTalk
     ? '\n- 모드: 자유대화 — 사용자가 특정 입력칸을 선택하지 않았습니다. 현재 대상이 없으므로 patch_text / replace_text는 쓸 수 없고, ' +
       `아래 요약들을 바탕으로 질문에 답하거나 ${freeTalkActionText}으로 바로 제안하세요. ` +
-      '채팅 말풍선과 기존 모듈 기본 필드는 전용 동작이 없으니, 해당 칸을 클릭하거나 상단에서 대상을 고른 뒤 요청하라고 안내하세요.' +
+      '기존 모듈 기본 필드는 해당 칸을 클릭하거나 상단에서 대상을 고른 뒤 요청하라고 안내하세요.' +
       (screenHintText ? `\n- 화면 힌트(참고용, 편집 대상 아님): ${screenHintText}` : '')
     : isChatInput
       ? (includeGhostwriteContext
@@ -1173,11 +1300,11 @@ function buildConversationMessages({
     const l1Text = (skillPack.l1Catalog || []).length > 0
       ? skillPack.l1Catalog.map(s => `\`${s.id}\`(${s.label})`).join(', ')
       : '(없음)';
-    readToolsBlock = `\n\n[읽기·진단 도구 및 L1 내장 스킬 (Read-Only · 최대 3회 루프)]
-현재 정보·스키마로 충분하면 도구 없이 바로 답하거나 \`\`\`risuhelper-proposal 을 출력하세요(1회 완료 권장).
-빠진 스키마·잘린 전문·타 캐릭터/채팅/변수·진단이 필요할 때만 \`\`\`risuhelper-tool JSON 배열(최대 6개, 예: \`[{"tool":"load_skill","args":{"skillIds":["scripts"]}}]\`)로 조회하세요(쓰기 불가).
+    readToolsBlock = `\n\n[읽기·진단 도구 및 L1 내장 스킬 (Read-Only · 최대 3회)]
+정보·스키마가 충분하면 바로 답하거나 \`\`\`risuhelper-proposal 출력(1회 완료 권장).
+부족할 때만 \`\`\`risuhelper-tool 배열(최대 6개, 예: \`[{"tool":"load_skill","args":{"skillIds":["scripts"]}}]\`)로 조회(쓰기 불가).
 - 도구: ${toolCatalogText}
-- 미로드 L1 스킬(\`load_skill\`): ${l1Text}`;
+- L1 스킬(\`load_skill\`): ${l1Text}`;
   }
 
   const systemPrompt = `당신은 RisuAI(및 PocketRisu, RisuBard, 해적리스, RisuNest 등 포크) 안에 내장된 소통형 어시스턴트 "RisuHelper"입니다.
@@ -1301,6 +1428,7 @@ function buildAutoRepairFollowUpMessage({
 export {
   DELETE_ACTIONS,
   VALID_ACTIONS,
+  requiresConfirmation,
   findUnknownProposalKeys,
   shouldIncludeGhostwriteContext,
   readModelResponse,

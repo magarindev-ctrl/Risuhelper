@@ -2,8 +2,10 @@ import { VERSION, STORAGE_KEY, PRESET_STORAGE_KEY, UNDO_STORAGE_KEY, DEFAULT_MAX
 import { STYLES } from './style.js';
 import { FocusTracker, normalizeChipPos, MIN_DOCK_VIEWPORT_PX } from './focus-detector.js';
 import { HostAdapter, resolveModuleIndex, summarizeLoreList } from './host-adapter.js';
-import { callRisuModel, buildConversationMessages, findUnknownProposalKeys, DELETE_ACTIONS } from './llm.js';
+import { callRisuModel, buildConversationMessages, findUnknownProposalKeys, DELETE_ACTIONS, requiresConfirmation } from './llm.js';
 import { runAgentLoop, normalizeMaxCalls } from './agent-loop.js';
+import { executeReadTool } from './read-tools.js';
+import { dryRunExtensionRule } from './extensions-runtime.js';
 import { buildDiffPreview } from './text-edits.js';
 import { getQuickPromptsForContext } from './knowledge.js';
 import { newPresetState, validatePresetState, assembleRisuHelperMessages } from './preset-engine.js';
@@ -60,6 +62,18 @@ const ACTION_LABELS = {
   create_character: '새 캐릭터 생성',
   update_char_settings: '캐릭터 고급 설정',
   port_from_character: '캐릭터 교차 포팅',
+  update_theme: '테마 · 스타일 변경',
+  set_chat_panel: '채팅 HUD 패널',
+  register_asset: '에셋 · 인레이 등록',
+  repair_workspace: '워크스페이스 수리',
+  manage_chat_messages: '채팅 메시지 관리',
+  update_memory: '메모리 요약 편집',
+  update_onboarding: '온보딩 폼 설정',
+  update_group_chat: '그룹챗 설정',
+  organize_chat_folders: '채팅 폴더 정리',
+  manage_extensions: '상주 확장 규칙',
+  manage_bard_wiki: 'BardWiki 문서 관리',
+  patch_risunest_conversation: 'RisuNest 대화 패치',
 };
 
 function h(doc, tag, props = {}, ...children) {
@@ -110,6 +124,9 @@ class RisuHelperApp {
     this.menuOpen = false;
     this.settingsOpen = false;
     this.presetPanelOpen = false;
+    this.extensionsPanelOpen = false;
+    this.lastAuditResult = null;
+    this._risunestCleanups = [];
     this.presetState = newPresetState();
     this.hostModuleCatalog = [];
     this.lastPresetPreview = null;
@@ -218,6 +235,53 @@ class RisuHelperApp {
     this.tracker.chipPos = normalizeChipPos(this.settings.floatingChipPos);
     const trackerStarted = await this.tracker.start().catch(() => false);
     await this.adapter.probeHostFlavor(this.tracker.rootDoc).catch(() => {});
+
+    // Wire & restore user-approved declarative resident extensions (zero arbitrary JS)
+    this.adapter.extensionRuntime.onAlert = (alert) => {
+      const msg = `[${alert.label}] ${(alert.warnings || []).join(' · ')}`;
+      this.showToast(msg);
+    };
+    this.adapter.extensionRuntime.readToolRunner = async (toolId, args) => {
+      const res = await executeReadTool(this.adapter, { tool: toolId, args });
+      return res.result;
+    };
+    await this.adapter.extensionRuntime.load().catch(() => {});
+
+    // RisuNest-specific lifecycle & message quick-edit button hooks (strictly capability-gated)
+    if (this.adapter.hasCapability('risunestEvents')) {
+      if (typeof this.api.risunestOnChatView === 'function') {
+        try {
+          const unsub = await this.api.risunestOnChatView(() => {
+            if (this.isOpen && !this.busy) this.refreshContextSnapshot().catch(() => {});
+          });
+          if (typeof unsub === 'function') this._risunestCleanups.push(unsub);
+        } catch {}
+      }
+      if (typeof this.api.risunestOnGenerationEnd === 'function') {
+        try {
+          const unsub = await this.api.risunestOnGenerationEnd(() => {
+            if (this.isOpen && !this.busy) this.refreshContextSnapshot().catch(() => {});
+          });
+          if (typeof unsub === 'function') this._risunestCleanups.push(unsub);
+        } catch {}
+      }
+      if (typeof this.api.registerButton === 'function') {
+        try {
+          const msgBtn = await this.api.registerButton(
+            { name: 'RisuHelper 메시지 편집', icon: '✨', iconType: 'html', location: 'message', id: 'risuhelper-msg-btn' },
+            async (ctxInfo) => {
+              const msgIdx = Number.isInteger(ctxInfo?.messageIndex) ? ctxInfo.messageIndex : null;
+              await this.open();
+              if (msgIdx !== null) {
+                this.manualTarget = { targetKind: 'chat_message', messageIndex: msgIdx };
+                await this.refreshContextSnapshot();
+              }
+            }
+          );
+          if (msgBtn?.id) this.registeredIds.push(msgBtn.id);
+        } catch {}
+      }
+    }
 
     // Optional PC auto-dock on startup (strictly opt-in via user settings)
     if (trackerStarted && this.settings.dockMode && this.settings.autoOpenDocked) {
@@ -423,7 +487,7 @@ class RisuHelperApp {
     if (this.busy || this.applyingGroup) return;
     const initialTargets = this.applicableProposals(msg);
     if (initialTargets.length === 0) return;
-    const deleteTargets = initialTargets.filter(item => DELETE_ACTIONS.has(item.proposal?.action));
+    const deleteTargets = initialTargets.filter(item => requiresConfirmation(item.proposal));
     const confirmedDeletes = new Set();
     if (deleteTargets.length > 0) {
       const names = deleteTargets.slice(0, 3).map(i => i.proposal?.title || i.preview?.label || i.proposal?.action).join(', ');
@@ -1473,7 +1537,7 @@ class RisuHelperApp {
   }
 
   async applyProposalItem(item, { skipDeleteConfirm = false } = {}) {
-    if (DELETE_ACTIONS.has(item.proposal?.action) && !skipDeleteConfirm) {
+    if (requiresConfirmation(item.proposal) && !skipDeleteConfirm) {
       const confirmed = await this.askConfirm({
         title: '항목을 삭제할까요?',
         message: `${this._quoteLabel(item.proposal?.title || item.preview?.label)} 삭제 제안을 적용합니다.`,
@@ -1769,7 +1833,7 @@ class RisuHelperApp {
     const doc = this.doc;
     const { proposal, preview } = item;
     const isChatInputDraft = (item.pinnedTarget?.targetKind || preview.target?.targetKind) === 'chat_input' && proposal.action === 'replace_text';
-    const isDelete = DELETE_ACTIONS.has(proposal.action) || Boolean(preview.isDelete);
+    const isDelete = requiresConfirmation(proposal) || Boolean(preview.isDelete);
     const actionLabel = isChatInputDraft ? '유저 대필' : (ACTION_LABELS[proposal.action] || proposal.action);
     const cardKey = item.cardKey || `card-${proposal.action}`;
     const bodyChildren = [];
@@ -2481,7 +2545,46 @@ class RisuHelperApp {
               await this.attachLatestFetchLog();
             }
           },
-        }, this.attachedFetchLog ? '🔍 요청 로그 해제' : '🔍 최근 요청 로그 첨부')
+        }, this.attachedFetchLog ? '🔍 요청 로그 해제' : '🔍 최근 요청 로그 첨부'),
+        h(doc, 'button', {
+          class: `rh-btn${this.extensionsPanelOpen ? ' primary' : ''}`,
+          title: '사용자가 승인한 선언형 상주 확장 규칙을 켜고 끄거나 드라이런으로 점검합니다',
+          onclick: () => {
+            this.extensionsPanelOpen = !this.extensionsPanelOpen;
+            if (this.extensionsPanelOpen) {
+              this.menuOpen = false;
+              this.presetPanelOpen = false;
+              this.settingsOpen = false;
+            }
+            this.render();
+          },
+        }, `🧩 상주 확장 (${this.adapter.extensionRuntime?.list?.().filter(r => r.enabled).length || 0})`),
+        h(doc, 'button', {
+          class: 'rh-btn',
+          title: '고아 로어북·깨진 정규식·Lua·CBS·누락 에셋·채팅 폴더를 읽기 전용으로 일괄 점검합니다',
+          onclick: async () => {
+            await this.runWorkspaceAuditUi();
+          },
+        }, '🩺 건강검진'),
+        this.adapter._chatPanelState && h(doc, 'button', {
+          class: 'rh-btn danger',
+          onclick: async () => {
+            try {
+              await this.adapter.applyProposal({ action: 'set_chat_panel', clear: true, title: '채팅 HUD 닫기' }, null);
+              this.showToast('채팅 HUD 패널을 닫았습니다.');
+              this.render();
+            } catch (err) {
+              this.showToast(err?.message || 'HUD 닫기 실패');
+            }
+          },
+        }, '✕ HUD 닫기'),
+        this.adapter.hasCapability('risunestSaveFile') && typeof this.api?.save === 'function' && h(doc, 'button', {
+          class: 'rh-btn',
+          title: '현재 워크스페이스 진단 리포트를 파일로 저장합니다 (RisuNest)',
+          onclick: async () => {
+            await this.exportAuditReport();
+          },
+        }, '💾 진단 리포트 저장')
       ),
       h(doc, 'div', { class: 'rh-row', style: 'justify-content:space-between;' },
         h(doc, 'span', { class: 'rh-menu-section-label' }, '전송 모드'),
@@ -3033,6 +3136,7 @@ class RisuHelperApp {
       h(doc, 'div', { class: 'rh-context-bar' }, ...contextBarChildren),
       this.menuOpen && this.renderMenuPanel(ctx, flavor),
       this.presetPanelOpen && renderPresetPanel(this),
+      this.extensionsPanelOpen && this.renderExtensionsPanel(),
       this.settingsOpen && this.renderSettingsPanel(),
       chatEl,
       composer,
@@ -3069,6 +3173,139 @@ class RisuHelperApp {
     }
   }
 
+  async runWorkspaceAuditUi() {
+    try {
+      const res = await executeReadTool(this.adapter, { tool: 'audit_workspace', args: { scope: 'all' } });
+      this.lastAuditResult = res.result;
+      this.menuOpen = false;
+      const r = res.result || {};
+      if (!r.ok) {
+        this.showToast(r.error || '건강검진 실행 실패');
+        return;
+      }
+      if (r.healthy) {
+        this.messages.push({
+          role: 'assistant',
+          content: '🩺 **워크스페이스 건강검진 완료**: 이상 항목이 발견되지 않았습니다(오류 0건 · 경고 0건).',
+          proposals: [],
+        });
+        this.showToast('건강검진 완료: 이상 없음');
+      } else {
+        const lines = (r.findings || []).map(f => `- [${f.severity === 'error' ? '오류' : '경고'}] **${f.where}**: ${f.detail}`);
+        this.messages.push({
+          role: 'assistant',
+          content:
+            `🩺 **워크스페이스 건강검진 결과** (오류 ${r.errorCount || 0}건 · 경고 ${r.warnCount || 0}건)\n\n` +
+            lines.join('\n') +
+            '\n\n수리가 필요하면 `"방금 건강검진에서 나온 문제들을 워크스페이스 수리 카드로 고쳐 줘"`라고 요청하세요.',
+          proposals: [],
+        });
+        this.showToast(`건강검진 완료: 오류 ${r.errorCount || 0} · 경고 ${r.warnCount || 0}`);
+      }
+      this.render();
+    } catch (err) {
+      this.showToast(err?.message || '건강검진 중 오류 발생');
+    }
+  }
+
+  async exportAuditReport() {
+    try {
+      const res = await executeReadTool(this.adapter, { tool: 'audit_workspace', args: { scope: 'all' } });
+      const host = await executeReadTool(this.adapter, { tool: 'host_info', args: {} });
+      const lines = [
+        `# RisuHelper 워크스페이스 진단 리포트 (v${VERSION})`,
+        `- 호스트: ${host.result?.host || 'unknown'}`,
+        `- 시각: ${new Date().toISOString()}`,
+        `- 오류: ${res.result?.errorCount || 0}건 · 경고: ${res.result?.warnCount || 0}건`,
+        '',
+        ...(res.result?.findings || []).map(f => `- [${f.severity}] ${f.where}: ${f.detail}`),
+      ];
+      const bytes = new TextEncoder().encode(lines.join('\n') + '\n');
+      await this.api.save('risuhelper-audit.md', bytes);
+      this.showToast('진단 리포트를 저장했습니다 (risuhelper-audit.md)');
+    } catch (err) {
+      this.showToast(err?.message || '진단 리포트 저장 실패');
+    }
+  }
+
+  renderExtensionsPanel() {
+    const doc = this.doc;
+    const rt = this.adapter.extensionRuntime;
+    const rules = rt ? rt.list() : [];
+    const alerts = rt ? rt.recentAlerts.slice(-5).reverse() : [];
+
+    return h(doc, 'div', { class: 'rh-settings rh-ext-panel' },
+      h(doc, 'div', { class: 'rh-row', style: 'justify-content:space-between;align-items:center;' },
+        h(doc, 'strong', {}, `🧩 선언형 상주 확장 (${rules.length}개)`),
+        h(doc, 'button', {
+          class: 'rh-btn ghost',
+          onclick: () => { this.extensionsPanelOpen = false; this.render(); },
+        }, '닫기')
+      ),
+      h(doc, 'div', { style: 'font-size:11.5px;color:var(--rh-muted);margin:4px 0 8px;' },
+        '임의 JS 실행 없이 사용자가 승인한 선언형 규칙만 동작합니다. 끄거나 플러그인을 언로드하면 호스트 훅이 즉시 해제됩니다.'
+      ),
+      rules.length === 0
+        ? h(doc, 'div', { style: 'font-size:12px;color:var(--rh-muted);padding:8px 0;' },
+            '등록된 상주 확장 규칙이 없습니다. 채팅에서 "TTS에서 별표 지문 제거 규칙 추가해 줘"처럼 요청해 승인 카드로 추가할 수 있습니다.'
+          )
+        : h(doc, 'div', { style: 'display:flex;flex-direction:column;gap:6px;' },
+            ...rules.map(r => h(doc, 'div', {
+              class: 'rh-ext-item',
+              style: 'border:1px solid var(--rh-border);border-radius:8px;padding:8px;display:flex;justify-content:space-between;align-items:center;gap:8px;',
+            },
+              h(doc, 'div', { style: 'min-width:0;' },
+                h(doc, 'div', { style: 'font-size:12.5px;font-weight:600;' },
+                  `${r.name} `,
+                  h(doc, 'span', { style: 'font-size:11px;color:var(--rh-muted);font-weight:400;' }, `(${r.typeLabel})`)
+                ),
+                h(doc, 'div', { style: 'font-size:11px;color:var(--rh-muted);' },
+                  r.supported ? (r.enabled ? '활성 · 호스트 훅 연결됨' : '비활성') : '현재 호스트 미지원'
+                )
+              ),
+              h(doc, 'div', { class: 'rh-row', style: 'gap:4px;' },
+                h(doc, 'button', {
+                  class: `rh-btn${r.enabled ? ' primary' : ''}`,
+                  disabled: !r.supported,
+                  onclick: async () => {
+                    try {
+                      await rt.toggle(r.id, !r.enabled);
+                      this.showToast(`${r.name}: ${!r.enabled ? '활성화' : '비활성화'}`);
+                      this.render();
+                    } catch (err) {
+                      this.showToast(err?.message || '상태 변경 실패');
+                    }
+                  },
+                }, r.enabled ? '켜짐' : '꺼짐'),
+                h(doc, 'button', {
+                  class: 'rh-btn',
+                  onclick: () => {
+                    const dr = dryRunExtensionRule(r);
+                    this.showToast(dr.ok ? `드라이런 OK (${dr.type}${dr.changed ? ' · 변경 감지' : ''})` : (dr.error || '드라이런 오류'));
+                  },
+                }, '테스트'),
+                h(doc, 'button', {
+                  class: 'rh-btn danger',
+                  onclick: async () => {
+                    try {
+                      await rt.remove(r.id);
+                      this.showToast(`${r.name} 규칙 삭제 완료`);
+                      this.render();
+                    } catch (err) {
+                      this.showToast(err?.message || '삭제 실패');
+                    }
+                  },
+                }, '삭제')
+              )
+            ))
+          ),
+      alerts.length > 0 && h(doc, 'div', { style: 'margin-top:8px;font-size:11.5px;color:var(--rh-muted);' },
+        h(doc, 'strong', {}, '최근 응답 점검 알림'),
+        ...alerts.map(a => h(doc, 'div', {}, `• [${a.label}] ${(a.warnings || []).join(', ')}`))
+      )
+    );
+  }
+
   async destroy() {
     this._closeConfirm(false, { render: false });
     clearTimeout(this.toastTimer);
@@ -3076,6 +3313,11 @@ class RisuHelperApp {
       await this.flushUndoState();
     }
     this.currentJob?.stop?.('플러그인이 언로드되었습니다.');
+    try { await this.adapter.extensionRuntime?.dispose?.(); } catch {}
+    for (const unsub of this._risunestCleanups || []) {
+      try { await unsub(); } catch {}
+    }
+    this._risunestCleanups = [];
     await this.tracker.stop();
     const win = this.doc.defaultView;
     if (win?.visualViewport && this.viewportHandler) {
