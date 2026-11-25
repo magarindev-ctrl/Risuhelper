@@ -23,6 +23,8 @@ const SKILL_DEFS = [
   {
     id: 'core_text',
     label: '현재 칸 편집',
+    summary: '현재 포커스된 단일 입력칸의 부분 편집(patch_text) 및 덮어쓰기(replace_text)',
+    requiresCapabilities: [],
     actions: ['patch_text', 'replace_text'],
     knowledge: [],
     rules: [
@@ -38,6 +40,8 @@ const SKILL_DEFS = [
   {
     id: 'chat_input',
     label: '유저 대필',
+    summary: '채팅 입력창에서 현재 채팅 흐름에 맞는 유저 대사/행동 대필',
+    requiresCapabilities: [],
     actions: ['replace_text'],
     knowledge: ['cbs'],
     rules: [
@@ -51,6 +55,8 @@ const SKILL_DEFS = [
   {
     id: 'char_fields',
     label: '캐릭터 필드 · 작노',
+    summary: '캐릭터 설명·시스템 프롬프트·글로벌 노트·시나리오·작가의 노트 수정(update_field)',
+    requiresCapabilities: [],
     actions: ['update_field'],
     knowledge: ['character', 'cbs'],
     rules: [
@@ -64,6 +70,8 @@ const SKILL_DEFS = [
   {
     id: 'greetings',
     label: '첫 메시지',
+    summary: '기본 첫 메시지 및 추가 첫 메시지 수정·생성·삭제(update/create/delete_greeting)',
+    requiresCapabilities: [],
     actions: ['update_greeting', 'create_greeting', 'delete_greeting'],
     knowledge: ['character', 'cbs'],
     rules: [
@@ -79,6 +87,8 @@ const SKILL_DEFS = [
   {
     id: 'lorebook',
     label: '로어북',
+    summary: '캐릭터·채팅·모듈 로어북 생성·수정·폴더 정리·삭제',
+    requiresCapabilities: [],
     actions: ['create_lorebook', 'update_lorebook', 'organize_lorebook', 'delete_lorebook'],
     knowledge: ['lorebook', 'cbs'],
     rules: [
@@ -95,6 +105,8 @@ const SKILL_DEFS = [
   {
     id: 'scripts',
     label: 'Lua · 정규식',
+    summary: '캐릭터·모듈 Lua 트리거 및 정규식(editdisplay/editoutput 등) 작성·수정·삭제',
+    requiresCapabilities: [],
     actions: ['update_lua', 'upsert_regex', 'delete_regex'],
     knowledge: ['lua', 'regex', 'cbs'],
     rules: [],
@@ -108,6 +120,8 @@ const SKILL_DEFS = [
   {
     id: 'module_create',
     label: '모듈 신규 생성',
+    summary: '정규식+Lua+토글+임베딩+로어북이 묶인 새 RisuAI 모듈 통째 생성(create_module)',
+    requiresCapabilities: [],
     actions: ['create_module'],
     knowledge: ['module_create', 'lua', 'regex', 'lorebook', 'cbs'],
     rules: [
@@ -121,6 +135,8 @@ const SKILL_DEFS = [
   {
     id: 'persona',
     label: '페르소나',
+    summary: '유저 페르소나 생성·수정·삭제 및 현재 채팅 바인딩',
+    requiresCapabilities: [],
     actions: ['create_persona', 'update_persona', 'delete_persona'],
     knowledge: ['persona', 'cbs'],
     rules: [],
@@ -134,6 +150,8 @@ const SKILL_DEFS = [
   {
     id: 'config',
     label: '설정 · 컨피그',
+    summary: '온도·최대 응답·페널티·CSS/HTML·전역 모듈 등 RisuAI 전역 설정 변경(update_config)',
+    requiresCapabilities: [],
     actions: ['update_config'],
     knowledge: ['config'],
     rules: [],
@@ -145,6 +163,8 @@ const SKILL_DEFS = [
   {
     id: 'char_settings',
     label: '캐릭터 고급 튜닝',
+    summary: '로어북 토큰 예산·스캔 깊이(loreSettings), 로짓 바이어스(bias), 태그(tags) 튜닝',
+    requiresCapabilities: [],
     actions: ['update_char_settings'],
     knowledge: ['char_advanced'],
     rules: [
@@ -158,6 +178,8 @@ const SKILL_DEFS = [
   {
     id: 'char_create_port',
     label: '캐릭터 생성 · 포팅',
+    summary: '새 캐릭터 카드 생성(create_character) 및 다른 캐릭터의 로어북·정규식·Lua 포팅(port_from_character)',
+    requiresCapabilities: [],
     actions: ['create_character', 'port_from_character'],
     knowledge: ['character', 'char_advanced', 'cbs'],
     rules: [
@@ -173,6 +195,8 @@ const SKILL_DEFS = [
   {
     id: 'chat_vars',
     label: '채팅 변수',
+    summary: '채팅 변수(chat.scriptstate) 호감도·스탯·플래그 추가·수정·삭제(update_chat_vars)',
+    requiresCapabilities: [],
     actions: ['update_chat_vars'],
     knowledge: ['chat_vars', 'cbs'],
     rules: [
@@ -186,6 +210,8 @@ const SKILL_DEFS = [
   {
     id: 'chat_migration',
     label: '채팅 생성 · 이사',
+    summary: '새 채팅 생성+원클릭 이사(create_chat) 및 다른 채팅에서 상태 옮기기(import_chat)',
+    requiresCapabilities: [],
     actions: ['import_chat', 'create_chat'],
     knowledge: [],
     rules: [
@@ -202,6 +228,8 @@ const SKILL_DEFS = [
   {
     id: 'fetch_logs',
     label: '요청 로그 진단',
+    summary: '사용자가 직접 첨부한 최근 LLM API 요청·응답 로그 오류(4xx/5xx·토큰 초과 등) 분석',
+    requiresCapabilities: ['getFetchLogs'],
     actions: [],
     knowledge: ['fetch_logs'],
     rules: [],
@@ -273,12 +301,93 @@ function extractRecentAssistantSkillIds(history = []) {
   return ids;
 }
 
+function isSkillSupported(def, capabilities = null) {
+  if (!def) return false;
+  if (!capabilities || !Array.isArray(def.requiresCapabilities) || def.requiresCapabilities.length === 0) {
+    return true;
+  }
+  return def.requiresCapabilities.every(cap => Boolean(capabilities[cap]));
+}
+
+/**
+ * Returns the L1 built-in skill catalog (id, label, 1-line summary, actions) for skills
+ * supported on the current host and not already loaded in L0.
+ */
+function getSkillCatalog(capabilities = null, excludeIds = []) {
+  const excluded = new Set(['core_text', 'chat_input', ...(Array.isArray(excludeIds) ? excludeIds : [])]);
+  return SKILL_DEFS
+    .filter(def => !excluded.has(def.id) && isSkillSupported(def, capabilities))
+    .map(def => ({
+      id: def.id,
+      label: def.label,
+      summary: def.summary || def.label,
+      actions: [...(def.actions || [])],
+    }));
+}
+
+/**
+ * Dynamically loads L2 built-in skill content (knowledge + rules + schemas) when requested
+ * by the model via `load_skill` tool in the 3-call loop.
+ */
+function loadSkillPack(skillIds = [], capabilities = null) {
+  const requested = Array.isArray(skillIds) ? skillIds : [skillIds];
+  const loaded = [];
+  const unknown = [];
+  const unsupported = [];
+  const knowledgeKeys = new Set();
+  const rules = [];
+  const schemas = [];
+
+  for (const rawId of requested) {
+    const id = String(rawId ?? '').trim();
+    if (!id) continue;
+    const def = SKILL_BY_ID.get(id);
+    if (!def) {
+      unknown.push(id);
+      continue;
+    }
+    if (!isSkillSupported(def, capabilities)) {
+      unsupported.push(id);
+      continue;
+    }
+    if (!loaded.includes(id)) {
+      loaded.push(id);
+      for (const k of def.knowledge || []) knowledgeKeys.add(k);
+      for (const r of def.rules || []) rules.push(r);
+      for (const s of def.schemas || []) schemas.push(s);
+    }
+  }
+
+  const sections = [];
+  const knowledgeText = [...knowledgeKeys].map(k => KNOWLEDGE_SECTIONS[k]).filter(Boolean).join('\n\n');
+  if (knowledgeText) sections.push(`[불러온 내장 스킬 지식]\n${knowledgeText}`);
+  if (rules.length > 0) sections.push(`[규칙]\n${rules.map((r, i) => `${i + 1}. ${r}`).join('\n')}`);
+  if (schemas.length > 0) sections.push(`[지원 action 스키마]\n${schemas.join('\n')}`);
+
+  return {
+    ok: loaded.length > 0,
+    loaded,
+    unknown,
+    unsupported,
+    text: sections.join('\n\n'),
+  };
+}
+
 /**
  * Deterministically selects the subset of internal skills for a request based on
- * current cursor/screen, user message + recent follow-up turns, and attached context.
+ * current cursor/screen, user message + recent follow-up turns, attached context, and any
+ * L2 skills explicitly loaded during the current 3-call request loop.
  * @returns {string[]} ordered list of active skill IDs
  */
-function selectSkills({ context, snapshot, userInput = '', history = [], extraContext = {} } = {}) {
+function selectSkills({
+  context,
+  snapshot,
+  userInput = '',
+  history = [],
+  extraContext = {},
+  extraSkillIds = [],
+  capabilities = null,
+} = {}) {
   const screen = context?.screen || 'unknown';
   const kind = snapshot?.target?.targetKind || context?.targetKind || 'general';
   const isFreeTalk = Boolean(context?.freeTalk) || kind === 'general';
@@ -367,12 +476,36 @@ function selectSkills({ context, snapshot, userInput = '', history = [], extraCo
     active.add(id);
   }
 
-  // Keep canonical definition order
-  return SKILL_DEFS.filter(s => active.has(s.id)).map(s => s.id);
+  // 5. Merge any L2 dynamically loaded skills requested via `load_skill`
+  for (const rawId of Array.isArray(extraSkillIds) ? extraSkillIds : []) {
+    const id = String(rawId ?? '').trim();
+    if (SKILL_BY_ID.has(id)) active.add(id);
+  }
+
+  // Keep canonical definition order and hide skills unsupported on this host
+  return SKILL_DEFS
+    .filter(s => active.has(s.id) && isSkillSupported(s, capabilities))
+    .map(s => s.id);
 }
 
-function buildSkillPromptSections({ context, snapshot, userInput = '', history = [], extraContext = {} } = {}) {
-  const activeSkillIds = selectSkills({ context, snapshot, userInput, history, extraContext });
+function buildSkillPromptSections({
+  context,
+  snapshot,
+  userInput = '',
+  history = [],
+  extraContext = {},
+  extraSkillIds = [],
+  capabilities = null,
+} = {}) {
+  const activeSkillIds = selectSkills({
+    context,
+    snapshot,
+    userInput,
+    history,
+    extraContext,
+    extraSkillIds,
+    capabilities,
+  });
   const activeSet = new Set(activeSkillIds);
   const screen = context?.screen || 'unknown';
   const kind = snapshot?.target?.targetKind || context?.targetKind || 'general';
@@ -381,7 +514,7 @@ function buildSkillPromptSections({ context, snapshot, userInput = '', history =
   // On chat/unknown free-talk, include compact scripts & persona schemas even without keywords
   // (v0.4.x action parity) without paying for heavy Lua/regex/persona knowledge guides.
   const schemaOnlySkillIds = isFreeTalk && (screen === 'chat' || screen === 'unknown')
-    ? FREE_TALK_SCHEMA_BASELINE_SKILLS.filter(id => !activeSet.has(id))
+    ? FREE_TALK_SCHEMA_BASELINE_SKILLS.filter(id => !activeSet.has(id) && isSkillSupported(SKILL_BY_ID.get(id), capabilities))
     : [];
   const schemaSkillSet = new Set([...activeSkillIds, ...schemaOnlySkillIds]);
 
@@ -398,6 +531,7 @@ function buildSkillPromptSections({ context, snapshot, userInput = '', history =
   }
 
   for (const def of SKILL_DEFS) {
+    if (!isSkillSupported(def, capabilities)) continue;
     const isActive = activeSet.has(def.id);
     const includeSchema = schemaSkillSet.has(def.id);
     if (!isActive && !includeSchema) continue;
@@ -423,6 +557,8 @@ function buildSkillPromptSections({ context, snapshot, userInput = '', history =
     .filter(Boolean)
     .join('\n\n');
 
+  const l1Catalog = getSkillCatalog(capabilities, activeSkillIds);
+
   return {
     activeSkillIds,
     activeSkillLabels: activeSkillIds.map(id => SKILL_BY_ID.get(id)?.label || id),
@@ -431,7 +567,16 @@ function buildSkillPromptSections({ context, snapshot, userInput = '', history =
     rules,
     schemas,
     includeRawDelimiters,
+    l1Catalog,
   };
 }
 
-export { SKILL_DEFS, collectRoutingText, selectSkills, buildSkillPromptSections };
+export {
+  SKILL_DEFS,
+  isSkillSupported,
+  getSkillCatalog,
+  loadSkillPack,
+  collectRoutingText,
+  selectSkills,
+  buildSkillPromptSections,
+};

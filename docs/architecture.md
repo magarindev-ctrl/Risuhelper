@@ -1,6 +1,6 @@
 # RisuHelper 아키텍처 및 RisuAI 포크 호환성 분석
 
-> 버전: `0.6.0` · 라이선스: `GPL-3.0-only` · 외부 런타임 의존성: 0개 · API 전수표: [`docs/api-coverage.md`](api-coverage.md)
+> 버전: `0.7.0` · 라이선스: `GPL-3.0-only` · 외부 런타임 의존성: 0개 · API 전수표: [`docs/api-coverage.md`](api-coverage.md)
 
 ---
 
@@ -49,26 +49,27 @@
 User Input + Detected/Manual Target
         │
         ▼
-[focus-detector.js] ──▶ [host-adapter.js] (Target Snapshot + Extra Context)
+[focus-detector.js] ──▶ [host-adapter.js] (Target Snapshot + Extra Context + Host Capabilities)
                                 │
                                 ▼
-                         [knowledge.js] (Screen-aware RisuAI/Fork Knowledge)
+                   [skills.js] (L0 자동 로드 + L1 내장 카탈로그 + L2 동적 로드)
                                 │
                                 ▼
                     [llm.js] / [preset-engine.js]
                     (direct mode ↔ preset mode: .risup/.risupreset/.json + CBS + Modules)
                                 │
                                 ▼
-                   Risuai.runLLMModel() Stream Reader
-                                │
-                                ▼
-                  parseAssistantReply() (`risuhelper-proposal`)
+        ┌────────── [agent-loop.js] (요청당 최대 3회 LLM 호출 · 자동 단계 100% Read-Only) ──────────┐
+        │  Call 1: 직접 답변/제안 OR `risuhelper-tool` 배치 조회([read-tools.js] 12종)            │
+        │  Call 2: 조회 데이터 분석 → 제안 생성 및 드라이런 미리보기 검증                           │
+        │  Call 3: 파싱·스키마·미리보기 실패 시 오류·원문 발췌 첨부 자동 수정 (4번째 호출 불가)      │
+        └──────────────────────────────────────────────────────────────────────────────────────────┘
                                 │
                                 ▼
              [text-edits.js] Diff Preview Card → User Review
                                 │
                                 ▼
-             [host-adapter.js] Apply + 1-Click Undo Stack
+             [host-adapter.js] Apply + 1-Click Surgical Undo Stack
 ```
 
 ### 주요 설계 원칙 및 안전장치
@@ -82,6 +83,13 @@ User Input + Detected/Manual Target
 - **되돌리기 기록(Undo Journal)**: 모든 쓰기는 `_commitCharacter` / `_commitChat` / `_commitDb`를 거치며, 이전 상태를 쓴 상태로 바꾸는 연산 목록(`src/undo-journal.js`의 `diffValues`)을 기록합니다. 기록은 순수 JSON이라 `pluginStorage`에 저장되어 새로고침 뒤에도 복원됩니다. 복원(`revertOps`)은 호스트가 아직 RisuHelper가 쓴 값을 갖고 있는 연산만 되돌리고, 이후 사용자가 고친 값은 충돌로 보고합니다. 목록 항목은 `id`/`chatId`가 있으면 그것으로, 없으면 인덱스와 식별 속성(`comment`, `key`, `name`)으로 다시 찾으므로 순서가 바뀌어도 동작합니다. 여러 제안은 `runGroup`으로 한 단위가 됩니다.
 - **범위 공통 쓰기 경로**: 캐릭터·채팅·모듈 세 범위는 `_openScope`가 복제본(`root`)과 `commit(label)`을 돌려주는 하나의 경로를 씁니다. 로어북 생성·수정·폴더 정리·복구, Lua, 정규식, 단일 텍스트 필드 쓰기가 범위별 분기 없이 구현됩니다.
 - **확인 창(`askConfirm`)**: 되돌리기(상단·묶음·카드)와 확정(상단·묶음·카드)은 모두 `RisuHelperApp.askConfirm`을 거칩니다. 호스트의 `alertConfirm`은 플러그인 전체화면 프레임 뒤에 가려질 수 있고 `confirm()`은 앱 셸마다 동작이 달라, 패널(`.rh-drawer`) 안에 `.rh-modal`을 직접 그립니다. 상태(`confirmDialog`)로 보관하므로 패널이 다시 그려져도 유지되고, 창 밖 클릭·`ESC`·취소·패널 닫기·언로드는 모두 거절로 처리합니다.
+- **요청당 최대 3회 LLM 루프 · 12종 Read-Only 도구 · L0/L1/L2 내장 스킬 라우터 (`src/agent-loop.js`, `src/read-tools.js`, `src/skills.js`)**:
+  - 요청당 호출 예산을 설정(`1 / 2 / 3`, 기본 `3`)으로 제어하며, 코드 구조상 4번째 호출을 원천 차단합니다(`MAX_AGENT_CALLS = 3`).
+  - 단순 요청은 1회 호출로 즉시 종료하고, 추가 스키마·전문·진단이 필요할 때만 `risuhelper-tool` JSON 배열(1회 최대 6개 병렬 실행)로 12종 읽기 전용 도구(`load_skill`, `read_item`, `list_items`, `read_chat`, `read_vars`, `test_regex_cbs`, `active_lorebook`, `audit_workspace`, `inspect_assets`, `read_fetch_log`, `host_info`, `search_translation`)를 실행합니다.
+  - `read_item`으로 전문을 조회하면 해당 요청의 `fieldsShownFull`/`greetingsShownFull`이 안전하게 해제되어 전체 교체 제안이 가능해지며, `read_fetch_log`는 사용자가 1회성 로그 첨부를 켠 경우에만 허용됩니다.
+  - 제안 파싱·스키마·미리보기 오류가 발생하면 남은 예산 안에서 오류와 원문 발췌를 붙여 자동 수정하며, 동일 응답 반복 시 즉시 조기 종료(zero-progress guard)합니다.
+  - 외부 `SKILL.md` 없이 내장 스킬 L0(자동 로드) · L1(1줄 카탈로그) · L2(`load_skill` 동적 로드) 구조를 유지하고, 현재 호스트가 미지원하는 스킬·도구는 카탈로그에서 자동 숨깁니다.
+  - 자동 단계는 어떤 쓰기 API도 호출하지 않으며, UI에 실시간 진행 배지(`2/3 · ... 조회 중`), 총 호출 횟수·전송 글자 수, 접이식 도구 실행 내역, 전 구간 즉시 `중단`을 제공합니다.
 - **채팅 생성·이사(`create_chat`, `import_chat`, `src/chat-transfer.js`)**: `import_chat`은 같은 캐릭터의 다른 채팅에서 지금 열린 채팅으로 상태를 옮기며, `create_chat`은 포크 안전 UUID `id`와 빈 `message: []`를 갖춘 새 채팅을 생성하고 선택적으로 `importFromChatIndex`("current" 또는 원본 `chatIndex`), `importItems`, `summaryLorebook`, `switchToNewChat`까지 원클릭으로 처리합니다(기존 채팅 배열을 얕은 복사로 유지해 긴 대화 비교 비용과 PocketRisu `_placeholder` 충돌을 회피하며, 되돌리기 시 새 채팅만 제거하고 `chatPage`를 복구). RisuAI 콜드 스토리지(`\uEF01COLDSTORAGE\uEF01`) 보관 채팅은 목록에 표시하고 읽기·이사 시 복원 안내를 돌려줍니다.
 - **경계 없는 타 캐릭터·타 채팅 제어 (`targetCharIndex` · `targetChatIndex`)**: `patch_text`/`replace_text`(프롬프트 인젝션 방어)를 제외한 전용 동작은 `targetCharIndex` / `targetChatIndex`로 현재 열려 있지 않은 캐릭터나 채팅도 `getCharacterFromIndex` / `setCharacterToIndex` / `getChatFromIndex` / `setChatToIndex`를 통해 안전하게 미리보기·적용·되돌리기할 수 있습니다. 카드 제목에 `[다른 캐릭터: ...]` / `[다른 채팅: ...]` 접두를 명시하고 `chaId`/`chatId`를 고정합니다. RisuNest에서는 `queryCharacters` 고속 경로로 전체 `db.characters` 직렬화를 피합니다.
 - **런타임 기능 탐지 (`src/host-capabilities.js`)**: Plugin v3 iframe의 catch-all Proxy(`typeof api.foo === 'function'`이 항상 참)를 우회해 `getRuntimeInfo()` → `<title>` → (비-Proxy 한정) 메서드 시그니처 순서로 6대 호스트(원본·PocketRisu·RisuBard·RisuNest·해적리스·Hardened)와 지원 API 매트릭스를 탐지합니다.

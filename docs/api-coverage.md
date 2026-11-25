@@ -1,6 +1,6 @@
 # RisuAI 및 5대 포크 Plugin API v3 전수 커버리지 매트릭스
 
-> 기준 버전: `0.6.0` (M0 확정판) · 대조 대상:
+> 기준 버전: `0.7.0` (M1 반영) · 대조 대상:
 > - **원본** [`kwaroran/Risuai`](https://github.com/kwaroran/Risuai)
 > - **PocketRisu** [`PocketRisu/PocketRisu`](https://github.com/PocketRisu/PocketRisu)
 > - **RisuBard** [`rpaddict/RisuBard`](https://github.com/rpaddict/RisuBard)
@@ -40,19 +40,19 @@
 | `showContainer` / `hideContainer` | 패널 표시 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | **지원** |
 | `onUnload` | 라이프사이클 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | **지원** |
 
-### ② 읽기 · 진단 도구 (10개)
+### ② 읽기 · 진단 도구 (10개 — 전원 구현 완료)
 
 | API | 범위 | 원본 | Pocket | Bard | Nest | 해적 | Hardened | 상태 / 마일스톤 |
 |---|---|:---:|:---:|:---:|:---:|:---:|:---:|---|
-| `getRuntimeInfo` | 호스트 런타임 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | **지원 (`0.6.0`)** — `host-capabilities.js` 탐지 + M1 `host_info` 도구 |
-| `apiVersion` / `apiVersionCompatibleWith` | 버전 정보 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | **지원 (`0.6.0`)** — 기능 탐지 메타데이터 |
-| `getCharacterFromIndex` | 임의 캐릭터 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | **지원 (`0.6.0`)** — 경계 없는 타 캐릭터 읽기·포팅 고속 경로 |
-| `getCurrentLorebookEntries` | 현재 채팅 로어북 | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | **M1 (`0.7.0`)** — `active_lorebook` 진단 도구 |
-| `getTextTheme` | 전역 테마 | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | **M1 (`0.7.0`)** / **M3 (`0.9.0`)** — 테마 조회·Undo |
-| `getTranslationCache` | 전역 번역 캐시 | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | **M1 (`0.7.0`)** — `search_translation` 도구 |
-| `searchTranslationCache` | 전역 번역 캐시 | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | **M1 (`0.7.0`)** — `search_translation` 도구 |
-| `readImage` | 에셋 조회 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | **M1 (`0.7.0`)** — `inspect_assets` 메타/존재 확인 |
-| `readInlay` | 인레이 조회 | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | **M1 (`0.7.0`)** — `inspect_assets` 메타 확인 |
+| `getRuntimeInfo` | 호스트 런타임 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | **지원 (`0.7.0`)** — `host-capabilities.js` 탐지 + `host_info` 도구 |
+| `apiVersion` / `apiVersionCompatibleWith` | 버전 정보 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | **지원 (`0.7.0`)** — 기능 탐지 및 `host_info` 메타데이터 |
+| `getCharacterFromIndex` | 임의 캐릭터 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | **지원 (`0.7.0`)** — 경계 없는 타 캐릭터 읽기·포팅·`read_item` |
+| `getCurrentLorebookEntries` | 현재 채팅 로어북 | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | **지원 (`0.7.0`)** — `active_lorebook` 진단 도구 |
+| `getTextTheme` | 전역 테마 | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | **지원 (`0.7.0`)** — `host_info` 조회 (**M3 `0.9.0`** 테마 Undo 연동) |
+| `getTranslationCache` | 전역 번역 캐시 | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | **지원 (`0.7.0`)** — `search_translation` 도구 |
+| `searchTranslationCache` | 전역 번역 캐시 | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | **지원 (`0.7.0`)** — `search_translation` 도구 |
+| `readImage` | 에셋 조회 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | **지원 (`0.7.0`)** — `inspect_assets` 메타/존재 확인 |
+| `readInlay` | 인레이 조회 | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | **지원 (`0.7.0`)** — `inspect_assets` 메타 확인 |
 
 ### ③ 승인형 쓰기 동작 (9개)
 

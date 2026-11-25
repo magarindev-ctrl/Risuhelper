@@ -1350,6 +1350,34 @@ html, body {
   z-index: 20;
   pointer-events: none;
 }
+
+.rh-msg-meta {
+  font-weight: 400;
+  color: var(--rh-muted);
+  font-size: 11px;
+}
+
+.rh-loop-trace {
+  margin-top: 4px;
+  font-size: 11.5px;
+  color: var(--rh-muted);
+}
+
+.rh-loop-trace-list {
+  margin: 6px 0 0;
+  padding-left: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.rh-loop-trace-item.ok {
+  color: var(--rh-text);
+}
+
+.rh-loop-trace-item.fail {
+  color: var(--rh-danger, #f87171);
+}
 `;
 
 export { STYLES };

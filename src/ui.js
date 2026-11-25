@@ -2,7 +2,8 @@ import { VERSION, STORAGE_KEY, PRESET_STORAGE_KEY, UNDO_STORAGE_KEY, DEFAULT_MAX
 import { STYLES } from './style.js';
 import { FocusTracker, normalizeChipPos, MIN_DOCK_VIEWPORT_PX } from './focus-detector.js';
 import { HostAdapter, resolveModuleIndex, summarizeLoreList } from './host-adapter.js';
-import { callRisuModel, parseAssistantReply, buildConversationMessages, findUnknownProposalKeys, DELETE_ACTIONS } from './llm.js';
+import { callRisuModel, buildConversationMessages, findUnknownProposalKeys, DELETE_ACTIONS } from './llm.js';
+import { runAgentLoop, normalizeMaxCalls } from './agent-loop.js';
 import { buildDiffPreview } from './text-edits.js';
 import { getQuickPromptsForContext } from './knowledge.js';
 import { newPresetState, validatePresetState, assembleRisuHelperMessages } from './preset-engine.js';
@@ -17,6 +18,7 @@ import { collectRoutingText } from './skills.js';
 const DEFAULT_SETTINGS = {
   modelMode: 'model',
   timeoutSeconds: 120,
+  maxLlmCalls: 3,
   maxHistoryTurns: 12,
   maxContentChars: DEFAULT_MAX_CONTENT_CHARS,
   showFloatingChip: true,
@@ -269,6 +271,7 @@ class RisuHelperApp {
         const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
         if (parsed && typeof parsed === 'object') {
           this.settings = { ...DEFAULT_SETTINGS, ...parsed };
+          this.settings.maxLlmCalls = normalizeMaxCalls(this.settings.maxLlmCalls);
         }
       }
     } catch {}
@@ -1124,8 +1127,11 @@ class RisuHelperApp {
     return extra;
   }
 
-  async assembleRequestPayload(ctx, historyMessages, userInput) {
+  async assembleRequestPayload(ctx, historyMessages, userInput, opts = {}) {
     const extraContext = await this.gatherExtraContext(ctx, userInput, historyMessages);
+    const maxCalls = normalizeMaxCalls(this.settings.maxLlmCalls);
+    const enableTools = opts.enableTools !== undefined ? Boolean(opts.enableTools) : maxCalls > 1;
+    const allowFetchLog = Boolean(opts.allowFetchLog ?? this.attachedFetchLog);
     const directMessages = buildConversationMessages({
       context: ctx,
       snapshot: this.activeSnapshot,
@@ -1134,6 +1140,9 @@ class RisuHelperApp {
       userInput,
       maxHistoryTurns: this.settings.maxHistoryTurns,
       maxContentChars: this.settings.maxContentChars,
+      capabilities: this.adapter.getCapabilities(),
+      enableTools,
+      allowFetchLog,
     });
 
     let activeChar = null;
@@ -1193,6 +1202,7 @@ class RisuHelperApp {
     const namedChat = mentionedChatIndex(trimmed, this.chatList);
     if (namedChat !== null && namedChat !== this.referenceChat?.index) this.setReferenceChat(namedChat);
     const ctx = this.getEffectiveContext();
+    const maxCalls = normalizeMaxCalls(this.settings.maxLlmCalls);
     const userMsg = { role: 'user', content: trimmed, rawText: trimmed };
     const assistantMsg = {
       role: 'assistant',
@@ -1201,6 +1211,8 @@ class RisuHelperApp {
       proposals: [],
       parseErrors: [],
       streaming: true,
+      progressLabel: maxCalls > 1 ? `1/${maxCalls} · 요청 분석 및 응답 생성 중...` : '응답 생성 중...',
+      loopMeta: null,
     };
 
     this.messages.push(userMsg, assistantMsg);
@@ -1219,6 +1231,13 @@ class RisuHelperApp {
 
     const job = {
       cancelled: false,
+      cancelReason: '',
+      _activeStop: null,
+      stop(reason = '사용자가 요청을 중단했습니다.') {
+        this.cancelled = true;
+        this.cancelReason = reason;
+        if (typeof this._activeStop === 'function') this._activeStop(reason);
+      },
       onChunk: (partial) => {
         assistantMsg.content = partial;
         assistantMsg.rawText = partial;
@@ -1237,7 +1256,13 @@ class RisuHelperApp {
     this.currentJob = job;
 
     try {
-      const assembled = await this.assembleRequestPayload(ctx, this.messages.slice(0, -2), trimmed);
+      const hadOptInFetchLog = Boolean(this.attachedFetchLog);
+      const optInLogSnapshot = this.attachedFetchLog ? { ...this.attachedFetchLog } : null;
+
+      const assembled = await this.assembleRequestPayload(ctx, this.messages.slice(0, -2), trimmed, {
+        enableTools: maxCalls > 1,
+        allowFetchLog: hadOptInFetchLog,
+      });
       this.lastPresetPreview = assembled;
       if (assembled.issues && assembled.issues.length > 0) {
         throw new Error('프리셋 요청 점검에서 중단되었습니다:\n- ' + assembled.issues.join('\n- '));
@@ -1247,32 +1272,62 @@ class RisuHelperApp {
         this.attachedFetchLog = null;
       }
 
-      const rawReply = await callRisuModel(
-        this.api,
-        assembled.messages,
-        { mode: this.settings.modelMode, timeoutSeconds: this.settings.timeoutSeconds },
-        job
-      );
+      // Pin the target + full-text visibility flags at generation time; read_item may unlock more in-loop
+      const pinnedCtx = JSON.parse(JSON.stringify(ctx));
+      pinnedCtx.greetingsShownFull = assembled.greetingsShownFull || [];
+      pinnedCtx.fieldsShownFull = assembled.fieldsShownFull || [];
 
-      const parsed = parseAssistantReply(rawReply);
+      const loopResult = await runAgentLoop({
+        api: this.api,
+        adapter: this.adapter,
+        initialMessages: assembled.messages,
+        callModel: callRisuModel,
+        modelOptions: { mode: this.settings.modelMode, timeoutSeconds: this.settings.timeoutSeconds },
+        job,
+        pinnedCtx,
+        currentSourceExcerpt: this.activeSnapshot?.content || '',
+        maxCalls,
+        toolContext: {
+          allowFetchLog: hadOptInFetchLog,
+          attachedFetchLog: optInLogSnapshot,
+        },
+        onProgress: (info) => {
+          assistantMsg.progressLabel = info?.label || '응답 생성 중...';
+          if (info?.stage === 'tools' || info?.stage === 'repair') {
+            if (chunkRenderTimer) {
+              clearTimeout(chunkRenderTimer);
+              chunkRenderTimer = null;
+            }
+            assistantMsg.content = info.label;
+          }
+          this.render();
+          this.scrollChatToBottom();
+        },
+      });
+
+      const { rawReply, parsed, previewedProposals, pinnedCtx: finalPinnedCtx } = loopResult;
       assistantMsg.streaming = false;
+      assistantMsg.progressLabel = '';
       assistantMsg.rawText = rawReply;
       assistantMsg.content = parsed.prose || (parsed.proposals.length > 0 ? '아래 수정·생성 제안을 확인한 뒤 적용해 주세요.' : rawReply);
       assistantMsg.parseErrors = parsed.errors;
+      assistantMsg.loopMeta = {
+        callsUsed: loopResult.callsUsed,
+        maxCalls: loopResult.maxCalls,
+        totalPromptChars: loopResult.totalPromptChars,
+        toolRuns: loopResult.toolRuns,
+        repairedCount: loopResult.repairedCount,
+        loadedSkillIds: loopResult.loadedSkillIds,
+        steps: loopResult.steps,
+      };
 
-      // Dry-run each proposal and pin the target + host binding at generation time
-      const pinnedCtx = JSON.parse(JSON.stringify(ctx));
-      // Which first messages the model saw in full for this request (guards whole-text overwrites).
-      pinnedCtx.greetingsShownFull = assembled.greetingsShownFull || [];
-      pinnedCtx.fieldsShownFull = assembled.fieldsShownFull || [];
       assistantMsg.proposals = [];
-      for (const prop of parsed.proposals) {
-        const preview = await this.adapter.previewProposal(prop, pinnedCtx);
+      for (const { proposal: prop, preview } of previewedProposals) {
         assistantMsg.proposals.push({
           cardKey: `card-${++this._cardSeq}`,
           proposal: prop,
           preview,
-          pinnedTarget: preview.target ? JSON.parse(JSON.stringify(preview.target)) : pinnedCtx,
+          pinnedTarget: preview.target ? JSON.parse(JSON.stringify(preview.target)) : finalPinnedCtx,
           hostBinding: preview.hostBinding ? JSON.parse(JSON.stringify(preview.hostBinding)) : null,
           applied: false,
           undoId: null,
@@ -1287,6 +1342,7 @@ class RisuHelperApp {
       }
     } catch (err) {
       assistantMsg.streaming = false;
+      assistantMsg.progressLabel = '';
       assistantMsg.content = '';
       assistantMsg.error = err.message || String(err);
     } finally {
@@ -2196,6 +2252,22 @@ class RisuHelperApp {
           })
         ),
         h(doc, 'div', { class: 'rh-field' },
+          h(doc, 'span', {}, '요청당 최대 LLM 호출 (읽기 도구 · 자동 수정)'),
+          h(doc, 'select', {
+            class: 'rh-select',
+            'data-setting': 'maxLlmCalls',
+            onchange: async (e) => {
+              this.settings.maxLlmCalls = normalizeMaxCalls(e.target.value);
+              await this.saveSettings();
+              this.render();
+            },
+          },
+            h(doc, 'option', { value: '1', selected: normalizeMaxCalls(this.settings.maxLlmCalls) === 1 }, '1회 (단일 호출 · 빠름)'),
+            h(doc, 'option', { value: '2', selected: normalizeMaxCalls(this.settings.maxLlmCalls) === 2 }, '2회 (조회 또는 자동 수정 1회)'),
+            h(doc, 'option', { value: '3', selected: normalizeMaxCalls(this.settings.maxLlmCalls) === 3 }, '3회 (기본 · 조회 + 분석 + 자동 수정)')
+          )
+        ),
+        h(doc, 'div', { class: 'rh-field' },
           h(doc, 'span', {}, '모델에 보내는 원문 길이 (초과분은 잘리고 전체 덮어쓰기가 막힘)'),
           h(doc, 'select', {
             class: 'rh-select',
@@ -2799,9 +2871,26 @@ class RisuHelperApp {
           msgWrap.appendChild(h(doc, 'div', { class: 'rh-bubble' }, msg.content));
         } else {
           const bubble = h(doc, 'div', { class: 'rh-bubble' });
-          const barLeft = msg.streaming
-            ? h(doc, 'span', { class: 'rh-msg-badge' }, h(doc, 'span', { class: 'rh-streaming-dot' }), '응답 생성 중...')
-            : h(doc, 'span', { class: 'rh-msg-badge' }, msg.error ? '오류' : (msg.rawView ? 'RisuHelper · 원문' : 'RisuHelper'));
+          let barLeft;
+          if (msg.streaming) {
+            barLeft = h(doc, 'span', { class: 'rh-msg-badge' }, h(doc, 'span', { class: 'rh-streaming-dot' }), msg.progressLabel || '응답 생성 중...');
+          } else if (msg.error) {
+            barLeft = h(doc, 'span', { class: 'rh-msg-badge' }, '오류');
+          } else {
+            const baseLabel = msg.rawView ? 'RisuHelper · 원문' : 'RisuHelper';
+            let metaSpan = null;
+            if (msg.loopMeta) {
+              const m = msg.loopMeta;
+              const metaParts = [`호출 ${m.callsUsed}/${m.maxCalls}`];
+              if (Number.isFinite(m.totalPromptChars) && m.totalPromptChars > 0) {
+                metaParts.push(`${m.totalPromptChars.toLocaleString()}자`);
+              }
+              if (m.toolRuns?.length > 0) metaParts.push(`읽기 도구 ${m.toolRuns.length}건`);
+              if (m.repairedCount > 0) metaParts.push(`자동 수정 ${m.repairedCount}회`);
+              metaSpan = h(doc, 'span', { class: 'rh-msg-meta' }, ` · ${metaParts.join(' · ')}`);
+            }
+            barLeft = h(doc, 'span', { class: 'rh-msg-badge' }, baseLabel, metaSpan);
+          }
           const barActions = (!msg.error && !msg.streaming && msg.content)
             ? h(doc, 'div', { class: 'rh-msg-actions' },
                 h(doc, 'button', {
@@ -2833,6 +2922,27 @@ class RisuHelperApp {
             });
           }
           bubble.appendChild(body);
+          if (!msg.streaming && msg.loopMeta && (msg.loopMeta.toolRuns?.length > 0 || msg.loopMeta.repairedCount > 0)) {
+            const m = msg.loopMeta;
+            const summaryParts = [];
+            if (m.toolRuns?.length > 0) summaryParts.push(`읽기 도구 ${m.toolRuns.length}건 조회`);
+            if (m.repairedCount > 0) summaryParts.push(`제안 오류 자동 수정 ${m.repairedCount}회`);
+            bubble.appendChild(
+              h(doc, 'details', { class: 'rh-preview-details rh-loop-trace' },
+                h(doc, 'summary', {}, `${summaryParts.join(' · ')} (자동 단계는 읽기 전용)`),
+                h(doc, 'ul', { class: 'rh-loop-trace-list' },
+                  ...(m.toolRuns || []).map(run =>
+                    h(doc, 'li', { class: `rh-loop-trace-item ${run.ok ? 'ok' : 'fail'}` },
+                      `${run.ok ? '✓' : '✗'} [호출 ${run.call}] ${run.label}${!run.ok && run.error ? ` — ${run.error}` : ''}`
+                    )
+                  ),
+                  m.repairedCount > 0 && h(doc, 'li', { class: 'rh-loop-trace-item ok' },
+                    `↻ 파싱·미리보기 오류를 감지해 ${m.repairedCount}회 자동 수정했습니다.`
+                  )
+                )
+              )
+            );
+          }
           msgWrap.appendChild(bubble);
 
           for (const err of msg.parseErrors || []) {
