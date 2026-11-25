@@ -1,6 +1,6 @@
 # RisuAI 및 5대 포크 Plugin API v3 전수 커버리지 매트릭스
 
-> 기준 버전: `0.7.0` (M1 반영) · 대조 대상:
+> 기준 버전: `0.8.0` (M2 반영) · 대조 대상:
 > - **원본** [`kwaroran/Risuai`](https://github.com/kwaroran/Risuai)
 > - **PocketRisu** [`PocketRisu/PocketRisu`](https://github.com/PocketRisu/PocketRisu)
 > - **RisuBard** [`rpaddict/RisuBard`](https://github.com/rpaddict/RisuBard)

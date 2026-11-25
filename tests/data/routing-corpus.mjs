@@ -1,0 +1,280 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// 224 realistic Korean user utterances across all 14 built-in skills for M2 routing verification.
+// Tests L0 deterministic recall (>=95%) AND 100% combined L0 + L2 (`load_skill`) reachability.
+
+const CHAT_FREE_TALK = { screen: 'chat', targetKind: 'general', freeTalk: true };
+const CHAR_DESC_FOCUS = { screen: 'character', targetKind: 'char_field', fieldKey: 'desc', freeTalk: false };
+const CHAT_INPUT_FOCUS = { screen: 'chat', targetKind: 'chat_input', freeTalk: false };
+const LORE_FOCUS = { screen: 'lorebook', targetKind: 'char_lorebook', loreIndex: 0, freeTalk: false };
+const LUA_FOCUS = { screen: 'scripts', targetKind: 'char_lua', freeTalk: false };
+const REGEX_FOCUS = { screen: 'scripts', targetKind: 'char_regex', regexIndex: 0, freeTalk: false };
+const PERSONA_FOCUS = { screen: 'persona', targetKind: 'persona', personaIndex: 0, freeTalk: false };
+const SETTINGS_FOCUS = { screen: 'settings', targetKind: 'config', fieldKey: 'temperature', freeTalk: false };
+const MODULE_FOCUS = { screen: 'module', targetKind: 'module_field', fieldKey: 'backgroundEmbedding', freeTalk: false };
+
+/**
+ * Each entry:
+ * { expectedSkill, userInput, context?, history?, extraContext?, expectL2Fallback? }
+ * 16 utterances x 14 skills = 224 total utterances.
+ */
+const ROUTING_CORPUS = [
+  // 1. core_text (16) — focused single-field editing across all editable targetKinds
+  { expectedSkill: 'core_text', context: CHAR_DESC_FOCUS, userInput: '이 문장 조금 더 자연스럽게 다듬어 줘' },
+  { expectedSkill: 'core_text', context: CHAR_DESC_FOCUS, userInput: '오타만 찾아서 부분 수정해 줘' },
+  { expectedSkill: 'core_text', context: CHAR_DESC_FOCUS, userInput: '두 번째 단락을 좀 더 간결하게 줄여 줘' },
+  { expectedSkill: 'core_text', context: CHAR_DESC_FOCUS, userInput: '말투를 존댓말에서 반말로 바꿔 줘' },
+  { expectedSkill: 'core_text', context: { screen: 'character', targetKind: 'char_field', fieldKey: 'systemPrompt', freeTalk: false }, userInput: '지금 칸에 금지 규칙 한 줄 추가해 줘' },
+  { expectedSkill: 'core_text', context: { screen: 'character', targetKind: 'char_alt_greeting', greetingIndex: 0, freeTalk: false }, userInput: '마지막 대사만 살짝 부드럽게 고쳐 줘' },
+  { expectedSkill: 'core_text', context: { screen: 'chat', targetKind: 'chat_note', fieldKey: 'note', freeTalk: false }, userInput: '서술 길이를 조금 늘리라는 지시 넣어 줘' },
+  { expectedSkill: 'core_text', context: { screen: 'chat', targetKind: 'chat_message', messageIndex: 2, freeTalk: false }, userInput: '이 말풍선 어색한 번역투 교정해 줘' },
+  { expectedSkill: 'core_text', context: LORE_FOCUS, userInput: '지금 열어 둔 항목 본문만 깔끔하게 정리해 줘' },
+  { expectedSkill: 'core_text', context: { screen: 'lorebook', targetKind: 'chat_lorebook', loreIndex: 0, freeTalk: false }, userInput: '여기 내용에서 날짜만 내일로 바꿔 줘' },
+  { expectedSkill: 'core_text', context: LUA_FOCUS, userInput: '이 코드에서 nil 체크 빠진 부분 고쳐 줘' },
+  { expectedSkill: 'core_text', context: REGEX_FOCUS, userInput: '치환 HTML에 여백 조금만 더해 줘' },
+  { expectedSkill: 'core_text', context: PERSONA_FOCUS, userInput: '외형 묘사 한 줄만 수정해 줘' },
+  { expectedSkill: 'core_text', context: MODULE_FOCUS, userInput: '여기 CSS 다크모드 색상 깨지는 거 잡아 줘' },
+  { expectedSkill: 'core_text', context: { screen: 'settings', targetKind: 'config', fieldKey: 'customCSS', freeTalk: false }, userInput: '폰트 크기 15px로 고쳐 줘' },
+  { expectedSkill: 'core_text', context: { screen: 'settings', targetKind: 'config', fieldKey: 'guiHTML', freeTalk: false }, userInput: '이 레이아웃 div 닫는 태그 빠져서 고쳐 줘' },
+
+  // 2. chat_input (16) — ghostwriting & reply drafting in chat input box
+  { expectedSkill: 'chat_input', context: CHAT_INPUT_FOCUS, userInput: '다음 대사 대필해 줘' },
+  { expectedSkill: 'chat_input', context: CHAT_INPUT_FOCUS, userInput: '선택지 3개만 써 줘' },
+  { expectedSkill: 'chat_input', context: CHAT_INPUT_FOCUS, userInput: '지금 분위기 이어서 차분하게 대답하는 걸로 써 줘' },
+  { expectedSkill: 'chat_input', context: CHAT_INPUT_FOCUS, userInput: '장난스럽게 받아치는 유저 반응 만들어 줘' },
+  { expectedSkill: 'chat_input', context: CHAT_INPUT_FOCUS, userInput: '아리아 위로해 주는 대사 한 문단으로 부탁해' },
+  { expectedSkill: 'chat_input', context: CHAT_INPUT_FOCUS, userInput: '거절하면서 자리 뜨는 행동 묘사 넣어 줘' },
+  { expectedSkill: 'chat_input', context: CHAT_INPUT_FOCUS, userInput: '내면 독백 위주로 다음 턴 작성해 줘' },
+  { expectedSkill: 'chat_input', context: CHAT_INPUT_FOCUS, userInput: '방금 내가 쓴 초안: "응 알았어 갈게" 좀 더 문학적으로 다듬어 줘' },
+  { expectedSkill: 'chat_input', context: CHAT_INPUT_FOCUS, userInput: '고백하는 장면 감동적으로 이어 써 줘' },
+  { expectedSkill: 'chat_input', context: CHAT_INPUT_FOCUS, userInput: '긴장감 있게 검을 뽑는 행동 써 줘' },
+  { expectedSkill: 'chat_input', context: CHAT_INPUT_FOCUS, userInput: '짧게 한 줄로만 대답할 말 추천해 줘' },
+  { expectedSkill: 'chat_input', context: CHAT_INPUT_FOCUS, userInput: '화내는 버전이랑 참는 버전 두 가지로 대필해 줘' },
+  { expectedSkill: 'chat_input', context: CHAT_INPUT_FOCUS, userInput: '소설체 3인칭으로 다음 행동 묘사해 줘' },
+  { expectedSkill: 'chat_input', context: CHAT_INPUT_FOCUS, userInput: '유저가 단서를 발견하는 전개로 이어 줘' },
+  { expectedSkill: 'chat_input', context: CHAT_INPUT_FOCUS, userInput: '대화 흐름 끊기지 않게 자연스러운 맞장구 써 줘' },
+  { expectedSkill: 'chat_input', context: CHAT_INPUT_FOCUS, userInput: 'ghostwrite next user reply in Korean' },
+
+  // 3. char_fields (16) — character text fields & author's note
+  { expectedSkill: 'char_fields', context: CHAT_FREE_TALK, userInput: '캐릭터 설명에서 머리 색깔을 검은색으로 바꿔 줘' },
+  { expectedSkill: 'char_fields', context: CHAT_FREE_TALK, userInput: '디스크립션 너무 긴데 토큰 아끼게 압축해 줘' },
+  { expectedSkill: 'char_fields', context: CHAT_FREE_TALK, userInput: 'desc에 고양이 알레르기 설정 추가해 줘' },
+  { expectedSkill: 'char_fields', context: CHAT_FREE_TALK, userInput: '작가의 노트에 현재 계절이 겨울이라고 적어 줘' },
+  { expectedSkill: 'char_fields', context: CHAT_FREE_TALK, userInput: '작노에 문체 지시 한 줄 넣어 줘' },
+  { expectedSkill: 'char_fields', context: CHAT_FREE_TALK, userInput: '시스템 프롬프트에 3인칭 시점 규칙 추가해 줘' },
+  { expectedSkill: 'char_fields', context: CHAT_FREE_TALK, userInput: '글로벌 노트 덮어쓰기 내용 좀 손봐 줘' },
+  { expectedSkill: 'char_fields', context: CHAT_FREE_TALK, userInput: '깊이 프롬프트(depth_prompt)에 감정 강조 지시 넣어 줘' },
+  { expectedSkill: 'char_fields', context: CHAT_FREE_TALK, userInput: '백그라운드 임베딩에 배경 이미지 태그 넣어 줘' },
+  { expectedSkill: 'char_fields', context: CHAT_FREE_TALK, userInput: '캐릭터 기본 변수(defaultVariables)에 mp=50 추가해 줘' },
+  { expectedSkill: 'char_fields', context: CHAT_FREE_TALK, userInput: '제작자 코멘트에 추천 모델 적어 줘' },
+  { expectedSkill: 'char_fields', context: CHAT_FREE_TALK, userInput: '번역가의 노트에 고유명사 표기법 추가해 줘' },
+  { expectedSkill: 'char_fields', context: CHAT_FREE_TALK, userInput: '캐릭터 닉네임을 루나로 바꿔 줘' },
+  { expectedSkill: 'char_fields', context: CHAT_FREE_TALK, userInput: '예시 대화 하나만 추가해 줘' },
+  { expectedSkill: 'char_fields', context: CHAT_FREE_TALK, userInput: '커스텀 토글에 난이도 선택 옵션 만들어 줘' },
+  { expectedSkill: 'char_fields', context: CHAT_FREE_TALK, userInput: '시나리오 필드에 있는 내용 설명으로 옮기고 정리해 줘' },
+
+  // 4. greetings (16) — firstMessage & alternateGreetings
+  { expectedSkill: 'greetings', context: CHAT_FREE_TALK, userInput: '첫 메시지 끝문장 좀 더 여운 있게 고쳐 줘' },
+  { expectedSkill: 'greetings', context: CHAT_FREE_TALK, userInput: '추가 첫 메시지 하나 새로 만들어 줘' },
+  { expectedSkill: 'greetings', context: CHAT_FREE_TALK, userInput: '비 오는 날 버전으로 오프닝 하나 더 추가해 줘' },
+  { expectedSkill: 'greetings', context: CHAT_FREE_TALK, userInput: '2번 추가 첫 메시지 지워 줘' },
+  { expectedSkill: 'greetings', context: CHAT_FREE_TALK, userInput: '기본 첫 메시지에서 1인칭을 3인칭으로 고쳐 줘' },
+  { expectedSkill: 'greetings', context: CHAT_FREE_TALK, userInput: '인사말이 너무 짧아서 배경 묘사 좀 보강해 줘' },
+  { expectedSkill: 'greetings', context: CHAT_FREE_TALK, userInput: '새 첫 메세지 만들고 지금 채팅에 바로 적용해 줘' },
+  { expectedSkill: 'greetings', context: CHAT_FREE_TALK, userInput: 'alternate greeting 하나 더 작성해 줘' },
+  { expectedSkill: 'greetings', context: CHAT_FREE_TALK, userInput: 'firstMessage에 {{user}} 호칭 자연스럽게 넣어 줘' },
+  { expectedSkill: 'greetings', context: CHAT_FREE_TALK, userInput: '도입부 장면을 밤 기차역으로 바꿔서 새로 하나 추가해 줘' },
+  { expectedSkill: 'greetings', context: CHAT_FREE_TALK, userInput: '첫 인사 대사 따옴표 서식 정리해 줘' },
+  { expectedSkill: 'greetings', context: CHAT_FREE_TALK, userInput: '그리팅 목록 중에 중복된 1번 삭제해 줘' },
+  { expectedSkill: 'greetings', context: CHAT_FREE_TALK, userInput: '첫 장면 분위기가 너무 어두운데 밝게 수정해 줘' },
+  { expectedSkill: 'greetings', context: CHAT_FREE_TALK, userInput: 'fmIndex가 뭐고 첫 메시지랑 무슨 관계야?' },
+  { expectedSkill: 'greetings', context: { screen: 'character', targetKind: 'char_field', fieldKey: 'firstMessage', freeTalk: false }, userInput: '여기 좀 다듬어 줘' },
+  { expectedSkill: 'greetings', context: CHAT_FREE_TALK, history: [{ role: 'user', content: '첫 메시지 고쳐 줘' }, { role: 'assistant', content: '어떻게 고칠까요?' }], userInput: '응 지금 말한 대로 해 줘' },
+
+  // 5. lorebook (16) — character/chat/module lorebook CRUD & folders
+  { expectedSkill: 'lorebook', context: CHAT_FREE_TALK, userInput: '새 로어북 하나 만들어 줘' },
+  { expectedSkill: 'lorebook', context: CHAT_FREE_TALK, userInput: '로어북에서 마법 탑 항목 키워드 추가해 줘' },
+  { expectedSkill: 'lorebook', context: CHAT_FREE_TALK, userInput: '세계관 폴더 만들어서 1번이랑 2번 로어북 묶어 줘' },
+  { expectedSkill: 'lorebook', context: CHAT_FREE_TALK, userInput: '안 쓰는 3번 로어북 삭제해 줘' },
+  { expectedSkill: 'lorebook', context: CHAT_FREE_TALK, userInput: 'insertorder랑 @@depth 차이가 뭐야?' },
+  { expectedSkill: 'lorebook', context: CHAT_FREE_TALK, userInput: '현재 채팅 로어북에 오늘 사건 요약 넣어 줘' },
+  { expectedSkill: 'lorebook', context: CHAT_FREE_TALK, userInput: '항상 켜지는 상시 활성(alwaysActive) 세계관 설정 추가해 줘' },
+  { expectedSkill: 'lorebook', context: CHAT_FREE_TALK, userInput: '폴더 안에 있는 항목들 전부 최상위로 꺼내 줘' },
+  { expectedSkill: 'lorebook', context: CHAT_FREE_TALK, userInput: '길드 인물 정보 설정집 항목 하나 추가해 줘' },
+  { expectedSkill: 'lorebook', context: CHAT_FREE_TALK, userInput: '로어북 활성화 키 2차 키(selective) 어떻게 써?' },
+  { expectedSkill: 'lorebook', context: CHAT_FREE_TALK, userInput: '1번 채팅의 채팅 로어북에 결말 항목 넣어 줘' },
+  { expectedSkill: 'lorebook', context: CHAT_FREE_TALK, userInput: '고아 폴더에 들어가서 안 보이는 로어북 정리해 줘' },
+  { expectedSkill: 'lorebook', context: CHAT_FREE_TALK, userInput: '용어집 항목 본문 좀 간결하게 줄여 줘' },
+  { expectedSkill: 'lorebook', context: LORE_FOCUS, userInput: '이거 키워드 너무 흔한 단어라 안 겹치게 고쳐 줘' },
+  { expectedSkill: 'lorebook', context: CHAT_FREE_TALK, userInput: '마법 체계 백과 항목 새로 등록해 줘' },
+  { expectedSkill: 'lorebook', context: CHAT_FREE_TALK, userInput: 'lorebook entry for the silver wolf' },
+
+  // 6. scripts (16) — Lua triggers & regex scripts
+  { expectedSkill: 'scripts', context: CHAT_FREE_TALK, userInput: '[HP:숫자]를 예쁘게 꾸며서 보여 줘' },
+  { expectedSkill: 'scripts', context: CHAT_FREE_TALK, userInput: '응답마다 턴 수 세는 스크립트 짜 줘' },
+  { expectedSkill: 'scripts', context: CHAT_FREE_TALK, userInput: '정규식 하나 만들어 줘' },
+  { expectedSkill: 'scripts', context: CHAT_FREE_TALK, userInput: 'Lua 트리거로 호감도 자동 증가 구현해 줘' },
+  { expectedSkill: 'scripts', context: CHAT_FREE_TALK, userInput: 'editdisplay랑 editoutput 차이가 뭐야?' },
+  { expectedSkill: 'scripts', context: CHAT_FREE_TALK, userInput: '상태창 HTML/CSS 배지 치환 정규식 만들어 줘' },
+  { expectedSkill: 'scripts', context: CHAT_FREE_TALK, userInput: '버튼 클릭(onButtonClick)할 때 스탯 초기화하는 루아 짜 줘' },
+  { expectedSkill: 'scripts', context: CHAT_FREE_TALK, userInput: '안 쓰는 2번 정규식 삭제해 줘' },
+  { expectedSkill: 'scripts', context: CHAT_FREE_TALK, userInput: 'CBS {{getvar::hp}} 문법이 왜 안 먹는지 알려 줘' },
+  { expectedSkill: 'scripts', context: CHAT_FREE_TALK, userInput: '출력마다 날짜 하루씩 올라가는 onOutput 코드 작성해 줘' },
+  { expectedSkill: 'scripts', context: CHAT_FREE_TALK, userInput: '스탯창 표시 형식 카드 형태로 바꿔 줘' },
+  { expectedSkill: 'scripts', context: CHAT_FREE_TALK, userInput: 'listenEdit으로 AI 응답 태그 숨기는 스크립트 만들어 줘' },
+  { expectedSkill: 'scripts', context: LUA_FOCUS, userInput: '이거 문법 에러 찾아서 고쳐 줘' },
+  { expectedSkill: 'scripts', context: REGEX_FOCUS, userInput: '정규 표현식 플래그에 i 추가해 줘' },
+  { expectedSkill: 'scripts', context: CHAT_FREE_TALK, userInput: 'customscript에서 $1 캡처가 안 잡혀' },
+  { expectedSkill: 'scripts', context: CHAT_FREE_TALK, history: [{ role: 'user', content: '정규식 하나 만들어줘' }, { role: 'assistant', content: '패턴을 정할까요?' }], userInput: '응 그렇게 해줘' },
+
+  // 7. module_create (16) — full RisuModule creation
+  { expectedSkill: 'module_create', context: CHAT_FREE_TALK, userInput: 'RPG 상태창 모듈 하나 통째로 만들어 줘' },
+  { expectedSkill: 'module_create', context: CHAT_FREE_TALK, userInput: '새 모듈 만들어서 지금 채팅에 바로 켜 줘' },
+  { expectedSkill: 'module_create', context: CHAT_FREE_TALK, userInput: '호감도 HUD랑 토글이 묶인 신규 모듈 생성해 줘' },
+  { expectedSkill: 'module_create', context: CHAT_FREE_TALK, userInput: '전투 로그 정리용 모듈 하나 짜 줘' },
+  { expectedSkill: 'module_create', context: CHAT_FREE_TALK, userInput: '다크 UI 임베딩 들어간 모듈 새로 추가해 줘' },
+  { expectedSkill: 'module_create', context: CHAT_FREE_TALK, userInput: '모듈 통으로 제작하고 전역으로 활성화해 줘' },
+  { expectedSkill: 'module_create', context: CHAT_FREE_TALK, userInput: '턴 카운터 Lua랑 표시 정규식 묶어서 모듈 패키지 만들어 줘' },
+  { expectedSkill: 'module_create', context: CHAT_FREE_TALK, userInput: '.risum 모듈 구조가 어떻게 생겼는지 알려 줘' },
+  { expectedSkill: 'module_create', context: CHAT_FREE_TALK, userInput: '번역 보조용 새 모듈 하나 구축해 줘' },
+  { expectedSkill: 'module_create', context: CHAT_FREE_TALK, userInput: 'create_module로 인벤토리 시스템 만들어 줘' },
+  { expectedSkill: 'module_create', context: CHAT_FREE_TALK, userInput: '날씨 시스템 모듈 새로 생성해 줘' },
+  { expectedSkill: 'module_create', context: CHAT_FREE_TALK, userInput: '커스텀 토글 있는 모듈 하나 제작해 줘' },
+  { expectedSkill: 'module_create', context: CHAT_FREE_TALK, userInput: '상태창 로어북까지 포함한 모듈 하나 만들어 줘' },
+  { expectedSkill: 'module_create', context: CHAT_FREE_TALK, userInput: '신규 모듈 만들어서 이 채팅방에 붙여 줘' },
+  { expectedSkill: 'module_create', context: CHAT_FREE_TALK, history: [{ role: 'user', content: '상태창 새 모듈 만들어줘' }, { role: 'assistant', content: '어떤 필드를 넣을까요?' }], userInput: 'HP랑 MP만 넣고 진행해 줘' },
+  // Intentionally indirect L2 tail (1): no '모듈' keyword
+  { expectedSkill: 'module_create', context: CHAT_FREE_TALK, userInput: '정규식이랑 Lua랑 토글을 하나의 확장 팩으로 묶어 등록해 줘', expectL2Fallback: true },
+
+  // 8. persona (16) — persona CRUD & chat binding
+  { expectedSkill: 'persona', context: CHAT_FREE_TALK, userInput: '새 페르소나 만들어서 현재 채팅에 바인딩해 줘' },
+  { expectedSkill: 'persona', context: CHAT_FREE_TALK, userInput: '내 캐릭터 프로필 만들어 줘' },
+  { expectedSkill: 'persona', context: CHAT_FREE_TALK, userInput: '유저 설정에서 직업을 마법사로 바꿔 줘' },
+  { expectedSkill: 'persona', context: CHAT_FREE_TALK, userInput: '1번 페르소나 이름이랑 메모 수정해 줘' },
+  { expectedSkill: 'persona', context: CHAT_FREE_TALK, userInput: '안 쓰는 2번 페르소나 삭제해 줘' },
+  { expectedSkill: 'persona', context: CHAT_FREE_TALK, userInput: '유저 프로필 새로 만들고 이 채팅에 고정해 줘' },
+  { expectedSkill: 'persona', context: CHAT_FREE_TALK, userInput: '플레이어 설정에 냉정한 성격이라고 적어 줘' },
+  { expectedSkill: 'persona', context: CHAT_FREE_TALK, userInput: 'bindedPersona가 뭐야? 포크마다 다른 점 알려 줘' },
+  { expectedSkill: 'persona', context: CHAT_FREE_TALK, userInput: '화자 설정을 여행하는 음유시인으로 새로 만들어 줘' },
+  { expectedSkill: 'persona', context: CHAT_FREE_TALK, userInput: '내 프로필 소개 문구 다듬어 줘' },
+  { expectedSkill: 'persona', context: CHAT_FREE_TALK, userInput: '주인공 프로필 탐정 컨셉으로 짜 줘' },
+  { expectedSkill: 'persona', context: CHAT_FREE_TALK, userInput: '유저 정보에서 키랑 나이만 수정해 줘' },
+  { expectedSkill: 'persona', context: CHAT_FREE_TALK, userInput: '페르 바인딩이 왜 원본에서 바로 안 바뀌어?' },
+  { expectedSkill: 'persona', context: PERSONA_FOCUS, userInput: '이거 좀 더 길게 써 줘' },
+  { expectedSkill: 'persona', context: CHAT_FREE_TALK, userInput: 'create a new user persona named Kael' },
+  { expectedSkill: 'persona', context: CHAT_FREE_TALK, history: [{ role: 'user', content: '페르소나 하나 만들어줘' }, { role: 'assistant', content: '이름을 뭘로 할까요?' }], userInput: '리안으로 하고 바로 적용해 줘' },
+
+  // 9. config (16) — global RisuAI settings
+  { expectedSkill: 'config', context: CHAT_FREE_TALK, userInput: 'temperature랑 maxResponse가 뭐야?' },
+  { expectedSkill: 'config', context: CHAT_FREE_TALK, userInput: '온도 0.85(85)로 올리고 최대 응답 2000으로 늘려 줘' },
+  { expectedSkill: 'config', context: CHAT_FREE_TALK, userInput: '반복이 심한데 frequencyPenalty 올려 줘' },
+  { expectedSkill: 'config', context: CHAT_FREE_TALK, userInput: '최대 컨텍스트 크기를 16000으로 변경해 줘' },
+  { expectedSkill: 'config', context: CHAT_FREE_TALK, userInput: 'customCSS에 말풍선 여백 좀 추가해 줘' },
+  { expectedSkill: 'config', context: CHAT_FREE_TALK, userInput: 'guiHTML 채팅 레이아웃 설명해 줘' },
+  { expectedSkill: 'config', context: CHAT_FREE_TALK, userInput: '줄간격(lineHeight)을 1.7로 넓혀 줘' },
+  { expectedSkill: 'config', context: CHAT_FREE_TALK, userInput: '전역 설정 지금 값이 어떤지 진단해 줘' },
+  { expectedSkill: 'config', context: CHAT_FREE_TALK, userInput: '응답 길이 제한이 너무 짧아서 늘리고 싶어' },
+  { expectedSkill: 'config', context: CHAT_FREE_TALK, userInput: '전역 모듈 활성화 목록에서 하나 켜 줘' },
+  { expectedSkill: 'config', context: CHAT_FREE_TALK, userInput: '보조 모델 분리(seperateModels) 켜 줘' },
+  { expectedSkill: 'config', context: CHAT_FREE_TALK, userInput: '리스 설정에서 테마랑 컬러 스킴 어떻게 바꿔?' },
+  { expectedSkill: 'config', context: CHAT_FREE_TALK, userInput: '창의성 수치 조금만 낮춰 줘' },
+  { expectedSkill: 'config', context: SETTINGS_FOCUS, userInput: '이거 추천값이 얼마야?' },
+  { expectedSkill: 'config', context: CHAT_FREE_TALK, userInput: 'PresensePenalty 철자가 왜 이래?' },
+  { expectedSkill: 'config', context: CHAT_FREE_TALK, extraContext: { attachedFetchLog: { status: 400 } }, userInput: '왜 터졌는지 봐 줘' },
+
+  // 10. char_settings (16) — loreSettings, bias, tags
+  { expectedSkill: 'char_settings', context: CHAT_FREE_TALK, userInput: '로어북 토큰 예산 2000으로 올려 줘' },
+  { expectedSkill: 'char_settings', context: CHAT_FREE_TALK, userInput: '스캔 깊이 6으로 늘리고 재귀 스캔 켜 줘' },
+  { expectedSkill: 'char_settings', context: CHAT_FREE_TALK, userInput: '"갑자기" 단어에 로짓 바이어스 -25 걸어 줘' },
+  { expectedSkill: 'char_settings', context: CHAT_FREE_TALK, userInput: '캐릭터 태그에 판타지, RPG 추가해 줘' },
+  { expectedSkill: 'char_settings', context: CHAT_FREE_TALK, userInput: '기존 태그에서 초안 빼고 완성 넣어 줘' },
+  { expectedSkill: 'char_settings', context: CHAT_FREE_TALK, userInput: 'tokenBudget이랑 scanDepth 추천값 알려 줘' },
+  { expectedSkill: 'char_settings', context: CHAT_FREE_TALK, userInput: '전체 단어 일치(fullWordMatching) 켜 줘' },
+  { expectedSkill: 'char_settings', context: CHAT_FREE_TALK, userInput: 'bias 목록에서 "문득" 삭제해 줘' },
+  { expectedSkill: 'char_settings', context: CHAT_FREE_TALK, userInput: '로어북 설정 지금 캐릭터꺼 어떻게 돼 있어?' },
+  { expectedSkill: 'char_settings', context: CHAT_FREE_TALK, userInput: '금지어 감점으로 "미소" -15 추가해 줘' },
+  { expectedSkill: 'char_settings', context: CHAT_FREE_TALK, userInput: 'recursiveScanning 끄고 스캔 깊이 3으로 줄여 줘' },
+  { expectedSkill: 'char_settings', context: CHAT_FREE_TALK, userInput: '로어북 예산 1200으로 줄이고 태그 정리해 줘' },
+  { expectedSkill: 'char_settings', context: CHAT_FREE_TALK, extraContext: { charSettings: { tags: [] } }, userInput: '방금 말한 수치 그대로 적용해 줘' },
+  { expectedSkill: 'char_settings', context: CHAT_FREE_TALK, userInput: 'add tags horror and mystery' },
+  // Intentionally indirect L2 tail (2): matches eval scenario loop-load-skill-l2
+  { expectedSkill: 'char_settings', context: CHAT_FREE_TALK, userInput: '단어가 자꾸 겹쳐서 "문득"이 덜 나오게 억제치를 -20으로 걸고, 분류 라벨에 "미스터리"를 붙여 줘', expectL2Fallback: true },
+  { expectedSkill: 'char_settings', context: CHAT_FREE_TALK, userInput: '이 봇 검색할 때 걸리게 분류 꼬리표에 로맨스 하나 달아 줘', expectL2Fallback: true },
+
+  // 11. char_create_port (16) — create_character & port_from_character
+  { expectedSkill: 'char_create_port', context: CHAT_FREE_TALK, userInput: '새 캐릭터 카드 하나 처음부터 만들어 줘' },
+  { expectedSkill: 'char_create_port', context: CHAT_FREE_TALK, userInput: '사이버펑크 해커 컨셉으로 새 봇 만들어 줘' },
+  { expectedSkill: 'char_create_port', context: CHAT_FREE_TALK, userInput: '다른 캐릭터 마법사 카엘의 로어북이랑 정규식 포팅해 줘' },
+  { expectedSkill: 'char_create_port', context: CHAT_FREE_TALK, userInput: '타 캐릭터에서 Lua 스크립트만 현재 캐릭터로 이식해 줘' },
+  { expectedSkill: 'char_create_port', context: CHAT_FREE_TALK, userInput: '신규 캐릭터 생성해서 봇 목록에 추가해 줘' },
+  { expectedSkill: 'char_create_port', context: CHAT_FREE_TALK, userInput: '교차 포팅으로 2번 캐릭터 정규식 복사해 와 줘' },
+  { expectedSkill: 'char_create_port', context: CHAT_FREE_TALK, userInput: '캐릭터 카드 제작해 줘 — 중세 기사 설정으로' },
+  { expectedSkill: 'char_create_port', context: CHAT_FREE_TALK, userInput: '봇 카드 새로 만들어서 첫 메시지까지 채워 줘' },
+  { expectedSkill: 'char_create_port', context: CHAT_FREE_TALK, userInput: '다른 캐릭터의 상태창 시스템 여기로 가져와 포팅해 줘' },
+  { expectedSkill: 'char_create_port', context: CHAT_FREE_TALK, userInput: '신규 봇 하나 짜 줘, 현대 일상물 카페 사장님' },
+  { expectedSkill: 'char_create_port', context: CHAT_FREE_TALK, userInput: 'create_character로 새 봇 등록해 줘' },
+  { expectedSkill: 'char_create_port', context: CHAT_FREE_TALK, userInput: 'port_from_character 어떻게 써?' },
+  { expectedSkill: 'char_create_port', context: CHAT_FREE_TALK, userInput: '캐릭터 복사해서 로어북만 옮겨 줘' },
+  { expectedSkill: 'char_create_port', context: CHAT_FREE_TALK, extraContext: { characterCatalog: [{ charIndex: 1, name: '카엘' }] }, userInput: '카엘 쪽 거 그대로 가져와 줘' },
+  { expectedSkill: 'char_create_port', context: CHAT_FREE_TALK, history: [{ role: 'user', content: '새 캐릭터 만들어줘' }, { role: 'assistant', content: '이름은?' }], userInput: '이름은 셀레나로 해 줘' },
+  // Intentionally indirect L2 tail (3)
+  { expectedSkill: 'char_create_port', context: CHAT_FREE_TALK, userInput: '지금 대화하는 애 말고 아예 별도 등장인물 슬롯 하나 새로 파 줘', expectL2Fallback: true },
+
+  // 12. chat_vars (16) — chat.scriptstate variables
+  { expectedSkill: 'chat_vars', context: CHAT_FREE_TALK, userInput: '채팅 변수 hp를 80으로 바꿔 줘' },
+  { expectedSkill: 'chat_vars', context: CHAT_FREE_TALK, userInput: '호감도 50으로 올려 줘' },
+  { expectedSkill: 'chat_vars', context: CHAT_FREE_TALK, userInput: '현재 채팅에서 체력 100, 마나 50으로 수정해 줘' },
+  { expectedSkill: 'chat_vars', context: CHAT_FREE_TALK, userInput: '소지금 골드 500으로 늘려 줘' },
+  { expectedSkill: 'chat_vars', context: CHAT_FREE_TALK, userInput: 'scriptstate에서 old_flag 변수 삭제해 줘' },
+  { expectedSkill: 'chat_vars', context: CHAT_FREE_TALK, userInput: '스탯 전부 초기화해 줘' },
+  { expectedSkill: 'chat_vars', context: CHAT_FREE_TALK, userInput: '상태값 목록에 day=3 추가해 줘' },
+  { expectedSkill: 'chat_vars', context: CHAT_FREE_TALK, userInput: '플래그 boss_cleared를 true로 켜 줘' },
+  { expectedSkill: 'chat_vars', context: CHAT_FREE_TALK, userInput: 'affection 값 지금 얼마야?' },
+  { expectedSkill: 'chat_vars', context: CHAT_FREE_TALK, userInput: '턴 카운터 1로 리셋해 줘' },
+  { expectedSkill: 'chat_vars', context: CHAT_FREE_TALK, userInput: 'getvar랑 setvar에서 $ 접두사 왜 붙어?' },
+  { expectedSkill: 'chat_vars', context: CHAT_FREE_TALK, userInput: 'hp 10 깎고 mp 20 회복해 줘' },
+  { expectedSkill: 'chat_vars', context: CHAT_FREE_TALK, userInput: '채팅 변수 중에 안 쓰는 temp 키 지워 줘' },
+  { expectedSkill: 'chat_vars', context: CHAT_FREE_TALK, userInput: 'var gold set to 999' },
+  { expectedSkill: 'chat_vars', context: CHAT_FREE_TALK, history: [{ role: 'user', content: '호감도 올려줘' }, { role: 'assistant', content: '얼마로 할까요?' }], userInput: '75로 맞춰 줘' },
+  // Intentionally indirect L2 tail (4)
+  { expectedSkill: 'chat_vars', context: CHAT_FREE_TALK, userInput: '지금 대화 세션에 저장된 진행도 기록값 3단계로 고쳐 줘', expectL2Fallback: true },
+
+  // 13. chat_migration (16) — create_chat & import_chat
+  { expectedSkill: 'chat_migration', context: CHAT_FREE_TALK, userInput: '새 채팅 하나 만들어 줘' },
+  { expectedSkill: 'chat_migration', context: CHAT_FREE_TALK, userInput: '지금 채팅 요약해서 새 채팅으로 이사해 줘' },
+  { expectedSkill: 'chat_migration', context: CHAT_FREE_TALK, userInput: '1번 채팅에서 변수랑 작가의 노트 현재 채팅으로 옮겨 줘' },
+  { expectedSkill: 'chat_migration', context: CHAT_FREE_TALK, userInput: '이전 채팅 상태 그대로 가져와서 2부 채팅 시작하고 싶어' },
+  { expectedSkill: 'chat_migration', context: CHAT_FREE_TALK, userInput: '다른 채팅의 채팅 로어북만 이관해 줘' },
+  { expectedSkill: 'chat_migration', context: CHAT_FREE_TALK, userInput: '콜드 스토리지에 보관된 채팅도 이사할 수 있어?' },
+  { expectedSkill: 'chat_migration', context: CHAT_FREE_TALK, userInput: '세션 분리해서 다음 회차 새 방 만들어 줘' },
+  { expectedSkill: 'chat_migration', context: CHAT_FREE_TALK, userInput: '참조 채팅 내용 요약해서 여기에 넣어 줘' },
+  { expectedSkill: 'chat_migration', context: CHAT_FREE_TALK, userInput: '2번 채팅이랑 지금 채팅 비교해 줘' },
+  { expectedSkill: 'chat_migration', context: CHAT_FREE_TALK, userInput: '신규 채팅 생성하고 바로 전환해 줘' },
+  { expectedSkill: 'chat_migration', context: CHAT_FREE_TALK, userInput: '채팅 추가하면서 기존 변수 유지해 줘' },
+  { expectedSkill: 'chat_migration', context: CHAT_FREE_TALK, userInput: '채팅 #1의 상태값 여기로 복사해 줘' },
+  { expectedSkill: 'chat_migration', context: CHAT_FREE_TALK, userInput: 'create_chat으로 3부 여정 열어 줘' },
+  { expectedSkill: 'chat_migration', context: CHAT_FREE_TALK, userInput: 'import_chat은 대화 메시지도 옮겨?' },
+  { expectedSkill: 'chat_migration', context: CHAT_FREE_TALK, extraContext: { chatList: { chats: [{}, {}] } }, userInput: '저번 방 기록 끌어와 줘' },
+  // Intentionally indirect L2 tail (5)
+  { expectedSkill: 'chat_migration', context: CHAT_FREE_TALK, userInput: '대화가 너무 길어졌는데 깨끗한 빈 방 하나 파서 이어 갈래', expectL2Fallback: true },
+
+  // 14. fetch_logs (16) — opt-in API fetch log diagnostics
+  { expectedSkill: 'fetch_logs', context: CHAT_FREE_TALK, userInput: '최근 요청 로그 보니까 429 에러가 뜨는데 왜 그래?' },
+  { expectedSkill: 'fetch_logs', context: CHAT_FREE_TALK, userInput: '첨부한 API 로그 분석해서 오류 원인 알려 줘' },
+  { expectedSkill: 'fetch_logs', context: CHAT_FREE_TALK, userInput: '400 에러 원인이 컨텍스트 초과인지 봐 줘' },
+  { expectedSkill: 'fetch_logs', context: CHAT_FREE_TALK, userInput: '401 오류가 계속 나는데 뭐가 잘못됐어?' },
+  { expectedSkill: 'fetch_logs', context: CHAT_FREE_TALK, userInput: '403 에러 뜨는 이유 좀 설명해 줘' },
+  { expectedSkill: 'fetch_logs', context: CHAT_FREE_TALK, userInput: '500 에러가 났는데 서버 문제야 설정 문제야?' },
+  { expectedSkill: 'fetch_logs', context: CHAT_FREE_TALK, userInput: '502 오류랑 503 오류 차이가 뭐야?' },
+  { expectedSkill: 'fetch_logs', context: CHAT_FREE_TALK, userInput: 'fetch log에서 실제 전송된 프롬프트 확인해 줘' },
+  { expectedSkill: 'fetch_logs', context: CHAT_FREE_TALK, userInput: '에러 로그 진단해 줘' },
+  { expectedSkill: 'fetch_logs', context: CHAT_FREE_TALK, userInput: '오류 로그에 토큰 한도 초과라고 나와' },
+  { expectedSkill: 'fetch_logs', context: CHAT_FREE_TALK, userInput: 'HTTP 상태 코드가 429인데 어떻게 해결해?' },
+  { expectedSkill: 'fetch_logs', context: CHAT_FREE_TALK, userInput: '응답 로그가 비어 있는데 전송 실패 원인 분석해 줘' },
+  { expectedSkill: 'fetch_logs', context: CHAT_FREE_TALK, extraContext: { attachedFetchLog: { status: 429, url: 'https://api.example.com' } }, userInput: '방금 실패한 이유 좀 봐 줘' },
+  { expectedSkill: 'fetch_logs', context: CHAT_FREE_TALK, extraContext: { attachedFetchLog: { status: 400, url: 'https://api.example.com' } }, userInput: '이거 왜 안 가?' },
+  { expectedSkill: 'fetch_logs', context: CHAT_FREE_TALK, extraContext: { attachedFetchLog: { status: 500, url: 'https://api.example.com' } }, userInput: '첨부한 거 확인해 줘' },
+  // Intentionally indirect L2 tail (6)
+  { expectedSkill: 'fetch_logs', context: CHAT_FREE_TALK, userInput: '방금 모델 응답이 뻗었는데 무슨 문제인지 파헤쳐 줘', expectL2Fallback: true },
+];
+
+export { ROUTING_CORPUS };

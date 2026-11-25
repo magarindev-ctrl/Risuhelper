@@ -1,21 +1,21 @@
 //@name risuhelper
 //@display-name RisuHelper
 //@api 3.0
-//@version 0.7.0
+//@version 0.8.0
 //@update-url https://raw.githubusercontent.com/magarindev-ctrl/Risuhelper/main/dist/risuhelper.js
 //@link https://github.com/magarindev-ctrl/Risuhelper RisuHelper GitHub
 
 /*
- * RisuHelper v0.7.0 — RisuAI Plugin API v3
+ * RisuHelper v0.8.0 — RisuAI Plugin API v3
  * License: GPL-3.0-only
  * https://github.com/magarindev-ctrl/Risuhelper
  */
 (() => {
   'use strict';
-  const __RISUHELPER_VERSION__ = "0.7.0";
+  const __RISUHELPER_VERSION__ = "0.8.0";
   const __modules = {
   "src/version.js"(__require, __exports) {
-const VERSION = '0.7.0';
+const VERSION = '0.8.0';
 const PLUGIN_NAME = 'risuhelper';
 const STORAGE_KEY = 'risuhelper_state_v1';
 const PRESET_STORAGE_KEY = 'risuhelper_preset_v1';
@@ -11985,25 +11985,12 @@ function getQuickPromptsForContext(context) {
   },
   "src/skills.js"(__require, __exports) {
 // SPDX-License-Identifier: GPL-3.0-only
-// Deterministic internal skill router for RisuHelper.
-// Selects only the RisuAI knowledge, rules, and proposal action schemas relevant to the
-// current cursor/screen, user request keywords, and attached context — zero extra LLM calls.
+// Data-driven L0 / L1 / L2 built-in skill router for RisuHelper (v0.8.0+).
+// No external SKILL.md files: every skill is declared once in SKILL_DEFS with its
+// summary, owned actions (100% disjoint partition), knowledge/rules/schemas, triggers,
+// associated Read-Only tools, capability requirements, and prompt char budget.
 
 const { KNOWLEDGE_SECTIONS } = __require("src/knowledge.js");
-
-const SKILL_KEYWORDS = {
-  char_fields: /설명|디스크립션|desc|시스템\s*프롬프트|글로벌\s*노트|깊이\s*프롬프트|작가(?:의)?\s*노트|작노|author\s*note|성격|시나리오|예시\s*대화|백그라운드|번역가|제작자|닉네임|기본\s*변수|커스텀\s*토글/i,
-  greetings: /첫\s*메시지|추가\s*첫|인사말|오프닝|greeting|alternate\s*greeting|first\s*message/i,
-  lorebook: /로어북|lorebook|lore\b|폴더|folder|세계관|요약|이사|insertorder|@@depth/i,
-  scripts: /lua|루아|트리거|trigger|정규식|regex|customscript|상태창|hud|배지|editdisplay|editoutput|editinput|editprocess|cbs|\{\{|스크립트|script|꾸며|표시\s*형식|치환|턴\s*수|응답마다|출력마다|html|css/i,
-  persona: /페르소나|persona|바인딩|bindedPersona|유저\s*(?:설정|프로필|정보|소개|캐릭터)|(?:내|플레이어|주인공)\s*(?:캐릭터\s*)?프로필/i,
-  config: /설정|컨피그|config|temperature|온도|maxResponse|maxContext|페널티|penalty|customCSS|guiHTML|테마|theme|모듈\s*활성|enabledModules/i,
-  chat_migration: /이사|옮겨|가져와|이관|참조\s*채팅|\d+\s*번\s*채팅|채팅\s*#?\d+|이전\s*채팅|다른\s*채팅|콜드\s*스토리지|새\s*채팅|신규\s*채팅|채팅\s*(?:생성|만들|추가)|create_chat/i,
-  chat_vars: /변수|scriptstate|호감도|affection|\bhp\b|\bmp\b|스탯|상태값|플래그|카운터|\bvar\b|getvar|setvar|초기화/i,
-  module_create: /모듈\s*(?:하나|통째|통으로|신규|새로|생성|만들|추가|제작|짜)|새\s*모듈|신규\s*모듈|create_module/i,
-  char_settings: /로어북\s*(?:설정|예산|토큰|깊이)|토큰\s*예산|tokenBudget|스캔\s*깊이|scanDepth|재귀\s*스캔|recursiveScanning|전체\s*단어|fullWordMatching|바이어스|로짓|bias|태그|tags/i,
-  char_create_port: /새\s*캐릭터|신규\s*캐릭터|캐릭터\s*(?:카드\s*)?(?:생성|만들|추가|제작|포팅)|다른\s*캐릭터|교차\s*포팅|포팅|create_character|port_from_character/i,
-};
 
 const SKILL_DEFS = [
   {
@@ -12012,6 +11999,20 @@ const SKILL_DEFS = [
     summary: '현재 포커스된 단일 입력칸의 부분 편집(patch_text) 및 덮어쓰기(replace_text)',
     requiresCapabilities: [],
     actions: ['patch_text', 'replace_text'],
+    tools: ['read_item'],
+    maxChars: 1200,
+    triggers: {
+      screens: [],
+      targetKinds: [
+        'char_field', 'char_alt_greeting', 'chat_note', 'chat_message',
+        'char_lorebook', 'chat_lorebook', 'module_lorebook',
+        'char_lua', 'module_lua', 'char_regex', 'module_regex',
+        'persona', 'module_field', 'config',
+      ],
+      keywords: null,
+      contextKeys: [],
+      freeTalkSchemaBaseline: false,
+    },
     knowledge: [],
     rules: [
       '기존 긴 원문의 일부만 바꿀 때는 반드시 `patch_text`를 사용하고, `before`에는 위 [현재 대상의 실제 원문]에서 **공백과 줄바꿈까지 정확히 일치하는 고유 구간**을 복사하세요.',
@@ -12028,7 +12029,17 @@ const SKILL_DEFS = [
     label: '유저 대필',
     summary: '채팅 입력창에서 현재 채팅 흐름에 맞는 유저 대사/행동 대필',
     requiresCapabilities: [],
-    actions: ['replace_text'],
+    actions: [],
+    usesActions: ['replace_text'],
+    tools: ['read_chat', 'read_vars'],
+    maxChars: 1400,
+    triggers: {
+      screens: [],
+      targetKinds: ['chat_input'],
+      keywords: null,
+      contextKeys: [],
+      freeTalkSchemaBaseline: false,
+    },
     knowledge: ['cbs'],
     rules: [
       '현재 대상이 `chat_input`(채팅 입력창 · 유저 대필)일 때 대필·문장 다듬기 요청에는 `replace_text`의 `content`에 바로 전송할 유저 대사/서술 본문만 담아 제안하세요(불필요한 해설·인사말을 `content` 안에 넣지 마세요).',
@@ -12044,6 +12055,15 @@ const SKILL_DEFS = [
     summary: '캐릭터 설명·시스템 프롬프트·글로벌 노트·시나리오·작가의 노트 수정(update_field)',
     requiresCapabilities: [],
     actions: ['update_field'],
+    tools: ['read_item'],
+    maxChars: 2400,
+    triggers: {
+      screens: ['character'],
+      targetKinds: ['char_field', 'chat_note', 'chat_message'],
+      keywords: /설명|디스크립션|desc|캐릭터\s*(?:소개|프로필\s*본문|정보)|시스템\s*프롬프트|시프|글로벌\s*노트|글노|깊이\s*프롬프트|뎁스\s*프롬프트|depth_?prompt|작가(?:의)?\s*노트|작노|author\s*note|성격|시나리오|예시\s*대화|백그라운드|배경\s*임베딩|번역가|제작자\s*(?:코멘트|노트)|닉네임|기본\s*변수|커스텀\s*토글/i,
+      contextKeys: [],
+      freeTalkSchemaBaseline: true,
+    },
     knowledge: ['character', 'cbs'],
     rules: [
       '캐릭터 설명·시스템 프롬프트 등 캐릭터 필드나 작가의 노트를 고칠 때, 그 필드가 현재 대상이 아니면 `update_field`를 사용하세요. 그 필드가 현재 대상이면 `patch_text` / `replace_text`도 됩니다.',
@@ -12059,6 +12079,16 @@ const SKILL_DEFS = [
     summary: '기본 첫 메시지 및 추가 첫 메시지 수정·생성·삭제(update/create/delete_greeting)',
     requiresCapabilities: [],
     actions: ['update_greeting', 'create_greeting', 'delete_greeting'],
+    tools: ['read_item'],
+    maxChars: 2800,
+    triggers: {
+      screens: ['character'],
+      targetKinds: ['char_alt_greeting'],
+      fieldKeys: ['firstMessage'],
+      keywords: /첫\s*(?:메시지|메세지|인사|대사|장면)|추가\s*첫|인사말|오프닝|도입부|그리팅|greeting|alternate\s*greeting|first\s*message|fmIndex/i,
+      contextKeys: [],
+      freeTalkSchemaBaseline: true,
+    },
     knowledge: ['character', 'cbs'],
     rules: [
       '첫 메시지(기본·추가)를 고치거나 새로 추가하거나 삭제할 때는 현재 대상이 무엇이든 `update_greeting` / `create_greeting` / `delete_greeting`을 사용하세요. "추가 첫 메시지를 새로 만들어 달라"는 요청에 기존 항목을 `replace_text`로 덮어쓰지 마세요.',
@@ -12076,6 +12106,15 @@ const SKILL_DEFS = [
     summary: '캐릭터·채팅·모듈 로어북 생성·수정·폴더 정리·삭제',
     requiresCapabilities: [],
     actions: ['create_lorebook', 'update_lorebook', 'organize_lorebook', 'delete_lorebook'],
+    tools: ['read_item', 'list_items', 'active_lorebook', 'audit_workspace'],
+    maxChars: 3200,
+    triggers: {
+      screens: ['lorebook'],
+      targetKinds: ['char_lorebook', 'chat_lorebook', 'module_lorebook'],
+      keywords: /로어북|로어\b|lorebook|lore\b|폴더|folder|세계관|설정집|백과|인물\s*정보|용어집|요약\s*(?:항목|로어)|이사|insertorder|@@depth|활성화\s*키|키워드\s*(?:등록|추가|수정)|상시\s*활성|alwaysActive/i,
+      contextKeys: [],
+      freeTalkSchemaBaseline: true,
+    },
     knowledge: ['lorebook', 'cbs'],
     rules: [
       '로어북 폴더를 새로 만들어 로어북을 옮기거나 기존 폴더에 여러 로어북을 담을 때는 절대 `update_lorebook`을 여러 개로 쪼개거나 `\\uf000folder:...` 키를 임의로 지어내지 말고, 반드시 **단일 `organize_lorebook` 블록 하나**로 제안하세요.',
@@ -12094,6 +12133,15 @@ const SKILL_DEFS = [
     summary: '캐릭터·모듈 Lua 트리거 및 정규식(editdisplay/editoutput 등) 작성·수정·삭제',
     requiresCapabilities: [],
     actions: ['update_lua', 'upsert_regex', 'delete_regex'],
+    tools: ['read_item', 'list_items', 'test_regex_cbs', 'audit_workspace'],
+    maxChars: 3800,
+    triggers: {
+      screens: ['scripts'],
+      targetKinds: ['char_lua', 'module_lua', 'char_regex', 'module_regex'],
+      keywords: /lua|루아|트리거|trigger|정규식|정규\s*표현식|regex|customscript|상태창|스탯창|hud|배지|editdisplay|editoutput|editinput|editprocess|cbs|\{\{|스크립트|script|꾸며|표시\s*형식|치환|턴\s*수|응답마다|출력마다|html|css|버튼\s*클릭|onOutput|onInput|listenEdit/i,
+      contextKeys: [],
+      freeTalkSchemaBaseline: true,
+    },
     knowledge: ['lua', 'regex', 'cbs'],
     rules: [],
     schemas: [
@@ -12109,6 +12157,15 @@ const SKILL_DEFS = [
     summary: '정규식+Lua+토글+임베딩+로어북이 묶인 새 RisuAI 모듈 통째 생성(create_module)',
     requiresCapabilities: [],
     actions: ['create_module'],
+    tools: ['list_items', 'read_item', 'test_regex_cbs', 'audit_workspace'],
+    maxChars: 5500,
+    triggers: {
+      screens: [],
+      targetKinds: [],
+      keywords: /모듈\s*(?:하나|통째|통으로|신규|새로|생성|만들|추가|제작|짜|패키지|구축)|새\s*모듈|신규\s*모듈|\.risum|create_module/i,
+      contextKeys: [],
+      freeTalkSchemaBaseline: false,
+    },
     knowledge: ['module_create', 'lua', 'regex', 'lorebook', 'cbs'],
     rules: [
       '사용자가 새 모듈(정규식+Lua+토글+임베딩+로어북 패키지)을 통째로 만들어 달라고 하면 반드시 단일 `create_module` 제안으로 구성하고, "지금 채팅에 바로 켜줘"라고 하면 `enableInCurrentChat: true`, "전역으로 켜줘"라고 하면 `enableGlobally: true`를 설정하세요.',
@@ -12124,6 +12181,15 @@ const SKILL_DEFS = [
     summary: '유저 페르소나 생성·수정·삭제 및 현재 채팅 바인딩',
     requiresCapabilities: [],
     actions: ['create_persona', 'update_persona', 'delete_persona'],
+    tools: ['read_item', 'list_items'],
+    maxChars: 2200,
+    triggers: {
+      screens: ['persona'],
+      targetKinds: ['persona'],
+      keywords: /페르소나|페르\b|persona|바인딩|bindedPersona|유저\s*(?:설정|프로필|정보|소개|캐릭터|이름)|(?:내|플레이어|주인공)\s*(?:캐릭터\s*)?(?:프로필|설정)|화자\s*설정/i,
+      contextKeys: [],
+      freeTalkSchemaBaseline: true,
+    },
     knowledge: ['persona', 'cbs'],
     rules: [],
     schemas: [
@@ -12139,6 +12205,15 @@ const SKILL_DEFS = [
     summary: '온도·최대 응답·페널티·CSS/HTML·전역 모듈 등 RisuAI 전역 설정 변경(update_config)',
     requiresCapabilities: [],
     actions: ['update_config'],
+    tools: ['read_item', 'host_info'],
+    maxChars: 2200,
+    triggers: {
+      screens: ['settings'],
+      targetKinds: ['config'],
+      keywords: /전역\s*설정|리스\s*설정|설정(?:값|을|이|은|\s*진단|\s*변경|\s*수정|\s*바꿔|\s*올려|\s*내려|\s*알려)|컨피그|config|temperature|온도|창의성|maxResponse|최대\s*응답|응답\s*길이|maxContext|최대\s*컨텍스트|컨텍스트\s*(?:크기|토큰)|페널티|penalty|customCSS|guiHTML|테마|theme|줄간격|lineHeight|전역\s*모듈\s*활성|모듈\s*활성|enabledModules|보조\s*모델|seperateModels/i,
+      contextKeys: ['attachedFetchLog'],
+      freeTalkSchemaBaseline: true,
+    },
     knowledge: ['config'],
     rules: [],
     schemas: [
@@ -12152,6 +12227,15 @@ const SKILL_DEFS = [
     summary: '로어북 토큰 예산·스캔 깊이(loreSettings), 로짓 바이어스(bias), 태그(tags) 튜닝',
     requiresCapabilities: [],
     actions: ['update_char_settings'],
+    tools: ['read_item', 'audit_workspace'],
+    maxChars: 2200,
+    triggers: {
+      screens: [],
+      targetKinds: [],
+      keywords: /로어북\s*(?:설정|예산|토큰|깊이)|토큰\s*예산|tokenBudget|스캔\s*깊이|scanDepth|재귀\s*스캔|recursiveScanning|전체\s*단어|fullWordMatching|바이어스|로짓|bias|금지어\s*감점|태그|tags/i,
+      contextKeys: ['charSettings'],
+      freeTalkSchemaBaseline: false,
+    },
     knowledge: ['char_advanced'],
     rules: [
       '현재 캐릭터의 로어북 예산·스캔 깊이(`loreSettings`), 로짓 바이어스(`bias`), 태그(`tags`)를 조정할 때는 `update_char_settings`를 사용하세요. 기존 바이어스나 태그를 유지하면서 일부만 추가·삭제할 때는 `addBias`/`removeBias`, `addTags`/`removeTags`를 쓰세요.',
@@ -12167,6 +12251,15 @@ const SKILL_DEFS = [
     summary: '새 캐릭터 카드 생성(create_character) 및 다른 캐릭터의 로어북·정규식·Lua 포팅(port_from_character)',
     requiresCapabilities: [],
     actions: ['create_character', 'port_from_character'],
+    tools: ['list_items', 'read_item', 'inspect_assets'],
+    maxChars: 3800,
+    triggers: {
+      screens: [],
+      targetKinds: [],
+      keywords: /새\s*캐릭터|신규\s*캐릭터|새\s*봇|신규\s*봇|캐릭터\s*(?:카드\s*)?(?:새로\s*)?(?:생성|만들|추가|제작|포팅|복사|이식)|봇\s*(?:카드\s*)?(?:새로\s*)?(?:생성|만들|제작)|다른\s*캐릭터|타\s*캐릭터|교차\s*포팅|포팅|이식해|create_character|port_from_character/i,
+      contextKeys: ['characterCatalog'],
+      freeTalkSchemaBaseline: false,
+    },
     knowledge: ['character', 'char_advanced', 'cbs'],
     rules: [
       '새 캐릭터 카드를 처음부터 만들 때는 `create_character`를 사용하세요(현재 캐릭터를 덮어쓰지 않고 새 캐릭터로 추가됩니다).',
@@ -12184,6 +12277,15 @@ const SKILL_DEFS = [
     summary: '채팅 변수(chat.scriptstate) 호감도·스탯·플래그 추가·수정·삭제(update_chat_vars)',
     requiresCapabilities: [],
     actions: ['update_chat_vars'],
+    tools: ['read_vars', 'test_regex_cbs'],
+    maxChars: 1800,
+    triggers: {
+      screens: [],
+      targetKinds: [],
+      keywords: /채팅\s*변수|변수|scriptstate|호감도|affection|\bhp\b|\bmp\b|체력|마나|골드|소지금|스탯|상태값|플래그|카운터|\bvar\b|getvar|setvar|초기화/i,
+      contextKeys: [],
+      freeTalkSchemaBaseline: true,
+    },
     knowledge: ['chat_vars', 'cbs'],
     rules: [
       '현재 진행 중인 채팅의 변수(`chat.scriptstate`) 값을 추가·수정·삭제할 때는 `update_chat_vars`를 사용하세요(새 채팅의 기본값은 `update_field`의 `defaultVariables`).',
@@ -12199,6 +12301,15 @@ const SKILL_DEFS = [
     summary: '새 채팅 생성+원클릭 이사(create_chat) 및 다른 채팅에서 상태 옮기기(import_chat)',
     requiresCapabilities: [],
     actions: ['import_chat', 'create_chat'],
+    tools: ['list_items', 'read_chat', 'read_vars'],
+    maxChars: 2400,
+    triggers: {
+      screens: [],
+      targetKinds: [],
+      keywords: /이사|옮겨|가져와|이관|참조\s*채팅|\d+\s*번\s*채팅|채팅\s*#?\d+|이전\s*채팅|다른\s*채팅|콜드\s*스토리지|새\s*채팅|신규\s*채팅|채팅\s*(?:생성|만들|추가|분리|새로)|세션\s*(?:분리|새로|이사)|다음\s*회차|2부\s*채팅|create_chat|import_chat/i,
+      contextKeys: ['chatList', 'referenceChat'],
+      freeTalkSchemaBaseline: false,
+    },
     knowledge: [],
     rules: [
       '같은 캐릭터의 다른 채팅에서 지금 채팅으로 "이사"(변수·작가의 노트·채팅 로어북·연결 페르소나·채팅 모듈·첫 메시지 번호 옮기기)할 때는 `import_chat`을 사용하세요. 값은 플러그인이 원본 그대로 복사하므로 변수 값이나 노트 내용을 직접 받아 적지 마세요. 원본 채팅이 어느 것인지 불분명하면 [같은 캐릭터의 채팅 목록]을 보여 주고 먼저 물어보세요.',
@@ -12217,6 +12328,16 @@ const SKILL_DEFS = [
     summary: '사용자가 직접 첨부한 최근 LLM API 요청·응답 로그 오류(4xx/5xx·토큰 초과 등) 분석',
     requiresCapabilities: ['getFetchLogs'],
     actions: [],
+    tools: ['read_fetch_log', 'host_info'],
+    maxChars: 1000,
+    triggers: {
+      screens: [],
+      targetKinds: [],
+      keywords: /요청\s*로그|api\s*로그|fetch\s*log|에러\s*로그|오류\s*로그|(?:400|401|403|429|500|502|503)\s*(?:에러|오류|error)|http\s*(?:에러|오류|상태)|응답\s*로그|전송\s*실패\s*원인/i,
+      currentTurnOnly: true,
+      contextKeys: ['attachedFetchLog'],
+      freeTalkSchemaBaseline: false,
+    },
     knowledge: ['fetch_logs'],
     rules: [],
     schemas: [],
@@ -12227,16 +12348,88 @@ const SKILL_DEFS = [
 const SKILL_BY_ID = new Map(SKILL_DEFS.map(s => [s.id, s]));
 const SKILL_ID_BY_ACTION = new Map();
 for (const def of SKILL_DEFS) {
-  if (def.id === 'core_text' || def.id === 'chat_input') continue;
   for (const act of def.actions || []) {
     SKILL_ID_BY_ACTION.set(act, def.id);
   }
 }
 
-// On chat/unknown free-talk, always expose lightweight scripts/persona schemas so follow-ups or
-// indirect phrasing never lose v0.4.x action coverage, while deferring heavy Lua/regex/persona
-// knowledge guides until triggered by screen, keyword, or recent turn context.
-const FREE_TALK_SCHEMA_BASELINE_SKILLS = ['scripts', 'persona'];
+const FREE_TALK_SCHEMA_BASELINE_SKILLS = SKILL_DEFS
+  .filter(def => def.triggers?.freeTalkSchemaBaseline)
+  .map(def => def.id);
+
+function getSkillById(id) {
+  return SKILL_BY_ID.get(String(id ?? '').trim()) || null;
+}
+
+function getOwnerSkillForAction(action) {
+  return SKILL_ID_BY_ACTION.get(String(action ?? '').trim()) || null;
+}
+
+/**
+ * Estimates the rendered prompt character footprint of a single skill pack
+ * (knowledge sections + rules + schemas) for enforcing `maxChars` invariants.
+ */
+function measureSkillChars(def) {
+  if (!def) return 0;
+  const kChars = (def.knowledge || []).reduce((s, k) => s + String(KNOWLEDGE_SECTIONS[k] || '').length, 0);
+  const rChars = (def.rules || []).reduce((s, r) => s + String(r || '').length, 0);
+  const sChars = (def.schemas || []).reduce((s, sc) => s + String(sc || '').length, 0);
+  return kChars + rChars + sChars;
+}
+
+/**
+ * Validates the built-in skill registry against an action whitelist (`VALID_ACTIONS`):
+ * - Every action belongs to EXACTLY ONE skill in SKILL_DEFS (100% reachability, 0 duplicates).
+ * - Every skill declares required metadata (`id`, `label`, `summary`, `triggers`, `tools`, `requiresCapabilities`, `maxChars`).
+ * - Every skill stays within its declared `maxChars` budget.
+ */
+function validateSkillRegistry(validActions = []) {
+  const issues = [];
+  const seenSkills = new Set();
+  const actionOwners = new Map();
+
+  for (const def of SKILL_DEFS) {
+    if (!def.id || seenSkills.has(def.id)) {
+      issues.push(`중복되거나 비어 있는 스킬 ID: ${def.id}`);
+    }
+    seenSkills.add(def.id);
+    if (!def.label || !def.summary) issues.push(`스킬 ${def.id}: label/summary 누락`);
+    if (!def.triggers || typeof def.triggers !== 'object') issues.push(`스킬 ${def.id}: triggers 누락`);
+    if (!Array.isArray(def.tools)) issues.push(`스킬 ${def.id}: tools 배열 누락`);
+    if (!Array.isArray(def.requiresCapabilities)) issues.push(`스킬 ${def.id}: requiresCapabilities 배열 누락`);
+    if (!Number.isInteger(def.maxChars) || def.maxChars <= 0) {
+      issues.push(`스킬 ${def.id}: 유효한 maxChars 누락`);
+    } else {
+      const actual = measureSkillChars(def);
+      if (actual > def.maxChars) {
+        issues.push(`스킬 ${def.id}: 실제 글자 수(${actual})가 maxChars(${def.maxChars}) 초과`);
+      }
+    }
+    for (const act of def.actions || []) {
+      if (actionOwners.has(act)) {
+        issues.push(`동작 "${act}"이(가) 여러 스킬(${actionOwners.get(act)}, ${def.id})에 중복 등록됨`);
+      } else {
+        actionOwners.set(act, def.id);
+      }
+    }
+  }
+
+  for (const act of validActions || []) {
+    if (!actionOwners.has(act)) {
+      issues.push(`동작 "${act}"을(를) 소유한 내장 스킬이 없음`);
+    }
+  }
+  const validSet = new Set(validActions || []);
+  if (validSet.size > 0) {
+    for (const [act, owner] of actionOwners.entries()) {
+      if (!validSet.has(act)) {
+        issues.push(`스킬 ${owner}에 미등록 동작 "${act}"이(가) 선언됨`);
+      }
+    }
+  }
+
+  return { ok: issues.length === 0, issues, actionOwners: Object.fromEntries(actionOwners) };
+}
 
 /**
  * Combines the current user input with the most recent 2 user messages from `history` so
@@ -12274,13 +12467,13 @@ function extractRecentAssistantSkillIds(history = []) {
       for (const item of msg.proposals) {
         const act = item?.proposal?.action || item?.action;
         const sid = act ? SKILL_ID_BY_ACTION.get(act) : null;
-        if (sid) ids.add(sid);
+        if (sid && sid !== 'core_text') ids.add(sid);
       }
     }
     const raw = String(msg.rawText ?? msg.content ?? '');
     for (const m of raw.matchAll(/"action"\s*:\s*"([a-z_]+)"/g)) {
       const sid = SKILL_ID_BY_ACTION.get(m[1]);
-      if (sid) ids.add(sid);
+      if (sid && sid !== 'core_text') ids.add(sid);
     }
     break; // only inspect the immediately preceding assistant turn
   }
@@ -12296,24 +12489,24 @@ function isSkillSupported(def, capabilities = null) {
 }
 
 /**
- * Returns the L1 built-in skill catalog (id, label, 1-line summary, actions) for skills
- * supported on the current host and not already loaded in L0.
+ * Returns the L1 built-in skill catalog (id, label, 1-line summary, actions, tools) for all skills
+ * supported on the current host and not in `excludeIds`.
  */
 function getSkillCatalog(capabilities = null, excludeIds = []) {
-  const excluded = new Set(['core_text', 'chat_input', ...(Array.isArray(excludeIds) ? excludeIds : [])]);
+  const excluded = new Set(Array.isArray(excludeIds) ? excludeIds : []);
   return SKILL_DEFS
     .filter(def => !excluded.has(def.id) && isSkillSupported(def, capabilities))
     .map(def => ({
       id: def.id,
       label: def.label,
-      summary: def.summary || def.label,
+      summary: def.summary,
       actions: [...(def.actions || [])],
+      tools: [...(def.tools || [])],
     }));
 }
 
 /**
- * Dynamically loads L2 built-in skill content (knowledge + rules + schemas) when requested
- * by the model via `load_skill` tool in the 3-call loop.
+ * L2 dynamic skill loader used by the Read-Only `load_skill` tool inside the 3-call loop.
  */
 function loadSkillPack(skillIds = [], capabilities = null) {
   const requested = Array.isArray(skillIds) ? skillIds : [skillIds];
@@ -12359,10 +12552,33 @@ function loadSkillPack(skillIds = [], capabilities = null) {
   };
 }
 
+function hasContextTrigger(def, extraContext, { isFreeTalk, isChatInput, text }) {
+  const keys = def.triggers?.contextKeys || [];
+  for (const key of keys) {
+    if (key === 'chatList') {
+      if (extraContext?.chatList?.chats?.length > 1 && (isFreeTalk || isChatInput || def.triggers.keywords?.test(text))) {
+        return true;
+      }
+    } else if (key === 'referenceChat') {
+      if (extraContext?.referenceChat && (isFreeTalk || isChatInput || def.triggers.keywords?.test(text))) {
+        return true;
+      }
+    } else if (key === 'characterCatalog') {
+      if (extraContext?.characterCatalog?.length > 0) return true;
+    } else if (key === 'charSettings') {
+      if (extraContext?.charSettings) return true;
+    } else if (key === 'attachedFetchLog') {
+      if (extraContext?.attachedFetchLog) return true;
+    } else if (extraContext?.[key]) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /**
- * Deterministically selects the subset of internal skills for a request based on
- * current cursor/screen, user message + recent follow-up turns, attached context, and any
- * L2 skills explicitly loaded during the current 3-call request loop.
+ * Deterministically selects the subset of internal skills (full knowledge + rules + schemas)
+ * based on declarative `SKILL_DEFS` triggers, recent conversation context, and L2 `extraSkillIds`.
  * @returns {string[]} ordered list of active skill IDs
  */
 function selectSkills({
@@ -12376,40 +12592,46 @@ function selectSkills({
 } = {}) {
   const screen = context?.screen || 'unknown';
   const kind = snapshot?.target?.targetKind || context?.targetKind || 'general';
+  const fieldKey = snapshot?.target?.fieldKey || context?.fieldKey || '';
   const isFreeTalk = Boolean(context?.freeTalk) || kind === 'general';
   const isChatInput = kind === 'chat_input';
   const text = collectRoutingText(userInput, history);
   const active = new Set();
 
-  // 1. Primary target / screen routing
-  if (isChatInput) {
-    active.add('chat_input');
-  } else if (!isFreeTalk) {
-    active.add('core_text');
+  // 1. Declarative screen / target / field / context / keyword triggers
+  for (const def of SKILL_DEFS) {
+    const tr = def.triggers || {};
+
+    if (def.id === 'core_text') {
+      if (!isFreeTalk && !isChatInput) active.add('core_text');
+      continue;
+    }
+    if (def.id === 'chat_input') {
+      if (isChatInput) active.add('chat_input');
+      continue;
+    }
+
+    if (Array.isArray(tr.screens) && tr.screens.includes(screen)) {
+      active.add(def.id);
+    }
+    if (Array.isArray(tr.targetKinds) && tr.targetKinds.includes(kind)) {
+      active.add(def.id);
+    }
+    if (Array.isArray(tr.fieldKeys) && fieldKey && tr.fieldKeys.includes(fieldKey)) {
+      active.add(def.id);
+    }
+    if (hasContextTrigger(def, extraContext, { isFreeTalk, isChatInput, text })) {
+      active.add(def.id);
+    }
+    if (tr.keywords) {
+      const kwText = tr.currentTurnOnly ? String(userInput ?? '') : text;
+      if (tr.keywords.test(kwText)) {
+        active.add(def.id);
+      }
+    }
   }
 
-  if (kind === 'char_field' || screen === 'character') {
-    active.add('char_fields');
-    if (context?.fieldKey === 'firstMessage' || screen === 'character') active.add('greetings');
-  }
-  if (kind === 'char_alt_greeting') {
-    active.add('greetings');
-  }
-  if (kind === 'chat_note' || kind === 'chat_message') {
-    active.add('char_fields');
-  }
-  if (kind.includes('lorebook') || screen === 'lorebook') {
-    active.add('lorebook');
-  }
-  if (kind.includes('lua') || kind.includes('regex') || screen === 'scripts') {
-    active.add('scripts');
-  }
-  if (kind === 'persona' || screen === 'persona') {
-    active.add('persona');
-  }
-  if (kind === 'config' || screen === 'settings') {
-    active.add('config');
-  }
+  // Module editor screen tab routing (lorebook vs regex/trigger tab)
   if (kind === 'module_field' || screen === 'module') {
     const modTab = extraContext?.openModule?.tab || context?.moduleDomHints?.tab || '';
     if (modTab === 'regex' || modTab === 'trigger') {
@@ -12422,47 +12644,12 @@ function selectSkills({
     }
   }
 
-  // Free talk on chat/unknown screen: keep the common lightweight authoring baseline,
-  // while leaving heavier specialized knowledge packs keyword/context-driven.
-  if (isFreeTalk && (screen === 'chat' || screen === 'unknown')) {
-    active.add('char_fields');
-    active.add('greetings');
-    active.add('lorebook');
-    active.add('config');
-    active.add('chat_vars');
-  }
-
-  // 2. Context-driven activations
-  if (extraContext?.chatList?.chats?.length > 1 || extraContext?.referenceChat) {
-    if (isFreeTalk || isChatInput || SKILL_KEYWORDS.chat_migration.test(text)) {
-      active.add('chat_migration');
-    }
-  }
-  if (extraContext?.attachedFetchLog) {
-    active.add('fetch_logs');
-    active.add('config');
-  }
-  if (extraContext?.personasSummary && (screen === 'persona' || SKILL_KEYWORDS.persona.test(text))) {
-    active.add('persona');
-  }
-  if (extraContext?.chatVariables?.variables?.length > 0 && (isFreeTalk || isChatInput || SKILL_KEYWORDS.chat_vars.test(text))) {
-    active.add('chat_vars');
-  }
-  if (extraContext?.characterCatalog?.length > 0) {
-    active.add('char_create_port');
-  }
-
-  // 3. Keyword-driven activations across current + recent user turns (works from ANY screen/focus!)
-  for (const [id, re] of Object.entries(SKILL_KEYWORDS)) {
-    if (re.test(text)) active.add(id);
-  }
-
-  // 4. Carry over skills for proposals emitted in the immediately preceding assistant turn
+  // 2. Carry over skills for proposals emitted in the immediately preceding assistant turn
   for (const id of extractRecentAssistantSkillIds(history)) {
     active.add(id);
   }
 
-  // 5. Merge any L2 dynamically loaded skills requested via `load_skill`
+  // 3. Merge any L2 dynamically loaded skills requested via `load_skill`
   for (const rawId of Array.isArray(extraSkillIds) ? extraSkillIds : []) {
     const id = String(rawId ?? '').trim();
     if (SKILL_BY_ID.has(id)) active.add(id);
@@ -12497,8 +12684,8 @@ function buildSkillPromptSections({
   const kind = snapshot?.target?.targetKind || context?.targetKind || 'general';
   const isFreeTalk = Boolean(context?.freeTalk) || kind === 'general';
 
-  // On chat/unknown free-talk, include compact scripts & persona schemas even without keywords
-  // (v0.4.x action parity) without paying for heavy Lua/regex/persona knowledge guides.
+  // On chat/unknown free-talk, keep common lightweight action schemas loaded (1-call parity)
+  // while loading heavy knowledge guides & rules ONLY for skills triggered in `activeSkillIds`.
   const schemaOnlySkillIds = isFreeTalk && (screen === 'chat' || screen === 'unknown')
     ? FREE_TALK_SCHEMA_BASELINE_SKILLS.filter(id => !activeSet.has(id) && isSkillSupported(SKILL_BY_ID.get(id), capabilities))
     : [];
@@ -12528,7 +12715,7 @@ function buildSkillPromptSections({
     }
     if (includeSchema) {
       for (const s of def.schemas) schemas.push(s);
-      for (const a of def.actions || []) {
+      for (const a of [...(def.actions || []), ...(def.usesActions || [])]) {
         if (!seenActions.has(a)) {
           seenActions.add(a);
           activeActions.push(a);
@@ -12543,10 +12730,14 @@ function buildSkillPromptSections({
     .filter(Boolean)
     .join('\n\n');
 
-  const l1Catalog = getSkillCatalog(capabilities, activeSkillIds);
+  // Exclude focus-only skills (`core_text`, `chat_input`) from L1 catalog on free-talk where
+  // cursor-bound edits are disallowed, while exposing all other unloaded skills via `load_skill`.
+  const l1Exclude = isFreeTalk ? [...activeSkillIds, 'core_text', 'chat_input'] : activeSkillIds;
+  const l1Catalog = getSkillCatalog(capabilities, l1Exclude);
 
   return {
     activeSkillIds,
+    schemaOnlySkillIds,
     activeSkillLabels: activeSkillIds.map(id => SKILL_BY_ID.get(id)?.label || id),
     activeActions,
     knowledgeText,
@@ -12558,6 +12749,11 @@ function buildSkillPromptSections({
 }
 
   __exports.SKILL_DEFS = SKILL_DEFS;
+  __exports.FREE_TALK_SCHEMA_BASELINE_SKILLS = FREE_TALK_SCHEMA_BASELINE_SKILLS;
+  __exports.getSkillById = getSkillById;
+  __exports.getOwnerSkillForAction = getOwnerSkillForAction;
+  __exports.measureSkillChars = measureSkillChars;
+  __exports.validateSkillRegistry = validateSkillRegistry;
   __exports.isSkillSupported = isSkillSupported;
   __exports.getSkillCatalog = getSkillCatalog;
   __exports.loadSkillPack = loadSkillPack;
@@ -15104,6 +15300,7 @@ function buildAutoRepairFollowUpMessage({
 }
 
   __exports.DELETE_ACTIONS = DELETE_ACTIONS;
+  __exports.VALID_ACTIONS = VALID_ACTIONS;
   __exports.findUnknownProposalKeys = findUnknownProposalKeys;
   __exports.shouldIncludeGhostwriteContext = shouldIncludeGhostwriteContext;
   __exports.readModelResponse = readModelResponse;

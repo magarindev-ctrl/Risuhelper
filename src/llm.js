@@ -1300,6 +1300,7 @@ function buildAutoRepairFollowUpMessage({
 
 export {
   DELETE_ACTIONS,
+  VALID_ACTIONS,
   findUnknownProposalKeys,
   shouldIncludeGhostwriteContext,
   readModelResponse,

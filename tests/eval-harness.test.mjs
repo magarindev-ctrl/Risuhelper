@@ -6,10 +6,10 @@ import assert from 'node:assert/strict';
 import { EVAL_SCENARIOS, runEvalScenario, hasUnclosedProposalFence, formatUndoConflict } from '../tools/eval-scenarios.mjs';
 import { DEFAULT_MAX_TOKENS, parseArgs, summarizeResults, renderMarkdownReport } from '../tools/eval-real-model.mjs';
 
-test('eval harness defines 31 unique scenarios and every scenario passes with its golden reply (including multi-call loops & undo)', async () => {
-  assert.equal(EVAL_SCENARIOS.length, 31);
+test('eval harness defines 49 unique scenarios and every scenario passes with its golden reply (including multi-call loops & undo)', async () => {
+  assert.equal(EVAL_SCENARIOS.length, 49);
   const ids = new Set(EVAL_SCENARIOS.map(s => s.id));
-  assert.equal(ids.size, 31, 'all scenario IDs must be unique');
+  assert.equal(ids.size, 49, 'all scenario IDs must be unique');
 
   const results = [];
   for (const sc of EVAL_SCENARIOS) {
@@ -21,15 +21,15 @@ test('eval harness defines 31 unique scenarios and every scenario passes with it
   }
 
   const summary = summarizeResults(results, { mode: 'golden', provider: 'golden', model: '', maxTokens: DEFAULT_MAX_TOKENS, maxCalls: 3, runs: 1, timestamp: '2026-01-01T00:00:00Z' });
-  assert.equal(summary.passed, 31);
-  assert.equal(summary.total, 31);
+  assert.equal(summary.passed, 49);
+  assert.equal(summary.total, 49);
   assert.equal(summary.passRate, 100);
   assert.ok(summary.loopStats.singleCallRate >= 80, `expected >=80% 1-call completion, got ${summary.loopStats.singleCallRate}%`);
   assert.equal(summary.loopStats.loopTotal, 3);
   assert.equal(summary.loopStats.loopPassed, 3);
   assert.ok(summary.loopStats.maxCallsObserved <= 3);
   const md = renderMarkdownReport(results, summary);
-  assert.match(md, /31 \/ 31 \(100%\)/);
+  assert.match(md, /49 \/ 49 \(100%\)/);
   assert.match(md, /호출 루프 지표/);
 
   // Verify the 3 loop scenarios genuinely fail under maxCalls=1 while passing under maxCalls=3
@@ -147,7 +147,7 @@ test('eval CLI defaults maxTokens to 8192 and maxCalls to 3, and supports --runs
   assert.match(md, /\| `focused-desc-patch` \| 포커스 · 부분 편집 \| 1\/2 \|/);
 });
 
-test('dist/risuhelper-eval.js boots in a Plugin v3 sandbox, runs all 31 scenarios (including multi-call loops) via runLLMModel without touching real host data, and renders copyable Markdown report', async () => {
+test('dist/risuhelper-eval.js boots in a Plugin v3 sandbox, runs all 49 scenarios (including multi-call loops) via runLLMModel without touching real host data, and renders copyable Markdown report', async () => {
   const fs = await import('node:fs');
   const path = await import('node:path');
   const vm = await import('node:vm');
@@ -247,22 +247,22 @@ test('dist/risuhelper-eval.js boots in a Plugin v3 sandbox, runs all 31 scenario
   selects[0].value = 'submodel';
   for (const fn of selects[0].listeners.get('change') || []) fn({ target: selects[0] });
 
-  // Click '▶ 31문항 평가 시작'
+  // Click '▶ 49문항 평가 시작'
   const startBtn = findAll(n => n.tagName === 'BUTTON' && n.textContent.includes('평가 시작'))[0];
   assert.ok(startBtn);
   startBtn.click();
 
-  // Wait for all 31 virtual-host runs (28 single-call + 3 two-call = 34 LLM calls) to complete
+  // Wait for all 49 virtual-host runs (46 single-call + 3 two-call = 52 LLM calls) to complete
   const started = Date.now();
-  while (Date.now() - started < 10000) {
+  while (Date.now() - started < 12000) {
     if (doc.querySelector('.rhe-textarea')?.value) break;
     await new Promise(r => setTimeout(r, 25));
   }
 
-  assert.equal(calledModes.length, 34);
+  assert.equal(calledModes.length, 52);
   assert.ok(calledModes.every(m => m === 'submodel'));
   const report = doc.querySelector('.rhe-textarea')?.value || '';
-  assert.match(report, /31 \/ 31 \(100%\)/);
+  assert.match(report, /49 \/ 49 \(100%\)/);
   assert.match(report, /modelMode=submodel/);
   assert.match(report, /maxCalls=3/);
   assert.match(report, /platform=web\/local/);

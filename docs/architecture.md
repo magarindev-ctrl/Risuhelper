@@ -1,6 +1,6 @@
 # RisuHelper 아키텍처 및 RisuAI 포크 호환성 분석
 
-> 버전: `0.7.0` · 라이선스: `GPL-3.0-only` · 외부 런타임 의존성: 0개 · API 전수표: [`docs/api-coverage.md`](api-coverage.md)
+> 버전: `0.8.0` · 라이선스: `GPL-3.0-only` · 외부 런타임 의존성: 0개 · API 전수표: [`docs/api-coverage.md`](api-coverage.md)
 
 ---
 
@@ -88,9 +88,9 @@ User Input + Detected/Manual Target
   - 단순 요청은 1회 호출로 즉시 종료하고, 추가 스키마·전문·진단이 필요할 때만 `risuhelper-tool` JSON 배열(1회 최대 6개 병렬 실행)로 12종 읽기 전용 도구(`load_skill`, `read_item`, `list_items`, `read_chat`, `read_vars`, `test_regex_cbs`, `active_lorebook`, `audit_workspace`, `inspect_assets`, `read_fetch_log`, `host_info`, `search_translation`)를 실행합니다.
   - `read_item`으로 전문을 조회하면 해당 요청의 `fieldsShownFull`/`greetingsShownFull`이 안전하게 해제되어 전체 교체 제안이 가능해지며, `read_fetch_log`는 사용자가 1회성 로그 첨부를 켠 경우에만 허용됩니다.
   - 제안 파싱·스키마·미리보기 오류가 발생하면 남은 예산 안에서 오류와 원문 발췌를 붙여 자동 수정하며, 동일 응답 반복 시 즉시 조기 종료(zero-progress guard)합니다. 자동 수정 결과 제안 없이 종료되더라도 이전 호출의 거부 사유(`repairHistory`)를 UI에 펼쳐 보존합니다.
-  - 외부 `SKILL.md` 없이 내장 스킬 L0(자동 로드) · L1(초경량 카탈로그) · L2(`load_skill` 동적 로드) 구조를 유지하고, 현재 호스트가 미지원하는 스킬·도구는 카탈로그에서 자동 숨깁니다.
+  - **데이터화된 내장 스킬 라우터 (`src/skills.js`, M2 완성)**: 외부 `SKILL.md` 없이 `SKILL_DEFS` 한 곳에 14개 스킬의 `triggers`·`tools`·`requiresCapabilities`·`maxChars`·배타적 `actions`(24개 전체 100% 분할)를 선언합니다. 채팅 자유대화에서는 핵심 액션 스키마만 경량 기본 탑재하고 무거운 지식 가이드는 필요 시(L0/L2)에만 주입해 시스템 프롬프트 평균을 `v0.5.1`(9,232자) 이하로 유지합니다.
   - 자동 단계는 어떤 쓰기 API도 호출하지 않으며, UI에 실시간 진행 배지(`2/3 · ... 조회 중`), 총 호출 횟수·전송 글자 수, 접이식 도구 실행/거부 내역, 전 구간 즉시 `중단`을 제공합니다.
-  - **평가 & 포크 E2E 하네스 (`tools/eval-scenarios.mjs`, `tools/e2e/`)**: 31문항 실모델 평가 하네스(M0 새 채팅·타 채팅 편집 + M1 전문 조회·L2 스킬 로드·자동 수정 3종 루프 시나리오, `--max-calls 1/2/3` 비교 및 1회 종료 비율 측정)와 6개 호스트 시뮬레이션/Playwright E2E 러너(`npm run e2e:sim`)를 제공합니다.
+  - **평가 & 포크 E2E 하네스 (`tools/eval-scenarios.mjs`, `tools/e2e/`)**: 49문항 실모델 평가 하네스(14개 스킬별 최소 3문항: 정상 2+·거부 1+, M0/M1 루프 시나리오, `--max-calls 1/2/3` 비교 및 1회 종료 비율 측정), 224개 발화 라우팅 말뭉치(L0 재현율 ≥95%, L0+L2 100%), 6개 호스트 시뮬레이션/Playwright E2E 러너(`npm run e2e:sim`)를 제공합니다.
 - **채팅 생성·이사(`create_chat`, `import_chat`, `src/chat-transfer.js`)**: `import_chat`은 같은 캐릭터의 다른 채팅에서 지금 열린 채팅으로 상태를 옮기며, `create_chat`은 포크 안전 UUID `id`와 빈 `message: []`를 갖춘 새 채팅을 생성하고 선택적으로 `importFromChatIndex`("current" 또는 원본 `chatIndex`), `importItems`, `summaryLorebook`, `switchToNewChat`까지 원클릭으로 처리합니다(기존 채팅 배열을 얕은 복사로 유지해 긴 대화 비교 비용과 PocketRisu `_placeholder` 충돌을 회피하며, 되돌리기 시 새 채팅만 제거하고 `chatPage`를 복구). RisuAI 콜드 스토리지(`\uEF01COLDSTORAGE\uEF01`) 보관 채팅은 목록에 표시하고 읽기·이사 시 복원 안내를 돌려줍니다.
 - **경계 없는 타 캐릭터·타 채팅 제어 (`targetCharIndex` · `targetChatIndex`)**: `patch_text`/`replace_text`(프롬프트 인젝션 방어)를 제외한 전용 동작은 `targetCharIndex` / `targetChatIndex`로 현재 열려 있지 않은 캐릭터나 채팅도 `getCharacterFromIndex` / `setCharacterToIndex` / `getChatFromIndex` / `setChatToIndex`를 통해 안전하게 미리보기·적용·되돌리기할 수 있습니다. 카드 제목에 `[다른 캐릭터: ...]` / `[다른 채팅: ...]` 접두를 명시하고 `chaId`/`chatId`를 고정합니다. RisuNest에서는 `queryCharacters` 고속 경로로 전체 `db.characters` 직렬화를 피합니다.
 - **런타임 기능 탐지 (`src/host-capabilities.js`)**: Plugin v3 iframe의 catch-all Proxy(`typeof api.foo === 'function'`이 항상 참)를 우회해 `getRuntimeInfo()` → `<title>` → (비-Proxy 한정) 메서드 시그니처 순서로 6대 호스트(원본·PocketRisu·RisuBard·RisuNest·해적리스·Hardened)와 지원 API 매트릭스를 탐지합니다.
