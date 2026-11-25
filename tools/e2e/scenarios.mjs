@@ -236,9 +236,9 @@ const E2E_SCENARIOS = [
   },
   {
     id: 'm3-declarative-extension-lifecycle',
-    title: 'M3 선언형 상주 확장(body_intercepter) 등록 → 실행 → 되돌리기 즉시 해제',
+    title: 'M3 선언형 상주 확장(body_intercepter {id}·replacer beforeRequest 배열·chat_listener output) 등록 → 실행 → 되돌리기 즉시 해제',
     requiresLLM: true,
-    prompt: 'gpt 모델 요청 본문에 top_p 0.9를 넣는 상주 확장 규칙을 추가해 줘',
+    prompt: 'gpt 모델 요청 본문에 top_p 0.9를 넣고, beforeRequest 치환 및 응답 감시 규칙을 추가해 줘',
     scriptedReplies: [
       proposalBlock({
         action: 'manage_extensions',
@@ -252,15 +252,59 @@ const E2E_SCENARIOS = [
           matchModelRegex: 'gpt',
           set: { top_p: 0.9 },
         },
+      }) + '\n' +
+      proposalBlock({
+        action: 'manage_extensions',
+        title: 'beforeRequest 메시지 배열 치환 추가',
+        operation: 'upsert',
+        rule: {
+          id: 'e2e-rep-ext',
+          type: 'replacer',
+          name: '요청 치환',
+          stage: 'beforeRequest',
+          find: 'foo',
+          replace: 'bar',
+        },
+      }) + '\n' +
+      proposalBlock({
+        action: 'manage_extensions',
+        title: '응답 감시(output) 추가',
+        operation: 'upsert',
+        rule: {
+          id: 'e2e-listen-ext',
+          type: 'chat_listener',
+          name: 'HP 감시',
+          requirePatterns: ['\\[HP:\\d+\\]'],
+          notifyLabel: 'HP 누락',
+        },
       }),
     ],
     async verify({ ui, state, assert }) {
-      await ui.click(/^적용$/);
-      assert.equal(state.hostMeta.bodyIntercepters.length, 1);
-      const patched = state.hostMeta.bodyIntercepters[0]({ model: 'gpt-4.1', temperature: 0.7 });
+      await ui.click(/^모두 적용/);
+      assert.equal(state.hostMeta.bodyIntercepters.size, 1);
+      const biFn = [...state.hostMeta.bodyIntercepters.values()][0];
+      const patched = biFn({ model: 'gpt-4.1', temperature: 0.7 }, 'model');
       assert.equal(patched.top_p, 0.9);
+
+      // Verify beforeRequest replacer preserves OpenAIChat[] array (never returns string!)
+      assert.equal(state.hostMeta.replacers.length, 1);
+      const repOut = state.hostMeta.replacers[0].fn([{ role: 'user', content: 'hello foo' }], 'model');
+      assert.ok(Array.isArray(repOut), 'beforeRequest replacer MUST return OpenAIChat[] array');
+      assert.equal(repOut[0].content, 'hello bar');
+
+      // Verify chat_listener registered with mode 'output' and inspects real ChatOutputListenerArg
+      assert.equal(state.hostMeta.chatListeners.length, 1);
+      assert.equal(state.hostMeta.chatListeners[0].mode, 'output');
+      state.hostMeta.chatListeners[0].fn({
+        chat: { message: [{ role: 'char', data: '상태창 누락 응답' }], scriptstate: {} },
+        messageIndex: 0,
+      });
+
+      // Undo all 3 as a single grouped undo unit and confirm 100% host unregistration (including bodyIntercepter via string id)
       await ui.clickConfirm(/^되돌리기 \(1\)$/);
-      assert.equal(state.hostMeta.bodyIntercepters.length, 0);
+      assert.equal(state.hostMeta.bodyIntercepters.size, 0, 'unregisterBodyIntercepter must unregister by returned string id');
+      assert.equal(state.hostMeta.replacers.length, 0);
+      assert.equal(state.hostMeta.chatListeners.length, 0);
     },
   },
   {
@@ -285,7 +329,7 @@ const E2E_SCENARIOS = [
   },
   {
     id: 'm3-risubard-bard-wiki',
-    title: 'M3 RisuBard BardWiki 문서 저장 + 되돌리기',
+    title: 'M3 RisuBard BardWiki 문서 저장(markdown+grade 0..9) + 되돌리기',
     onlyHosts: ['risubard'],
     requiresLLM: true,
     prompt: '바드 위키에 "공방 일지" 문서를 저장해 줘',
@@ -293,39 +337,42 @@ const E2E_SCENARIOS = [
       proposalBlock({
         action: 'manage_bard_wiki',
         operation: 'save_document',
-        documentId: 'bw-e2e',
+        type: 'location',
         title: '공방 일지',
-        content: '새로운 연금술 실험 기록.',
+        markdown: '새로운 연금술 실험 기록.',
         grade: 'A',
       }),
     ],
     async verify({ ui, state, assert }) {
       await ui.click(/^적용$/);
-      assert.ok(state.hostMeta.bardWikiDocs.some(d => d.id === 'bw-e2e' && d.grade === 'A'));
+      assert.ok(state.hostMeta.bardWikiDocs.some(d => d.title === '공방 일지' && d.grade === 7 && d.content === '새로운 연금술 실험 기록.'));
       await ui.clickConfirm(/^되돌리기 \(1\)$/);
-      assert.ok(!state.hostMeta.bardWikiDocs.some(d => d.id === 'bw-e2e'));
+      assert.ok(!state.hostMeta.bardWikiDocs.some(d => d.title === '공방 일지'));
     },
   },
   {
     id: 'm3-risunest-native-patch',
-    title: 'M3 RisuNest 네이티브 대화 패치 + 메시지 버튼 등록 + 되돌리기',
+    title: 'M3 RisuNest 네이티브 대화 패치(messages+chatVariables) + 메시지 버튼 등록 + 되돌리기',
     onlyHosts: ['risunest'],
     requiresLLM: true,
-    prompt: '리스네스트 네이티브 패치로 대화 제목을 바꿔 줘',
+    prompt: '리스네스트 네이티브 패치로 hp 변수를 95로 바꾸고 1번 메시지를 고쳐 줘',
     scriptedReplies: [
       proposalBlock({
         action: 'patch_risunest_conversation',
-        title: 'RisuNest 제목 패치',
+        title: 'RisuNest 메시지·변수 정밀 패치',
         conversationId: 'e2e-chat-2',
-        patch: { name: '2부 여정 (개정)' },
+        messages: [{ index: 0, set: { data: '2부 시작 (개정).' } }],
+        chatVariables: [{ key: 'hp', value: 95 }],
       }),
     ],
     async verify({ ui, state, assert }) {
       assert.ok(ui.registeredButtons.some(b => b.meta?.location === 'message'), 'RisuNest message quick-edit button must be registered');
       await ui.click(/^적용$/);
-      assert.equal(state.hostMeta.risunestConversations['e2e-chat-2'].name, '2부 여정 (개정)');
+      assert.equal(state.characters[0].chats[1].message[0].data, '2부 시작 (개정).');
+      assert.equal(state.characters[0].chats[1].scriptstate.$hp, 95);
       await ui.clickConfirm(/^되돌리기 \(1\)$/);
-      assert.equal(state.hostMeta.risunestConversations['e2e-chat-2'].name, '2부 여정');
+      assert.equal(state.characters[0].chats[1].message[0].data, '2부 시작.');
+      assert.equal(state.characters[0].chats[1].scriptstate.$hp, 60);
     },
   },
 ];

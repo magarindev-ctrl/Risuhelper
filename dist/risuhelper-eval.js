@@ -1,17 +1,17 @@
 //@name risuhelper-eval
 //@display-name RisuHelper 실모델 평가기 (임시)
 //@api 3.0
-//@version 0.9.9
+//@version 1.0.0
 
 /*
- * RisuHelper 20-Scenario Evaluator Plugin (temporary dev tool, v0.9.9)
+ * RisuHelper 20-Scenario Evaluator Plugin (temporary dev tool, v1.0.0)
  * License: GPL-3.0-only
  */
 (() => {
   'use strict';
   const __modules = {
   "src/version.js"(__require, __exports) {
-const VERSION = '0.9.9';
+const VERSION = '1.0.0';
 const PLUGIN_NAME = 'risuhelper';
 const STORAGE_KEY = 'risuhelper_state_v1';
 const PRESET_STORAGE_KEY = 'risuhelper_preset_v1';
@@ -789,7 +789,7 @@ const KNOWLEDGE_SECTIONS = {
   - \`tags\`: 캐릭터 태그 문자열 배열. 부분 추가/제거는 \`addTags\`/\`removeTags\` 사용.`,
 
   theme_hud: `[테마 · 스타일 · 채팅 HUD 패널]
-- \`update_theme\`: 색상 스킴 프리셋(\`colorSchemeName\`), 커스텀 색상(\`colorScheme\`), 텍스트 테마 프리셋(\`textThemeName\`), 커스텀 텍스트 색상(\`customTextTheme\`), \`customCSS\`/\`guiHTML\`을 즉시 반영하며 원클릭 되돌리기를 지원합니다.
+- \`update_theme\`: 색상 스킴 프리셋(\`colorSchemeName\`), 커스텀 색상(\`colorScheme\`, 10키 자동 병합), 텍스트 테마 프리셋(\`textThemeName\`: \`standard\`/\`highcontrast\`), 커스텀 텍스트 색상(\`customTextTheme\`, 6키 자동 병합), \`customCSS\`/\`guiHTML\`을 즉시 반영하며 원클릭 되돌리기를 지원합니다.
 - \`set_chat_panel\`: 채팅 화면에 정화된 HTML/CSS/CBS 라이브 HUD 패널을 띄우거나(\`html\`) 닫습니다(\`clear: true\`). 보안상 \`<script>\`·\`<iframe>\`·이벤트 핸들러는 자동 제거됩니다.`,
 
   assets_repair: `[에셋 · 인레이 · 워크스페이스 건강검진 수리]
@@ -806,17 +806,17 @@ const KNOWLEDGE_SECTIONS = {
 - \`update_onboarding\`: 캐릭터 시작 시 사용자에게 보여 주는 온보딩 입력 폼(\`enabled\`, \`title\`, \`description\`, \`fields[]\`: text/textarea/select/checkbox/radio/number)을 생성·수정합니다.`,
 
   extensions: `[선언형 상주 확장 (임의 JS 실행 금지)]
-- \`manage_extensions\`: 사용자가 승인한 선언형 JSON 규칙만 상주 실행하며 패널 \`상주 확장 관리\`에서 언제든 켜고 끌 수 있습니다(재시작 복원 · 언로드 완전 해제).
-- 지원 종류: \`script_handler\`(전역 정규식), \`replacer\`(전역 치환), \`chat_listener\`(응답 후 태그/변수 점검 알림), \`body_intercepter\`(조건부 요청 본문 JSON 패치 · 보안 키 차단), \`mcp_server\`(읽기 전용 진단 MCP 도구 노출), \`tts_processor\`(TTS 전/후처리 텍스트 정리), \`plugin_channel\`(V3 플러그인 연동 채널).
-- 보안 원칙: 임의 JS 코드(\`code\`/\`js\`/\`eval\`)나 API 키/헤더 수정은 절대 금지됩니다.`,
+- \`manage_extensions\`: 사용자가 승인한 선언형 JSON 규칙만 상주 실행하며 패널 \`상주 확장\`에서 언제든 켜고 끄거나 일괄 중지할 수 있습니다(ReDoS 차단 · 실행 지연/오류 자동 중지 · 언로드 완전 해제).
+- 지원 종류: \`script_handler\`(display/output/input/process 전역 정규식), \`replacer\`(beforeRequest 메시지 배열 / afterRequest 응답 문자열 치환), \`chat_listener\`(output 응답 후 태그/변수 점검 알림), \`body_intercepter\`(조건부 요청 본문 파라미터 패치 · 안전 파라미터 허용목록만 허용), \`mcp_server\`(읽기 전용 진단 MCP 도구 노출), \`tts_processor\`(TTS 합성 전 \`pre\` 텍스트 정리), \`plugin_channel\`(V3 플러그인 연동 채널).
+- 보안 원칙: 임의 JS 코드(\`code\`/\`js\`/\`eval\`), 프롬프트·모델·인증 키 변조(\`messages\`/\`model\`/\`apiKey\`/\`authorization\`)는 절대 금지됩니다.`,
 
   bard_wiki: `[RisuBard BardWiki 서사 메모리]
-- RisuBard 전용 \`bardWiki.*\` API는 현재 열려 있는 캐릭터·채팅 스코프 기준으로 동작합니다.
-- 먼저 \`read_bard_wiki\` 도구로 문서 목록·컨텍스트를 조회하고, \`manage_bard_wiki\`로 문서 저장(\`save_document\`), 등급 변경(\`set_grade\`), 컨텍스트 모드 전환(\`set_context_mode\`), 휴지통 이동(\`trash_document\`)을 승인 카드로 제안하세요.`,
+- RisuBard 전용 \`bardWiki.*\` API는 현재 열려 있는 캐릭터·채팅 스코프 기준으로 동작하며, 수정 시 \`contentHash\` 충돌 검사를 거칩니다.
+- 먼저 \`read_bard_wiki\` 도구로 문서 목록·컨텍스트를 조회하고, \`manage_bard_wiki\`로 문서 저장(\`save_document\`, type/title/markdown), 등급 변경(\`set_grade\`, 0~9 또는 EX/S/A/B/C/D), 문서별 컨텍스트 모드 전환(\`set_context_mode\`, documentId + always/auto/never), 휴지통 이동(\`trash_document\`)을 승인 카드로 제안하세요.`,
 
   risunest_native: `[RisuNest 전용 네이티브 대화 패치 · 조회]
 - RisuNest에서는 \`list_items\`/\`read_chat\`이 \`queryCharacters\`/\`queryConversations\`/\`queryConversationMessages\` 페이지네이션 고속 경로를 우선 사용합니다.
-- \`patch_risunest_conversation\`: \`risunestReadConversationContext\`로 현재 값을 확인한 뒤 \`risunestPatchConversation\`으로 대화 메타데이터(\`name\`, \`note\`, \`folderId\`, \`scriptstate\`, \`supaMemoryData\` 등)를 정밀 패치합니다.`,
+- \`patch_risunest_conversation\`: \`risunestReadConversationContext\`로 현재 리비전·값을 확인한 뒤 \`risunestPatchConversation\`으로 대화 메시지(\`messages[]\`)와 채팅 변수(\`chatVariables\`)를 원자적·낙관적 잠금(\`mutationId\`/\`expected\`)으로 정밀 패치합니다.`,
 };
 
 function buildKnowledgeForContext(context) {
@@ -1460,17 +1460,17 @@ const SKILL_DEFS = [
     },
     knowledge: ['bard_wiki'],
     rules: [
-      'RisuBard 환경에서는 `read_bard_wiki`로 현재 스코프 문서를 확인하고 `manage_bard_wiki`로 저장·등급·컨텍스트 모드·휴지통 이동을 제안하세요.',
+      'RisuBard 환경에서는 `read_bard_wiki`로 현재 스코프 문서를 확인하고 `manage_bard_wiki`로 저장·등급·문서별 컨텍스트 모드·휴지통 이동을 제안하세요.',
     ],
     schemas: [
-      '- BardWiki 문서 관리: {"action":"manage_bard_wiki","operation":"save_document|set_grade|set_context_mode|trash_document","documentId":"doc-1","title":"문서명","content":"내용","grade":"A","contextMode":"auto"}',
+      '- BardWiki 문서 관리: {"action":"manage_bard_wiki","operation":"save_document|set_grade|set_context_mode|trash_document","documentId":"doc-1","type":"location|character|event|other","title":"문서명","markdown":"내용","grade":7,"contextMode":"auto|always|never"}',
     ],
     rawDelimiters: false,
   },
   {
     id: 'risunest_native',
     label: 'RisuNest 패치',
-    summary: 'RisuNest 전용 대화 정밀 패치(patch_risunest_conversation) 및 호스트 툴 조회',
+    summary: 'RisuNest 전용 대화 메시지·변수 정밀 패치(patch_risunest_conversation) 및 호스트 툴 조회',
     requiresCapabilities: ['risunestPatch'],
     actions: ['patch_risunest_conversation'],
     tools: ['inspect_host_tools', 'list_items', 'read_chat', 'host_info'],
@@ -1484,10 +1484,10 @@ const SKILL_DEFS = [
     },
     knowledge: ['risunest_native'],
     rules: [
-      'RisuNest 대화 메타데이터·노트·변수를 네이티브 API로 직접 패치할 때 `patch_risunest_conversation`을 사용하세요.',
+      'RisuNest 대화의 메시지·채팅 변수를 네이티브 원자 패치 API로 직접 수정할 때 `patch_risunest_conversation`을 사용하세요.',
     ],
     schemas: [
-      '- RisuNest 대화 정밀 패치: {"action":"patch_risunest_conversation","title":"설명","conversationId":"conv-1","patch":{"name":"새 제목","note":"작가의 노트"}}',
+      '- RisuNest 대화 정밀 패치: {"action":"patch_risunest_conversation","title":"설명","conversationId":"conv-1","messages":[{"index":0,"set":{"data":"수정 본문"}}],"chatVariables":[{"key":"hp","value":90}]}',
     ],
     rawDelimiters: false,
   },
@@ -3554,11 +3554,18 @@ function planCharacterPort(sourceChar, targetChar, { items = [], loreIndices = n
   },
   "src/extensions-runtime.js"(__require, __exports) {
 // SPDX-License-Identifier: GPL-3.0-only
-// Declarative resident extensions runtime for RisuHelper (M3 · §6.1 ④).
-// Covers all 14 Plugin v3 resident hook APIs strictly via declarative JSON rules —
+// Declarative resident extensions runtime for RisuHelper (v1.0.0 · §6.1 ④).
+// Covers Plugin v3 resident hook APIs strictly via declarative JSON rules —
 // NEVER executes arbitrary model-authored JavaScript (`eval`/`Function` forbidden).
-// Every rule is persisted in pluginStorage, restored on boot if enabled, toggleable in UI,
-// and cleanly unregistered on `dispose()` / `onUnload()`.
+// Every signature matches upstream kwaroran/Risuai Plugin API v3 (`v3.svelte.ts` / `risuai.d.ts`):
+// - addRisuScriptHandler(mode, fn) / removeRisuScriptHandler(mode, fn)
+// - addRisuReplacer('beforeRequest', OpenAIChat[] => OpenAIChat[]) & ('afterRequest', string => string)
+// - addRisuChatListener('output', ChatOutputListenerArg => void) / removeRisuChatListener('output', fn)
+// - registerBodyIntercepter(fn) -> { id } / unregisterBodyIntercepter(id) (strict safe-key allowlist)
+// - registerMCP({ identifier: 'plugin:...', ... }, getTools, callTool) / unregisterMCP(identifier)
+// - addTTSPreprocessor(BeforeTTSContext => BeforeTTSResult | void)
+// - addPluginChannelListener(channel, fn) / postPluginChannelMessage(targetPlugin, channel, msg)
+// Includes static ReDoS rejection, per-rule runtime circuit breaker, safe-mode boot, and 1-click stop-all.
 
 const { EXTENSIONS_STORAGE_KEY, VERSION } = __require("src/version.js");
 
@@ -3576,33 +3583,163 @@ const EXTENSION_TYPE_LABELS = {
   script_handler: '전역 스크립트 (정규식)',
   replacer: '전역 텍스트 치환',
   chat_listener: '응답 후 점검 감시',
-  body_intercepter: '요청 본문 JSON 패치',
+  body_intercepter: '요청 본문 파라미터 패치',
   mcp_server: '읽기 전용 MCP 도구 제공',
-  tts_processor: 'TTS 텍스트 정리',
+  tts_processor: 'TTS 합성 전 텍스트 정리',
   plugin_channel: '플러그인 채널 연동',
 };
 
 const VALID_SCRIPT_MODES = ['display', 'output', 'input', 'process'];
-const VALID_REPLACER_STAGES = ['beforeRequest', 'afterRequest', 'display'];
-const VALID_TTS_STAGES = ['pre', 'post'];
+const VALID_REPLACER_STAGES = ['beforeRequest', 'afterRequest'];
+const VALID_TTS_STAGES = ['pre'];
 const SAFE_MCP_TOOLS = ['host_info', 'audit_workspace', 'active_lorebook', 'inspect_assets', 'read_vars'];
 const BAD_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
-const FORBIDDEN_BODY_KEY_RE = /^(?:api[_-]?key|auth|authorization|secret|token|password|passwd|cookie|headers?|x-api-key|bearer|key|proxy|url|endpoint|host)$/i;
+
+// Strict allowlist of pure LLM sampling/generation tuning parameters for `body_intercepter`.
+// Blocks prompt/routing/model/auth/tool hijacking (`messages`, `model`, `stream`, `tools`,
+// `functions`, `tool_choice`, `system`, `prompt`, `input`, `contents`, `apiKey`, `authorization`, `headers`, etc.).
+const SAFE_BODY_PATCH_KEYS = new Set([
+  'temperature',
+  'top_p',
+  'top_k',
+  'min_p',
+  'top_a',
+  'typical_p',
+  'tfs_z',
+  'max_tokens',
+  'max_completion_tokens',
+  'max_output_tokens',
+  'presence_penalty',
+  'frequency_penalty',
+  'repetition_penalty',
+  'repeat_penalty',
+  'seed',
+  'stop',
+  'stop_sequences',
+  'reasoning_effort',
+  'reasoning',
+  'thinking',
+  'verbosity',
+  'logit_bias',
+  'response_format',
+  'service_tier',
+  'n',
+  'logprobs',
+  'top_logprobs',
+  'include_reasoning',
+]);
+
 const MAX_EXTENSION_RULES = 50;
+const MAX_REGEX_LENGTH = 500;
+const DEFAULT_MAX_RULE_RUN_MS = 100;
+const DEFAULT_MAX_CONSECUTIVE_ERRORS = 3;
+
+function nowMs() {
+  return typeof performance !== 'undefined' && typeof performance.now === 'function'
+    ? performance.now()
+    : Date.now();
+}
 
 function sanitizeRegexFlags(flags, fallback = 'g') {
   const raw = String(flags ?? fallback);
-  const allowed = [...new Set(raw.replace(/[^gimsuy]/g, '').split(''))].join('');
-  return allowed;
+  return [...new Set(raw.replace(/[^gimsuy]/g, '').split(''))].join('');
+}
+
+/**
+ * Static ReDoS guard rejecting catastrophic backtracking patterns before RegExp compilation.
+ * Strips escaped characters and character classes before checking group nesting/quantifiers.
+ */
+function checkRegexSafety(pattern) {
+  if (typeof pattern !== 'string' || !pattern) {
+    return '정규식 pattern은 비어 있지 않은 문자열이어야 합니다.';
+  }
+  if (pattern.length > MAX_REGEX_LENGTH) {
+    return `정규식 pattern이 너무 깁니다(최대 ${MAX_REGEX_LENGTH}자).`;
+  }
+  // Reject backreferences combined with quantifiers (e.g. `\1+`, `\1*`, `\1{2,}`)
+  if (/\\[1-9]\s*(?:[+*]|\{\d+,)/.test(pattern)) {
+    return '정규식에 역참조 수량자 등 ReDoS 위험 패턴이 포함되어 차단했습니다.';
+  }
+
+  // Strip escaped pairs and character class contents while preserving `[]` as an atom
+  let stripped = '';
+  let inClass = false;
+  for (let i = 0; i < pattern.length; i++) {
+    const ch = pattern[i];
+    if (ch === '\\') {
+      i++; // skip escaped char
+      if (!inClass) stripped += 'a';
+      continue;
+    }
+    if (ch === '[' && !inClass) {
+      inClass = true;
+      stripped += 'a';
+      continue;
+    }
+    if (ch === ']' && inClass) {
+      inClass = false;
+      continue;
+    }
+    if (!inClass) stripped += ch;
+  }
+
+  // Reject illegal / suspicious consecutive quantifiers like `**`, `++`, `*+`, `+*`
+  if (/(?:[+*]|\{\d+,\d*\})\s*(?:[+*]|\{\d+,)/.test(stripped)) {
+    return '정규식에 연속 수량자 등 ReDoS 위험 패턴이 포함되어 차단했습니다.';
+  }
+
+  // Track group stack to detect nested quantifiers `(…+…)+` and quantified overlapping alternations `(a|aa)+`
+  const stack = [];
+  for (let i = 0; i < stripped.length; i++) {
+    const ch = stripped[i];
+    if (ch === '(') {
+      stack.push({ hasQuantifier: false, hasAlternation: false, hasWildcard: false, start: i });
+      continue;
+    }
+    if (ch === ')') {
+      const grp = stack.pop();
+      if (!grp) continue;
+      // Check if this closing group is immediately followed by a repeating quantifier (`+`, `*`, `{m,}`)
+      const rest = stripped.slice(i + 1);
+      const outerQuant = rest.match(/^(?:[+*]|\{\d+,\d*\})/);
+      const isOuterRepeated = Boolean(outerQuant);
+      if (isOuterRepeated) {
+        if (grp.hasQuantifier) {
+          return '정규식에 중첩 수량자((…+)+ 등) ReDoS 위험 패턴이 포함되어 차단했습니다.';
+        }
+        if (grp.hasAlternation) {
+          const inner = stripped.slice(grp.start + 1, i).replace(/^\?(?::|=|!|<=|<!)/, '');
+          const branches = inner.split('|').map(b => b.trim());
+          const unique = new Set(branches);
+          const hasPrefixOverlap = branches.some((a, ai) =>
+            branches.some((b, bi) => ai !== bi && a && b && (a.startsWith(b) || b.startsWith(a)))
+          );
+          if (grp.hasWildcard || unique.size !== branches.length || hasPrefixOverlap) {
+            return '정규식에 중첩 분기 수량자((a|aa)+ 등) ReDoS 위험 패턴이 포함되어 차단했습니다.';
+          }
+        }
+      }
+      // Propagate inner quantifier flag to enclosing parent group
+      if (stack.length > 0 && (grp.hasQuantifier || isOuterRepeated)) {
+        stack[stack.length - 1].hasQuantifier = true;
+      }
+      continue;
+    }
+    if (stack.length > 0) {
+      const top = stack[stack.length - 1];
+      if (ch === '+' || ch === '*') top.hasQuantifier = true;
+      else if (ch === '{' && /^\{\d+,\d*\}/.test(stripped.slice(i))) top.hasQuantifier = true;
+      else if (ch === '|') top.hasAlternation = true;
+      else if (ch === '.') top.hasWildcard = true;
+    }
+  }
+
+  return null;
 }
 
 function compileSafeRegex(pattern, flags = 'g') {
-  if (typeof pattern !== 'string' || !pattern) {
-    throw new Error('정규식 pattern은 비어 있지 않은 문자열이어야 합니다.');
-  }
-  if (pattern.length > 1000) {
-    throw new Error('정규식 pattern이 너무 깁니다(최대 1,000자).');
-  }
+  const safetyErr = checkRegexSafety(pattern);
+  if (safetyErr) throw new Error(safetyErr);
   const cleanFlags = sanitizeRegexFlags(flags, 'g');
   return new RegExp(pattern, cleanFlags);
 }
@@ -3610,8 +3747,7 @@ function compileSafeRegex(pattern, flags = 'g') {
 function hasForbiddenBodyKey(key) {
   const k = String(key ?? '').trim();
   if (!k || BAD_KEYS.has(k)) return true;
-  if (FORBIDDEN_BODY_KEY_RE.test(k)) return true;
-  return false;
+  return !SAFE_BODY_PATCH_KEYS.has(k);
 }
 
 function makeExtensionId(type, name = '') {
@@ -3626,7 +3762,7 @@ function makeExtensionId(type, name = '') {
 
 /**
  * Validates and normalizes a declarative extension rule.
- * Throws a human-readable Korean error string if invalid or unsafe.
+ * Returns `{ ok: true, rule }` or `{ ok: false, error }`.
  */
 function validateExtensionRule(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
@@ -3656,7 +3792,7 @@ function validateExtensionRule(raw) {
     try {
       compileSafeRegex(raw.pattern, raw.flags ?? 'g');
     } catch (err) {
-      return { ok: false, error: `정규식 문법 오류: ${err.message}` };
+      return { ok: false, error: `정규식 문법/안전 오류: ${err.message}` };
     }
     if (typeof raw.replacement !== 'string') {
       return { ok: false, error: 'script_handler에는 replacement 문자열이 필요합니다.' };
@@ -3674,9 +3810,12 @@ function validateExtensionRule(raw) {
   }
 
   if (type === 'replacer') {
-    const stage = String(raw.stage || 'display').trim();
+    const stage = String(raw.stage || 'afterRequest').trim();
     if (!VALID_REPLACER_STAGES.includes(stage)) {
-      return { ok: false, error: `replacer의 stage는 ${VALID_REPLACER_STAGES.join('/')} 중 하나여야 합니다.` };
+      const hint = stage === 'display'
+        ? ' 화면 표시용 치환은 script_handler(mode: "display")를 사용하세요.'
+        : '';
+      return { ok: false, error: `replacer의 stage는 ${VALID_REPLACER_STAGES.join('/')} 중 하나여야 합니다.${hint}` };
     }
     if (typeof raw.find !== 'string' || !raw.find) {
       return { ok: false, error: 'replacer에는 비어 있지 않은 find 문자열이 필요합니다.' };
@@ -3690,7 +3829,7 @@ function validateExtensionRule(raw) {
       try {
         compileSafeRegex(raw.find, flags);
       } catch (err) {
-        return { ok: false, error: `replacer 정규식 문법 오류: ${err.message}` };
+        return { ok: false, error: `replacer 정규식 오류: ${err.message}` };
       }
     }
     return {
@@ -3710,7 +3849,7 @@ function validateExtensionRule(raw) {
       try {
         compileSafeRegex(p, '');
       } catch (err) {
-        return { ok: false, error: `chat_listener 패턴 문법 오류("${p}"): ${err.message}` };
+        return { ok: false, error: `chat_listener 패턴 오류("${p}"): ${err.message}` };
       }
     }
     const notifyLabel = String(raw.notifyLabel || name || '응답 점검 알림').trim().slice(0, 80);
@@ -3730,7 +3869,10 @@ function validateExtensionRule(raw) {
     const cleanSet = {};
     for (const [k, v] of setEntries) {
       if (hasForbiddenBodyKey(k)) {
-        return { ok: false, error: `보안상 요청 본문 키 "${k}"는 수정할 수 없습니다.` };
+        return {
+          ok: false,
+          error: `보안상 요청 본문 키 "${k}"는 수정할 수 없습니다. 안전한 샘플링·생성 파라미터(temperature, top_p, top_k, max_tokens, seed, reasoning_effort 등)만 허용됩니다.`,
+        };
       }
       if (typeof v === 'function' || typeof v === 'symbol') {
         return { ok: false, error: `body_intercepter의 set["${k}"]는 JSON 직렬화 가능한 값이어야 합니다.` };
@@ -3739,7 +3881,10 @@ function validateExtensionRule(raw) {
     }
     for (const k of removeKeys) {
       if (hasForbiddenBodyKey(k)) {
-        return { ok: false, error: `보안상 요청 본문 키 "${k}"는 제거 대상으로 지정할 수 없습니다.` };
+        return {
+          ok: false,
+          error: `보안상 요청 본문 키 "${k}"는 제거 대상으로 지정할 수 없습니다. 안전한 샘플링·생성 파라미터만 허용됩니다.`,
+        };
       }
     }
     const matchModelRegex = typeof raw.matchModelRegex === 'string' && raw.matchModelRegex.trim()
@@ -3779,7 +3924,10 @@ function validateExtensionRule(raw) {
   if (type === 'tts_processor') {
     const stage = String(raw.stage || 'pre').trim();
     if (!VALID_TTS_STAGES.includes(stage)) {
-      return { ok: false, error: 'tts_processor의 stage는 pre 또는 post여야 합니다.' };
+      return {
+        ok: false,
+        error: 'tts_processor는 합성 전 텍스트를 정리하는 stage: "pre"(addTTSPreprocessor)만 지원합니다(addTTSPostprocessor는 오디오 ArrayBuffer 전용입니다).',
+      };
     }
     const stripTags = Boolean(raw.stripTags);
     const stripAsterisks = Boolean(raw.stripAsterisks);
@@ -3806,17 +3954,50 @@ function validateExtensionRule(raw) {
   if (type === 'plugin_channel') {
     const channel = String(raw.channel || 'risuhelper:v1').trim().slice(0, 64);
     if (!channel) return { ok: false, error: 'plugin_channel에는 channel 이름이 필요합니다.' };
+    const targetPlugin = typeof raw.targetPlugin === 'string' ? raw.targetPlugin.trim().slice(0, 64) : '';
     const allowReadOnlyQueries = raw.allowReadOnlyQueries !== false;
     const initialMessage = raw.initialMessage && typeof raw.initialMessage === 'object' && !Array.isArray(raw.initialMessage)
       ? raw.initialMessage
       : null;
     return {
       ok: true,
-      rule: { ...base, channel, allowReadOnlyQueries, initialMessage },
+      rule: { ...base, channel, targetPlugin, allowReadOnlyQueries, initialMessage },
     };
   }
 
   return { ok: false, error: `알 수 없는 확장 종류입니다: ${type}` };
+}
+
+function applyReplacerText(rule, text) {
+  const src = String(text ?? '');
+  if (rule.useRegex) {
+    return src.replace(compileSafeRegex(rule.find, rule.flags || 'g'), rule.replace);
+  }
+  return src.split(rule.find).join(rule.replace);
+}
+
+/**
+ * Applies a `replacer` rule respecting upstream Plugin API v3 contracts:
+ * - `beforeRequest` receives `OpenAIChat[]` and MUST return `OpenAIChat[]` (never a string!)
+ * - `afterRequest` receives `string` and returns `string`
+ */
+function applyReplacerValue(rule, input) {
+  if (rule.stage === 'beforeRequest') {
+    if (Array.isArray(input)) {
+      return input.map((msg) => {
+        if (!msg || typeof msg !== 'object') return msg;
+        if (typeof msg.content === 'string') {
+          return { ...msg, content: applyReplacerText(rule, msg.content) };
+        }
+        return msg;
+      });
+    }
+    if (typeof input === 'string') {
+      return applyReplacerText(rule, input);
+    }
+    return input;
+  }
+  return applyReplacerText(rule, input);
 }
 
 function applyTtsTransform(rule, text) {
@@ -3854,13 +4035,32 @@ function applyBodyPatch(rule, rawBody) {
   return next;
 }
 
+/**
+ * Evaluates a `chat_listener` rule against either:
+ * - Real upstream `ChatOutputListenerArg`: `{ char, chat, characterIndex, chatIndex, messageIndex }`
+ * - Direct dry-run sample: `{ data, scriptstate }` or string
+ */
 function inspectChatPayload(rule, payload) {
-  const text = typeof payload === 'string'
-    ? payload
-    : String(payload?.data ?? payload?.content ?? payload?.message ?? '');
-  const vars = payload && typeof payload === 'object' && payload.scriptstate && typeof payload.scriptstate === 'object'
-    ? payload.scriptstate
-    : {};
+  let text = '';
+  let vars = {};
+
+  if (payload && typeof payload === 'object' && payload.chat && typeof payload.chat === 'object') {
+    const msgIdx = payload.messageIndex;
+    if (msgIdx === -1) return []; // Output message was removed by Lua/host processing
+    const msgs = Array.isArray(payload.chat.message) ? payload.chat.message : [];
+    const target = Number.isInteger(msgIdx) && msgIdx >= 0 ? msgs[msgIdx] : msgs[msgs.length - 1];
+    if (!target) return [];
+    text = String(target.data ?? '');
+    vars = payload.chat.scriptstate && typeof payload.chat.scriptstate === 'object'
+      ? payload.chat.scriptstate
+      : {};
+  } else if (typeof payload === 'string') {
+    text = payload;
+  } else if (payload && typeof payload === 'object') {
+    text = String(payload.data ?? payload.content ?? payload.message ?? '');
+    vars = payload.scriptstate && typeof payload.scriptstate === 'object' ? payload.scriptstate : {};
+  }
+
   const warnings = [];
   for (const p of rule.requirePatterns || []) {
     const re = compileSafeRegex(p, '');
@@ -3894,11 +4094,16 @@ function dryRunExtensionRule(rawRule, sampleInput = null) {
     return { ok: true, type: rule.type, input, output, changed: input !== output };
   }
   if (rule.type === 'replacer') {
+    if (rule.stage === 'beforeRequest') {
+      const input = Array.isArray(sampleInput)
+        ? sampleInput
+        : [{ role: 'user', content: `${rule.find} 예시 요청 메시지` }];
+      const output = applyReplacerValue(rule, input);
+      return { ok: true, type: rule.type, stage: rule.stage, input, output, changed: JSON.stringify(input) !== JSON.stringify(output) };
+    }
     const input = typeof sampleInput === 'string' ? sampleInput : `${rule.find} 예시 텍스트`;
-    const output = rule.useRegex
-      ? input.replace(compileSafeRegex(rule.find, rule.flags || 'g'), rule.replace)
-      : input.split(rule.find).join(rule.replace);
-    return { ok: true, type: rule.type, input, output, changed: input !== output };
+    const output = applyReplacerValue(rule, input);
+    return { ok: true, type: rule.type, stage: rule.stage, input, output, changed: input !== output };
   }
   if (rule.type === 'body_intercepter') {
     const input = sampleInput && typeof sampleInput === 'object' && !Array.isArray(sampleInput)
@@ -3921,7 +4126,10 @@ function dryRunExtensionRule(rawRule, sampleInput = null) {
     return { ok: true, type: rule.type, input, output, changed: input !== output };
   }
   if (rule.type === 'chat_listener') {
-    const input = sampleInput ?? { data: '테스트 응답 본문', scriptstate: {} };
+    const input = sampleInput ?? {
+      chat: { message: [{ role: 'char', data: '테스트 응답 본문' }], scriptstate: {} },
+      messageIndex: 0,
+    };
     const warnings = inspectChatPayload(rule, input);
     return { ok: true, type: rule.type, warnings, triggered: warnings.length > 0 };
   }
@@ -3929,7 +4137,13 @@ function dryRunExtensionRule(rawRule, sampleInput = null) {
     return { ok: true, type: rule.type, exposedTools: rule.exposedTools, readOnly: true };
   }
   if (rule.type === 'plugin_channel') {
-    return { ok: true, type: rule.type, channel: rule.channel, allowReadOnlyQueries: rule.allowReadOnlyQueries };
+    return {
+      ok: true,
+      type: rule.type,
+      channel: rule.channel,
+      targetPlugin: rule.targetPlugin || null,
+      allowReadOnlyQueries: rule.allowReadOnlyQueries,
+    };
   }
   return { ok: true, type: rule.type };
 }
@@ -3951,10 +4165,14 @@ class ExtensionRuntime {
     this.adapter = options.adapter || null;
     this.onAlert = typeof options.onAlert === 'function' ? options.onAlert : null;
     this.readToolRunner = typeof options.readToolRunner === 'function' ? options.readToolRunner : null;
+    this.maxRuleRunMs = Number(options.maxRuleRunMs) > 0 ? Number(options.maxRuleRunMs) : DEFAULT_MAX_RULE_RUN_MS;
+    this.maxConsecutiveErrors = Number(options.maxConsecutiveErrors) > 0
+      ? Number(options.maxConsecutiveErrors)
+      : DEFAULT_MAX_CONSECUTIVE_ERRORS;
     this.rules = [];
     this._activeHandles = new Map(); // ruleId -> cleanup fn
+    this._ruleStats = new Map(); // ruleId -> { consecutiveErrors, lastError, trippedReason, lastMs }
     this._ttsPreInstalled = false;
-    this._ttsPostInstalled = false;
     this._disposed = false;
     this.recentAlerts = [];
   }
@@ -3972,7 +4190,63 @@ class ExtensionRuntime {
     return this._hasCap(cap);
   }
 
-  async load() {
+  _stat(ruleId) {
+    let st = this._ruleStats.get(ruleId);
+    if (!st) {
+      st = { consecutiveErrors: 0, lastError: null, trippedReason: null, lastMs: 0 };
+      this._ruleStats.set(ruleId, st);
+    }
+    return st;
+  }
+
+  _emitAlert(ruleId, label, warnings) {
+    const alert = { ruleId, label, warnings, at: Date.now() };
+    this.recentAlerts.push(alert);
+    if (this.recentAlerts.length > 20) this.recentAlerts.shift();
+    if (this.onAlert) {
+      try { this.onAlert(alert); } catch {}
+    }
+  }
+
+  _tripRule(rule, reason) {
+    const st = this._stat(rule.id);
+    st.trippedReason = reason;
+    st.lastError = reason;
+    rule.enabled = false;
+    this._unregisterRule(rule.id).catch(() => {});
+    this.save().catch(() => {});
+    this._emitAlert(rule.id, `${rule.name} (안전 자동 중지)`, [reason]);
+  }
+
+  /**
+   * Executes a synchronous hook body with runtime error + latency circuit breaking.
+   * Always returns `fallbackValue` on error so host chat/rendering never breaks.
+   */
+  _runRuleGuarded(rule, workFn, fallbackValue) {
+    if (this._disposed || !rule.enabled) return fallbackValue;
+    const st = this._stat(rule.id);
+    const t0 = nowMs();
+    try {
+      const result = workFn();
+      const dt = nowMs() - t0;
+      st.lastMs = dt;
+      st.consecutiveErrors = 0;
+      if (dt > this.maxRuleRunMs) {
+        this._tripRule(rule, `실행 지연(${Math.round(dt)}ms > ${this.maxRuleRunMs}ms)으로 자동 중지되었습니다.`);
+        return fallbackValue;
+      }
+      return result;
+    } catch (err) {
+      st.consecutiveErrors += 1;
+      st.lastError = err?.message || String(err);
+      if (st.consecutiveErrors >= this.maxConsecutiveErrors) {
+        this._tripRule(rule, `연속 오류 ${st.consecutiveErrors}회(${st.lastError})로 자동 중지되었습니다.`);
+      }
+      return fallbackValue;
+    }
+  }
+
+  async load({ autoRestore = true } = {}) {
     this._disposed = false;
     try {
       const storage = this.api?.pluginStorage;
@@ -3992,7 +4266,11 @@ class ExtensionRuntime {
     } catch {
       this.rules = [];
     }
-    await this.syncAll();
+    if (autoRestore) {
+      await this.syncAll();
+    } else {
+      await this._unregisterAllHandles();
+    }
     return this.list();
   }
 
@@ -4006,12 +4284,17 @@ class ExtensionRuntime {
   }
 
   list() {
-    return this.rules.map(r => ({
-      ...r,
-      typeLabel: EXTENSION_TYPE_LABELS[r.type] || r.type,
-      supported: this.isTypeSupported(r.type),
-      active: this._activeHandles.has(r.id) || (r.type === 'tts_processor' && r.enabled && !this._disposed && this.isTypeSupported(r.type)),
-    }));
+    return this.rules.map(r => {
+      const st = this._ruleStats.get(r.id);
+      return {
+        ...r,
+        typeLabel: EXTENSION_TYPE_LABELS[r.type] || r.type,
+        supported: this.isTypeSupported(r.type),
+        active: this._activeHandles.has(r.id) || (r.type === 'tts_processor' && r.enabled && !this._disposed && this.isTypeSupported(r.type)),
+        lastError: st?.lastError || null,
+        trippedReason: st?.trippedReason || null,
+      };
+    });
   }
 
   get(id) {
@@ -4026,15 +4309,31 @@ class ExtensionRuntime {
       throw new Error(`현재 호스트는 "${EXTENSION_TYPE_LABELS[rule.type] || rule.type}"(${rule.type}) 확장 API를 지원하지 않습니다.`);
     }
     const idx = this.rules.findIndex(r => r.id === rule.id);
-    if (idx >= 0) {
-      this.rules[idx] = rule;
-    } else {
-      if (this.rules.length >= MAX_EXTENSION_RULES) {
-        throw new Error(`상주 확장 규칙은 최대 ${MAX_EXTENSION_RULES}개까지 등록할 수 있습니다.`);
-      }
-      this.rules.push(rule);
+    const prevRule = idx >= 0 ? this.rules[idx] : null;
+    if (idx < 0 && this.rules.length >= MAX_EXTENSION_RULES) {
+      throw new Error(`상주 확장 규칙은 최대 ${MAX_EXTENSION_RULES}개까지 등록할 수 있습니다.`);
     }
-    await this._syncRule(rule);
+
+    // Reset breaker state on fresh upsert
+    this._ruleStats.delete(rule.id);
+
+    if (idx >= 0) this.rules[idx] = rule;
+    else this.rules.push(rule);
+
+    try {
+      await this._syncRule(rule);
+    } catch (err) {
+      // Roll back in-memory rule if host registration rejected (e.g. user denied 'replacer' permission)
+      if (prevRule) {
+        this.rules[idx] = prevRule;
+        await this._syncRule(prevRule).catch(() => {});
+      } else {
+        const addedIdx = this.rules.findIndex(r => r.id === rule.id);
+        if (addedIdx >= 0) this.rules.splice(addedIdx, 1);
+      }
+      throw err;
+    }
+
     await this.save();
     return rule;
   }
@@ -4042,8 +4341,15 @@ class ExtensionRuntime {
   async toggle(id, enabled) {
     const rule = this.get(id);
     if (!rule) throw new Error(`확장 규칙(${id})을 찾을 수 없습니다.`);
+    const prev = rule.enabled;
     rule.enabled = Boolean(enabled);
-    await this._syncRule(rule);
+    if (rule.enabled) this._ruleStats.delete(rule.id);
+    try {
+      await this._syncRule(rule);
+    } catch (err) {
+      rule.enabled = prev;
+      throw err;
+    }
     await this.save();
     return rule;
   }
@@ -4052,14 +4358,32 @@ class ExtensionRuntime {
     const idx = this.rules.findIndex(r => r.id === id);
     if (idx < 0) throw new Error(`확장 규칙(${id})을 찾을 수 없습니다.`);
     const [removed] = this.rules.splice(idx, 1);
+    this._ruleStats.delete(id);
     await this._unregisterRule(id);
     await this.save();
     return removed;
   }
 
+  /**
+   * Emergency stop: disables and unregisters every resident extension immediately.
+   */
+  async disableAll() {
+    let stopped = 0;
+    for (const rule of this.rules) {
+      if (rule.enabled) {
+        rule.enabled = false;
+        stopped++;
+      }
+    }
+    await this._unregisterAllHandles();
+    await this.save();
+    return stopped;
+  }
+
   async replaceAll(rulesList = []) {
     await this._unregisterAllHandles();
     this.rules = [];
+    this._ruleStats.clear();
     for (const item of (Array.isArray(rulesList) ? rulesList : []).slice(0, MAX_EXTENSION_RULES)) {
       const checked = validateExtensionRule(item);
       if (checked.ok) this.rules.push(checked.rule);
@@ -4072,11 +4396,22 @@ class ExtensionRuntime {
   async syncAll() {
     if (this._disposed) return;
     await this._unregisterAllHandles();
+    let dirty = false;
     for (const rule of this.rules) {
       if (rule.enabled && this.isTypeSupported(rule.type)) {
-        await this._registerRule(rule);
+        try {
+          await this._registerRule(rule);
+        } catch (err) {
+          // Isolate startup failure so one broken/denied rule never blocks RisuHelper boot
+          const st = this._stat(rule.id);
+          st.lastError = err?.message || String(err);
+          st.trippedReason = `시작 복원 실패: ${st.lastError}`;
+          rule.enabled = false;
+          dirty = true;
+        }
       }
     }
+    if (dirty) await this.save();
   }
 
   async _syncRule(rule) {
@@ -4101,35 +4436,23 @@ class ExtensionRuntime {
     }
   }
 
-  _ensureTtsDispatchers(stage) {
-    if (stage === 'pre' && !this._ttsPreInstalled && typeof this.api?.addTTSPreprocessor === 'function') {
-      this._ttsPreInstalled = true;
-      const fn = (text) => {
-        if (this._disposed) return text;
-        let out = String(text ?? '');
-        for (const r of this.rules) {
-          if (r.type === 'tts_processor' && r.enabled && r.stage === 'pre') {
-            try { out = applyTtsTransform(r, out); } catch {}
-          }
+  async _ensureTtsPreDispatcher() {
+    if (this._ttsPreInstalled || typeof this.api?.addTTSPreprocessor !== 'function') return;
+    this._ttsPreInstalled = true;
+    const fn = (ctx) => {
+      const isObj = ctx && typeof ctx === 'object' && typeof ctx.text === 'string';
+      if (this._disposed) return isObj ? undefined : ctx;
+      const orig = isObj ? ctx.text : String(ctx ?? '');
+      let out = orig;
+      for (const r of this.rules) {
+        if (r.type === 'tts_processor' && r.enabled && r.stage === 'pre') {
+          out = this._runRuleGuarded(r, () => applyTtsTransform(r, out), out);
         }
-        return out;
-      };
-      try { this.api.addTTSPreprocessor(fn); } catch {}
-    }
-    if (stage === 'post' && !this._ttsPostInstalled && typeof this.api?.addTTSPostprocessor === 'function') {
-      this._ttsPostInstalled = true;
-      const fn = (text) => {
-        if (this._disposed) return text;
-        let out = String(text ?? '');
-        for (const r of this.rules) {
-          if (r.type === 'tts_processor' && r.enabled && r.stage === 'post') {
-            try { out = applyTtsTransform(r, out); } catch {}
-          }
-        }
-        return out;
-      };
-      try { this.api.addTTSPostprocessor(fn); } catch {}
-    }
+      }
+      if (isObj) return out === orig ? undefined : { text: out };
+      return out;
+    };
+    await this.api.addTTSPreprocessor(fn);
   }
 
   async _registerRule(rule) {
@@ -4137,15 +4460,14 @@ class ExtensionRuntime {
     if (!api) return;
 
     if (rule.type === 'script_handler' && typeof api.addRisuScriptHandler === 'function') {
-      const fn = (content) => {
-        if (this._disposed) return content;
-        try {
+      const fn = (content) => this._runRuleGuarded(
+        rule,
+        () => {
           const re = compileSafeRegex(rule.pattern, rule.flags || 'g');
           return String(content ?? '').replace(re, rule.replacement);
-        } catch {
-          return content;
-        }
-      };
+        },
+        content
+      );
       await api.addRisuScriptHandler(rule.mode, fn);
       this._activeHandles.set(rule.id, async () => {
         if (typeof api.removeRisuScriptHandler === 'function') {
@@ -4156,18 +4478,11 @@ class ExtensionRuntime {
     }
 
     if (rule.type === 'replacer' && typeof api.addRisuReplacer === 'function') {
-      const fn = (content) => {
-        if (this._disposed) return content;
-        try {
-          const src = String(content ?? '');
-          if (rule.useRegex) {
-            return src.replace(compileSafeRegex(rule.find, rule.flags || 'g'), rule.replace);
-          }
-          return src.split(rule.find).join(rule.replace);
-        } catch {
-          return content;
-        }
-      };
+      const fn = (input, _type) => this._runRuleGuarded(
+        rule,
+        () => applyReplacerValue(rule, input),
+        input
+      );
       await api.addRisuReplacer(rule.stage, fn);
       this._activeHandles.set(rule.id, async () => {
         if (typeof api.removeRisuReplacer === 'function') {
@@ -4179,44 +4494,43 @@ class ExtensionRuntime {
 
     if (rule.type === 'chat_listener' && typeof api.addRisuChatListener === 'function') {
       const fn = (payload) => {
-        if (this._disposed) return;
-        try {
-          const warnings = inspectChatPayload(rule, payload);
-          if (warnings.length > 0) {
-            const alert = {
-              ruleId: rule.id,
-              label: rule.notifyLabel || rule.name,
-              warnings,
-              at: Date.now(),
-            };
-            this.recentAlerts.push(alert);
-            if (this.recentAlerts.length > 20) this.recentAlerts.shift();
-            if (this.onAlert) this.onAlert(alert);
-          }
-        } catch {}
+        this._runRuleGuarded(
+          rule,
+          () => {
+            const warnings = inspectChatPayload(rule, payload);
+            if (warnings.length > 0) {
+              this._emitAlert(rule.id, rule.notifyLabel || rule.name, warnings);
+            }
+            return undefined;
+          },
+          undefined
+        );
       };
-      await api.addRisuChatListener(fn);
+      // Upstream Plugin API v3 requires explicit mode `'output'` as the 1st argument
+      await api.addRisuChatListener('output', fn);
       this._activeHandles.set(rule.id, async () => {
         if (typeof api.removeRisuChatListener === 'function') {
-          await api.removeRisuChatListener(fn);
+          await api.removeRisuChatListener('output', fn);
         }
       });
       return;
     }
 
     if (rule.type === 'body_intercepter' && typeof api.registerBodyIntercepter === 'function') {
-      const fn = (body) => {
-        if (this._disposed) return body;
-        try {
-          return applyBodyPatch(rule, body);
-        } catch {
-          return body;
-        }
-      };
-      await api.registerBodyIntercepter(fn);
+      const fn = (body, _type) => this._runRuleGuarded(
+        rule,
+        () => applyBodyPatch(rule, body),
+        body
+      );
+      // Upstream Plugin API v3 returns `{ id: string } | null` (null if 'replacer' permission denied)
+      const handle = await api.registerBodyIntercepter(fn);
+      if (!handle || typeof handle.id !== 'string' || !handle.id) {
+        throw new Error('요청 본문 패치 권한(replacer)이 거부되어 등록하지 못했습니다.');
+      }
+      const interceptorId = handle.id;
       this._activeHandles.set(rule.id, async () => {
         if (typeof api.unregisterBodyIntercepter === 'function') {
-          await api.unregisterBodyIntercepter(fn);
+          await api.unregisterBodyIntercepter(interceptorId);
         }
       });
       return;
@@ -4259,7 +4573,7 @@ class ExtensionRuntime {
     }
 
     if (rule.type === 'tts_processor') {
-      this._ensureTtsDispatchers(rule.stage);
+      await this._ensureTtsPreDispatcher();
       this._activeHandles.set(rule.id, async () => {});
       return;
     }
@@ -4270,9 +4584,11 @@ class ExtensionRuntime {
         if (!active || this._disposed || !rule.allowReadOnlyQueries) return;
         if (!msg || typeof msg !== 'object') return;
         const kind = String(msg.type || '');
-        if (kind === 'risuhelper:ping' && typeof api.postPluginChannelMessage === 'function') {
+        const replyPlugin = String(msg.replyToPlugin || rule.targetPlugin || '').trim();
+        if (kind === 'risuhelper:ping' && replyPlugin && typeof api.postPluginChannelMessage === 'function') {
           try {
-            await api.postPluginChannelMessage(rule.channel, {
+            // Upstream Plugin API v3 takes 3 arguments: (pluginName, channelName, message)
+            await api.postPluginChannelMessage(replyPlugin, rule.channel, {
               type: 'risuhelper:pong',
               version: VERSION,
               capabilities: this.adapter?.capabilities || null,
@@ -4281,9 +4597,9 @@ class ExtensionRuntime {
         }
       };
       const maybeUnsub = await api.addPluginChannelListener(rule.channel, listener);
-      if (rule.initialMessage && typeof api.postPluginChannelMessage === 'function') {
+      if (rule.initialMessage && rule.targetPlugin && typeof api.postPluginChannelMessage === 'function') {
         try {
-          await api.postPluginChannelMessage(rule.channel, {
+          await api.postPluginChannelMessage(rule.targetPlugin, rule.channel, {
             ...rule.initialMessage,
             source: 'risuhelper',
             version: VERSION,
@@ -4299,14 +4615,18 @@ class ExtensionRuntime {
     }
   }
 
-  async sendChannelMessage(channel, payload) {
+  async sendChannelMessage(targetPlugin, channel, payload) {
     if (!this._hasCap('pluginChannel') || typeof this.api?.postPluginChannelMessage !== 'function') {
       throw new Error('현재 호스트는 PluginChannel API를 지원하지 않습니다.');
+    }
+    const target = String(targetPlugin || '').trim();
+    if (!target) {
+      throw new Error('수신 대상 플러그인 이름(targetPlugin)이 필요합니다.');
     }
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
       throw new Error('채널 메시지는 JSON 객체여야 합니다.');
     }
-    await this.api.postPluginChannelMessage(String(channel || 'risuhelper:v1'), {
+    await this.api.postPluginChannelMessage(target, String(channel || 'risuhelper:v1'), {
       ...payload,
       source: 'risuhelper',
       version: VERSION,
@@ -4325,10 +4645,14 @@ class ExtensionRuntime {
   __exports.VALID_SCRIPT_MODES = VALID_SCRIPT_MODES;
   __exports.VALID_REPLACER_STAGES = VALID_REPLACER_STAGES;
   __exports.VALID_TTS_STAGES = VALID_TTS_STAGES;
+  __exports.SAFE_BODY_PATCH_KEYS = SAFE_BODY_PATCH_KEYS;
   __exports.SAFE_MCP_TOOLS = SAFE_MCP_TOOLS;
   __exports.MAX_EXTENSION_RULES = MAX_EXTENSION_RULES;
+  __exports.checkRegexSafety = checkRegexSafety;
   __exports.validateExtensionRule = validateExtensionRule;
   __exports.dryRunExtensionRule = dryRunExtensionRule;
+  __exports.applyReplacerValue = applyReplacerValue;
+  __exports.inspectChatPayload = inspectChatPayload;
   __exports.requiredCapabilityForExtensionType = requiredCapabilityForExtensionType;
   __exports.ExtensionRuntime = ExtensionRuntime;
 
@@ -4362,18 +4686,96 @@ const M3_ACTIONS = new Set([
 ]);
 
 const BAD_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
-const ALLOWED_COLOR_SCHEME_KEYS = new Set([
-  'bgcolor', 'darkbg', 'borderc', 'selected', 'draculared', 'textcolor', 'textcolor2',
-  'darkBorderc', 'darkbutton', 'type', 'custom', 'name',
+
+// Upstream kwaroran/Risuai ColorScheme requires all 10 keys (risuai.d.ts:431-442, v3.svelte.ts:849-876)
+const COLOR_SCHEME_REQUIRED_KEYS = [
+  'bgcolor', 'darkbg', 'borderc', 'selected', 'draculared',
+  'textcolor', 'textcolor2', 'darkBorderc', 'darkbutton', 'type',
+];
+const ALLOWED_COLOR_SCHEME_KEYS = new Set(COLOR_SCHEME_REQUIRED_KEYS);
+const ALLOWED_COLOR_SCHEME_PRESETS = new Set([
+  'default', 'dark', 'light', 'cherry', 'galaxy', 'nature', 'realblack', 'monokai-light', 'monokai-black',
 ]);
-const ALLOWED_TEXT_THEME_KEYS = new Set([
-  'FontColorStandard', 'FontColorItalic', 'FontColorBold', 'FontColorItalicBold',
-  'FontColorQuote1', 'FontColorQuote2', 'name',
-]);
+const DEFAULT_DARK_COLOR_SCHEME = {
+  bgcolor: '#282a36',
+  darkbg: '#21222c',
+  borderc: '#6272a4',
+  selected: '#44475a',
+  draculared: '#ff5555',
+  textcolor: '#f8f8f2',
+  textcolor2: '#64748b',
+  darkBorderc: '#4b5563',
+  darkbutton: '#374151',
+  type: 'dark',
+};
+
+// Upstream kwaroran/Risuai CustomTextTheme requires all 6 keys (risuai.d.ts:447-454, v3.svelte.ts:887-907)
+const TEXT_THEME_REQUIRED_KEYS = [
+  'FontColorStandard', 'FontColorBold', 'FontColorItalic',
+  'FontColorItalicBold', 'FontColorQuote1', 'FontColorQuote2',
+];
+const ALLOWED_TEXT_THEME_KEYS = new Set(TEXT_THEME_REQUIRED_KEYS);
+const ALLOWED_TEXT_THEME_PRESETS = new Set(['standard', 'highcontrast']);
+const DEFAULT_CUSTOM_TEXT_THEME = {
+  FontColorStandard: '#f8f8f2',
+  FontColorBold: '#f8f8f2',
+  FontColorItalic: '#8c8d93',
+  FontColorItalicBold: '#8c8d93',
+  FontColorQuote1: '#8be9fd',
+  FontColorQuote2: '#ffb86c',
+};
+
 const ALLOWED_ONBOARDING_FIELD_TYPES = new Set(['text', 'textarea', 'select', 'checkbox', 'radio', 'number']);
-const ALLOWED_RISUNEST_PATCH_KEYS = new Set([
-  'name', 'note', 'folderId', 'fmIndex', 'bindedPersona', 'scriptstate', 'supaMemoryData', 'localLore', 'modules', 'metadata',
+const BARD_WIKI_DOC_TYPES = new Set([
+  'event', 'character', 'location', 'scene', 'faction', 'creature', 'item', 'concept', 'other',
 ]);
+const BARD_WIKI_CONTEXT_MODES = new Set(['always', 'auto', 'never']);
+const BARD_WIKI_GRADE_ALIASES = {
+  EX: 9, S: 8, A: 7, B: 6, C: 5, D: 3, NONE: 0,
+};
+// Upstream rsyumi/RisuNest ConversationPatchRequest supports atomic `messages` + `chatVariables` patches
+const ALLOWED_RISUNEST_PATCH_KEYS = new Set(['messages', 'chatVariables']);
+
+function unwrapColorScheme(raw) {
+  const src = raw && typeof raw === 'object' && raw.scheme && typeof raw.scheme === 'object'
+    ? raw.scheme
+    : (raw && typeof raw === 'object' ? raw : {});
+  const out = {};
+  for (const k of COLOR_SCHEME_REQUIRED_KEYS) {
+    if (k === 'type') {
+      out.type = src.type === 'light' ? 'light' : 'dark';
+    } else {
+      out[k] = typeof src[k] === 'string' && src[k] ? src[k] : DEFAULT_DARK_COLOR_SCHEME[k];
+    }
+  }
+  return out;
+}
+
+function unwrapTextTheme(raw) {
+  const src = raw && typeof raw === 'object' && raw.customTheme && typeof raw.customTheme === 'object'
+    ? raw.customTheme
+    : (raw && typeof raw === 'object' ? raw : {});
+  const out = {};
+  for (const k of TEXT_THEME_REQUIRED_KEYS) {
+    out[k] = typeof src[k] === 'string' && src[k] ? src[k] : DEFAULT_CUSTOM_TEXT_THEME[k];
+  }
+  return out;
+}
+
+function normalizeBardWikiGrade(raw) {
+  if (raw === null || raw === '') return { ok: true, value: null };
+  if (typeof raw === 'number') {
+    if (Number.isInteger(raw) && raw >= 0 && raw <= 9) return { ok: true, value: raw };
+    return { ok: false, error: 'BardWiki grade는 0~9 정수, null, 또는 EX/S/A/B/C/D 등급이어야 합니다.' };
+  }
+  const s = String(raw).trim().toUpperCase();
+  if (!s) return { ok: true, value: null };
+  if (/^[0-9]$/.test(s)) return { ok: true, value: Number(s) };
+  if (Object.hasOwn(BARD_WIKI_GRADE_ALIASES, s)) {
+    return { ok: true, value: BARD_WIKI_GRADE_ALIASES[s] };
+  }
+  return { ok: false, error: `유효하지 않은 BardWiki grade입니다: ${raw} (0~9 정수, null, 또는 EX/S/A/B/C/D 허용)` };
+}
 
 function clone(v) {
   return JSON.parse(JSON.stringify(v));
@@ -4448,20 +4850,22 @@ function getBardWikiApi(api) {
   if (!api || typeof api !== 'object') return null;
   const bw = api.bardWiki && typeof api.bardWiki === 'object' ? api.bardWiki : {};
   const getContext = typeof bw.getContext === 'function'
-    ? () => bw.getContext()
-    : (typeof api._getBardWikiContext === 'function' ? () => api._getBardWikiContext() : null);
+    ? (opts) => bw.getContext(opts)
+    : (typeof api._getBardWikiContext === 'function' ? (opts) => api._getBardWikiContext(opts) : null);
   const getDocuments = typeof bw.getDocuments === 'function'
     ? (opts) => bw.getDocuments(opts)
     : (typeof api._getBardWikiDocuments === 'function' ? (opts) => api._getBardWikiDocuments(opts) : null);
   const saveDocument = typeof bw.saveDocument === 'function'
     ? (doc) => bw.saveDocument(doc)
     : (typeof api._saveBardWikiDocument === 'function' ? (doc) => api._saveBardWikiDocument(doc) : null);
+  // Upstream RisuBard takes a single object `{ documentId, contextMode, expectedContentHash }`
   const setContextMode = typeof bw.setContextMode === 'function'
-    ? (mode) => bw.setContextMode(mode)
-    : (typeof api._setBardWikiContextMode === 'function' ? (mode) => api._setBardWikiContextMode(mode) : null);
+    ? (input) => bw.setContextMode(input)
+    : (typeof api._setBardWikiContextMode === 'function' ? (input) => api._setBardWikiContextMode(input) : null);
+  // Upstream RisuBard takes a single object `{ documentId, grade, gradeBy?, expectedContentHash }`
   const setGrade = typeof bw.setGrade === 'function'
-    ? (id, grade) => bw.setGrade(id, grade)
-    : (typeof api._setBardWikiGrade === 'function' ? (id, grade) => api._setBardWikiGrade(id, grade) : null);
+    ? (input) => bw.setGrade(input)
+    : (typeof api._setBardWikiGrade === 'function' ? (input) => api._setBardWikiGrade(input) : null);
   const trashDocument = typeof bw.trashDocument === 'function'
     ? (id) => bw.trashDocument(id)
     : (typeof api._trashBardWikiDocument === 'function' ? (id) => api._trashBardWikiDocument(id) : null);
@@ -4524,12 +4928,34 @@ async function planThemeUpdate(adapter, proposal) {
     return { ok: false, error: '현재 호스트는 TextTheme API를 지원하지 않습니다.' };
   }
 
+  if (proposal.colorSchemeName !== undefined) {
+    const preset = String(proposal.colorSchemeName).trim();
+    if (!ALLOWED_COLOR_SCHEME_PRESETS.has(preset)) {
+      return {
+        ok: false,
+        error: `허용되지 않는 colorSchemeName 프리셋입니다: ${preset}. 허용값: ${[...ALLOWED_COLOR_SCHEME_PRESETS].join(', ')}`,
+      };
+    }
+  }
+  if (proposal.textThemeName !== undefined) {
+    const preset = String(proposal.textThemeName).trim();
+    if (!ALLOWED_TEXT_THEME_PRESETS.has(preset)) {
+      return {
+        ok: false,
+        error: `허용되지 않는 textThemeName 프리셋입니다: ${preset}. 허용값: standard, highcontrast`,
+      };
+    }
+  }
+
   let cleanColorScheme = null;
   if (proposal.colorScheme && typeof proposal.colorScheme === 'object') {
     cleanColorScheme = {};
     for (const [k, v] of Object.entries(proposal.colorScheme)) {
       if (BAD_KEYS.has(k) || !ALLOWED_COLOR_SCHEME_KEYS.has(k)) {
         return { ok: false, error: `허용되지 않는 colorScheme 키입니다: ${k}` };
+      }
+      if (k === 'type' && v !== 'light' && v !== 'dark') {
+        return { ok: false, error: 'colorScheme.type은 "light" 또는 "dark"여야 합니다.' };
       }
       cleanColorScheme[k] = String(v);
     }
@@ -4545,36 +4971,51 @@ async function planThemeUpdate(adapter, proposal) {
     }
   }
 
+  let currentColorMeta = null;
   let currentColorScheme = null;
   if (wantsColor && typeof api?.getColorScheme === 'function') {
-    try { currentColorScheme = clone(await api.getColorScheme()); } catch {}
+    try {
+      currentColorMeta = clone(await api.getColorScheme());
+      currentColorScheme = unwrapColorScheme(currentColorMeta);
+    } catch {}
   }
+  let currentTextMeta = null;
   let currentTextTheme = null;
   if (wantsText && typeof api?.getTextTheme === 'function') {
-    try { currentTextTheme = clone(await api.getTextTheme()); } catch {}
+    try {
+      currentTextMeta = clone(await api.getTextTheme());
+      currentTextTheme = unwrapTextTheme(currentTextMeta);
+    } catch {}
   }
   const dbKeys = ['colorSchemeName', 'textTheme'];
   if (proposal.customCSS !== undefined) dbKeys.push('customCSS');
   if (proposal.guiHTML !== undefined) dbKeys.push('guiHTML');
   const currentDb = (await adapter.readDbSubset(dbKeys)) || {};
 
+  const mergedColorScheme = cleanColorScheme
+    ? unwrapColorScheme({ ...(currentColorScheme || DEFAULT_DARK_COLOR_SCHEME), ...cleanColorScheme })
+    : null;
+  const mergedTextTheme = cleanTextTheme
+    ? unwrapTextTheme({ ...(currentTextTheme || DEFAULT_CUSTOM_TEXT_THEME), ...cleanTextTheme })
+    : null;
+
   const beforeSummary = {};
   const afterSummary = {};
   if (proposal.colorSchemeName !== undefined) {
-    beforeSummary.colorSchemeName = currentDb.colorSchemeName ?? '(현재)';
-    afterSummary.colorSchemeName = String(proposal.colorSchemeName);
+    beforeSummary.colorSchemeName = currentDb.colorSchemeName ?? currentColorMeta?.name ?? '(현재)';
+    afterSummary.colorSchemeName = String(proposal.colorSchemeName).trim();
   }
-  if (cleanColorScheme) {
-    beforeSummary.colorScheme = currentColorScheme || {};
-    afterSummary.colorScheme = { ...(currentColorScheme || {}), ...cleanColorScheme };
+  if (mergedColorScheme) {
+    beforeSummary.colorScheme = currentColorScheme || DEFAULT_DARK_COLOR_SCHEME;
+    afterSummary.colorScheme = mergedColorScheme;
   }
   if (proposal.textThemeName !== undefined) {
-    beforeSummary.textThemeName = currentDb.textTheme ?? '(현재)';
-    afterSummary.textThemeName = String(proposal.textThemeName);
+    beforeSummary.textThemeName = currentDb.textTheme ?? currentTextMeta?.name ?? '(현재)';
+    afterSummary.textThemeName = String(proposal.textThemeName).trim();
   }
-  if (cleanTextTheme) {
-    beforeSummary.customTextTheme = currentTextTheme || {};
-    afterSummary.customTextTheme = { ...(currentTextTheme || {}), ...cleanTextTheme };
+  if (mergedTextTheme) {
+    beforeSummary.customTextTheme = currentTextTheme || DEFAULT_CUSTOM_TEXT_THEME;
+    afterSummary.customTextTheme = mergedTextTheme;
   }
   if (proposal.customCSS !== undefined) {
     beforeSummary.customCSS = currentDb.customCSS ?? '';
@@ -4589,6 +5030,8 @@ async function planThemeUpdate(adapter, proposal) {
     ok: true,
     cleanColorScheme,
     cleanTextTheme,
+    mergedColorScheme,
+    mergedTextTheme,
     currentColorScheme,
     currentTextTheme,
     currentDb,
@@ -5471,7 +5914,7 @@ function planManageExtensions(adapter, proposal) {
 }
 
 // ---------------------------------------------------------------------------
-// 11. manage_bard_wiki (RisuBard-only)
+// 11. manage_bard_wiki (RisuBard-only · exact upstream BardWikiAPI contract)
 // ---------------------------------------------------------------------------
 
 async function planManageBardWiki(adapter, proposal) {
@@ -5493,10 +5936,6 @@ async function planManageBardWiki(adapter, proposal) {
       docs = Array.isArray(rawDocs) ? rawDocs : (Array.isArray(rawDocs?.documents) ? rawDocs.documents : []);
     } catch {}
   }
-  let ctx = null;
-  if (bw.getContext) {
-    try { ctx = await bw.getContext(); } catch {}
-  }
   const docId = String(proposal.documentId || proposal.id || '').trim();
   const existingDoc = docId ? (docs.find(d => d && String(d.id) === docId) || null) : null;
   const scopeNote = '(RisuBard 현재 열린 캐릭터·채팅 스코프 기준)';
@@ -5504,28 +5943,47 @@ async function planManageBardWiki(adapter, proposal) {
   if (op === 'save_document') {
     if (!bw.saveDocument) return { ok: false, error: 'bardWiki.saveDocument API를 사용할 수 없습니다.' };
     const title = String(proposal.title || existingDoc?.title || '').trim();
-    const content = typeof proposal.content === 'string' ? proposal.content : existingDoc?.content;
-    if (!title || typeof content !== 'string') {
-      return { ok: false, error: 'save_document에는 title과 content 문자열이 필요합니다.' };
+    const markdown = typeof proposal.markdown === 'string'
+      ? proposal.markdown
+      : (typeof proposal.content === 'string' ? proposal.content : existingDoc?.content);
+    if (!title || typeof markdown !== 'string') {
+      return { ok: false, error: 'save_document에는 title과 markdown(또는 content) 문자열이 필요합니다.' };
     }
-    const nextDoc = {
-      ...(existingDoc ? clone(existingDoc) : {}),
-      ...(docId ? { id: docId } : {}),
+    const docType = String(proposal.type || existingDoc?.type || 'other').trim();
+    if (!BARD_WIKI_DOC_TYPES.has(docType)) {
+      return {
+        ok: false,
+        error: `허용되지 않는 BardWiki 문서 type입니다: ${docType}. 허용값: ${[...BARD_WIKI_DOC_TYPES].join(', ')}`,
+      };
+    }
+    let followUpGrade = undefined;
+    if (proposal.grade !== undefined) {
+      const parsedGrade = normalizeBardWikiGrade(proposal.grade);
+      if (!parsedGrade.ok) return parsedGrade;
+      followUpGrade = parsedGrade.value;
+    }
+    const aliases = Array.isArray(proposal.aliases)
+      ? proposal.aliases.map(String).filter(Boolean)
+      : (Array.isArray(existingDoc?.aliases) ? existingDoc.aliases : undefined);
+
+    // Exact upstream BardWikiDocumentWrite shape (risubard.d.ts:1284-1293)
+    const docWrite = {
+      ...(existingDoc ? { documentId: existingDoc.id, expectedContentHash: existingDoc.contentHash } : {}),
+      type: docType,
       title,
-      content,
-      ...(proposal.grade !== undefined ? { grade: String(proposal.grade) } : {}),
-      ...(proposal.category !== undefined ? { category: String(proposal.category) } : {}),
-      ...(Array.isArray(proposal.tags) ? { tags: proposal.tags.map(String) } : {}),
+      ...(aliases ? { aliases } : {}),
+      markdown,
     };
     return {
       ok: true,
       op,
       bw,
-      nextDoc,
+      docWrite,
+      followUpGrade,
       existingDoc: existingDoc ? clone(existingDoc) : null,
       label: `BardWiki 문서 ${existingDoc ? '수정' : '생성'}: ${title}`,
       before: existingDoc ? JSON.stringify(existingDoc, null, 2) : `(새 BardWiki 문서) ${scopeNote}`,
-      after: `${JSON.stringify(nextDoc, null, 2)}\n${scopeNote}`,
+      after: `${JSON.stringify({ ...docWrite, ...(followUpGrade !== undefined ? { grade: followUpGrade } : {}) }, null, 2)}\n${scopeNote}`,
       hostBinding: null,
     };
   }
@@ -5535,17 +5993,29 @@ async function planManageBardWiki(adapter, proposal) {
     if (!docId || proposal.grade === undefined) {
       return { ok: false, error: 'set_grade에는 documentId와 grade가 필요합니다.' };
     }
+    if (!existingDoc) {
+      return { ok: false, error: `BardWiki 문서(${docId})를 찾을 수 없습니다(contentHash 확인 필요).` };
+    }
+    const parsedGrade = normalizeBardWikiGrade(proposal.grade);
+    if (!parsedGrade.ok) return parsedGrade;
+    const gradeInput = {
+      documentId: existingDoc.id,
+      grade: parsedGrade.value,
+      gradeBy: 'user',
+      expectedContentHash: existingDoc.contentHash || '',
+    };
     return {
       ok: true,
       op,
       bw,
-      docId,
-      grade: String(proposal.grade),
-      beforeGrade: existingDoc?.grade ?? null,
-      existingDoc: existingDoc ? clone(existingDoc) : null,
-      label: `BardWiki 등급 변경: ${existingDoc?.title || docId} → ${proposal.grade}`,
-      before: `grade: ${existingDoc?.grade ?? '(미상)'}`,
-      after: `grade: ${proposal.grade}\n${scopeNote}`,
+      docId: existingDoc.id,
+      gradeInput,
+      grade: parsedGrade.value,
+      beforeGrade: existingDoc.grade ?? null,
+      existingDoc: clone(existingDoc),
+      label: `BardWiki 등급 변경: ${existingDoc.title || docId} → ${parsedGrade.value === null ? '해제' : parsedGrade.value}`,
+      before: `grade: ${existingDoc.grade ?? '(없음)'}`,
+      after: `grade: ${parsedGrade.value === null ? 'null' : parsedGrade.value}\n${scopeNote}`,
       hostBinding: null,
     };
   }
@@ -5553,16 +6023,35 @@ async function planManageBardWiki(adapter, proposal) {
   if (op === 'set_context_mode') {
     if (!bw.setContextMode) return { ok: false, error: 'bardWiki.setContextMode API를 사용할 수 없습니다.' };
     const mode = String(proposal.contextMode || proposal.mode || '').trim();
-    if (!mode) return { ok: false, error: 'set_context_mode에는 contextMode(또는 mode) 문자열이 필요합니다.' };
-    const beforeMode = ctx?.mode ?? ctx?.contextMode ?? null;
+    if (!BARD_WIKI_CONTEXT_MODES.has(mode)) {
+      return {
+        ok: false,
+        error: `BardWiki contextMode는 always, auto, never 중 하나여야 합니다(입력: ${mode || '없음'}).`,
+      };
+    }
+    if (!docId) {
+      return { ok: false, error: 'RisuBard setContextMode는 문서별 API이므로 대상 documentId가 필요합니다.' };
+    }
+    if (!existingDoc) {
+      return { ok: false, error: `BardWiki 문서(${docId})를 찾을 수 없습니다(contentHash 확인 필요).` };
+    }
+    const modeInput = {
+      documentId: existingDoc.id,
+      contextMode: mode,
+      expectedContentHash: existingDoc.contentHash || '',
+    };
+    const beforeMode = existingDoc.contextMode ?? 'auto';
     return {
       ok: true,
       op,
       bw,
+      docId: existingDoc.id,
+      modeInput,
       contextMode: mode,
       beforeMode,
-      label: `BardWiki 컨텍스트 모드 변경: ${mode}`,
-      before: `contextMode: ${beforeMode ?? '(현재)'}`,
+      existingDoc: clone(existingDoc),
+      label: `BardWiki 컨텍스트 모드 변경: ${existingDoc.title || docId} → ${mode}`,
+      before: `contextMode: ${beforeMode}`,
       after: `contextMode: ${mode}\n${scopeNote}`,
       hostBinding: null,
     };
@@ -5588,53 +6077,221 @@ async function planManageBardWiki(adapter, proposal) {
 }
 
 // ---------------------------------------------------------------------------
-// 12. patch_risunest_conversation (RisuNest-only)
+// 12. patch_risunest_conversation (RisuNest-only · exact ConversationPatchRequest)
 // ---------------------------------------------------------------------------
 
 async function planPatchRisuNestConversation(adapter, proposal) {
   if (!adapter.hasCapability('risunestPatch') || typeof adapter.api?.risunestPatchConversation !== 'function') {
     return { ok: false, error: '현재 호스트는 RisuNest risunestPatchConversation API를 지원하지 않습니다.' };
   }
-  const patch = proposal.patch;
-  if (!patch || typeof patch !== 'object' || Array.isArray(patch) || Object.keys(patch).length === 0) {
-    return { ok: false, error: 'patch_risunest_conversation에는 1개 이상의 키를 포함한 patch 객체가 필요합니다.' };
-  }
-  const cleanPatch = {};
-  for (const [k, v] of Object.entries(patch)) {
-    if (BAD_KEYS.has(k) || !ALLOWED_RISUNEST_PATCH_KEYS.has(k)) {
-      return { ok: false, error: `허용되지 않는 RisuNest 대화 패치 키입니다: ${k}` };
+
+  // Reject legacy/unsupported metadata keys clearly with actionable alternatives
+  if (proposal.patch && typeof proposal.patch === 'object' && !Array.isArray(proposal.patch)) {
+    const unsupported = Object.keys(proposal.patch).filter(
+      k => !['messages', 'chatVariables', 'scriptstate'].includes(k)
+    );
+    if (unsupported.length > 0) {
+      return {
+        ok: false,
+        error: `RisuNest risunestPatchConversation은 messages와 chatVariables 정밀 패치 전용입니다(미지원 키: ${unsupported.join(', ')}). 작가의 노트·메모리·채팅 제목 수정에는 update_field(authorNote)/update_memory를 사용하세요.`,
+      };
     }
-    cleanPatch[k] = v;
   }
 
-  const ref = {
-    ...(proposal.conversationId ? { conversationId: String(proposal.conversationId) } : {}),
-    ...(Number.isInteger(proposal.targetCharIndex) ? { charIndex: proposal.targetCharIndex } : {}),
-    ...(Number.isInteger(proposal.targetChatIndex) ? { chatIndex: proposal.targetChatIndex } : {}),
-  };
+  // Resolve target characterId & conversationId (either explicit or from active/target chat)
+  let characterId = typeof proposal.characterId === 'string' && proposal.characterId.trim()
+    ? proposal.characterId.trim()
+    : '';
+  let conversationId = typeof proposal.conversationId === 'string' && proposal.conversationId.trim()
+    ? proposal.conversationId.trim()
+    : '';
+  let resolvedChat = null;
 
-  let currentCtx = {};
-  if (typeof adapter.api?.risunestReadConversationContext === 'function') {
+  if (!characterId || !conversationId) {
     try {
-      const read = await adapter.api.risunestReadConversationContext(ref);
-      if (read && typeof read === 'object') currentCtx = read;
+      const res = await adapter._resolveTargetChat(proposal, null, '조회');
+      if (!characterId && res?.char?.chaId) characterId = String(res.char.chaId);
+      if (!conversationId && res?.chat?.id) conversationId = String(res.chat.id);
+      resolvedChat = res?.chat || null;
     } catch {}
   }
 
-  const beforeValues = {};
-  for (const k of Object.keys(cleanPatch)) {
-    beforeValues[k] = Object.hasOwn(currentCtx, k) ? clone(currentCtx[k]) : null;
+  // Normalize `messages` entries into ConversationPatchMessage[]
+  const rawMessages = Array.isArray(proposal.messages)
+    ? proposal.messages
+    : (Array.isArray(proposal.patch?.messages) ? proposal.patch.messages : []);
+  const normMessages = [];
+  for (let i = 0; i < rawMessages.length; i++) {
+    const entry = rawMessages[i];
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      return { ok: false, error: `messages[${i}]는 객체여야 합니다.` };
+    }
+    if (!Number.isInteger(entry.index) || entry.index < 0) {
+      return { ok: false, error: `messages[${i}].index는 0 이상의 정수여야 합니다.` };
+    }
+    const rawSet = entry.set && typeof entry.set === 'object' && !Array.isArray(entry.set)
+      ? entry.set
+      : (typeof entry.data === 'string' ? { data: entry.data } : null);
+    if (!rawSet || Object.keys(rawSet).length === 0) {
+      return { ok: false, error: `messages[${i}]에는 set 객체(또는 data 문자열)가 필요합니다.` };
+    }
+    for (const k of Object.keys(rawSet)) {
+      if (BAD_KEYS.has(k)) return { ok: false, error: `허용되지 않는 키입니다: ${k}` };
+    }
+    normMessages.push({
+      index: entry.index,
+      messageId: entry.messageId !== undefined ? (entry.messageId === null ? null : String(entry.messageId)) : undefined,
+      ...(entry.expected && typeof entry.expected === 'object' ? { expected: clone(entry.expected) } : {}),
+      set: clone(rawSet),
+    });
   }
 
-  const convLabel = ref.conversationId || (Number.isInteger(ref.chatIndex) ? `채팅 #${ref.chatIndex + 1}` : '현재 대화');
+  // Normalize `chatVariables` (supports array `[{ key, value, expected? }]` or map `{ hp: 90, gold: null }`)
+  const rawVars = proposal.chatVariables !== undefined
+    ? proposal.chatVariables
+    : (proposal.patch?.chatVariables !== undefined ? proposal.patch.chatVariables : proposal.patch?.scriptstate);
+  const normVars = [];
+  if (Array.isArray(rawVars)) {
+    for (let i = 0; i < rawVars.length; i++) {
+      const v = rawVars[i];
+      if (!v || typeof v !== 'object' || !String(v.key || '').trim()) {
+        return { ok: false, error: `chatVariables[${i}]에는 key가 필요합니다.` };
+      }
+      const key = String(v.key).replace(/^\$+/, '').trim();
+      if (!key || BAD_KEYS.has(key)) return { ok: false, error: `유효하지 않은 변수 키입니다: ${v.key}` };
+      const val = v.value;
+      if (val !== null && typeof val !== 'string' && typeof val !== 'number' && typeof val !== 'boolean') {
+        return { ok: false, error: `chatVariables[${i}].value는 문자열·숫자·불리언·null이어야 합니다.` };
+      }
+      normVars.push({
+        key,
+        ...(v.expected !== undefined ? { expected: v.expected } : {}),
+        value: val,
+      });
+    }
+  } else if (rawVars && typeof rawVars === 'object') {
+    for (const [rawKey, val] of Object.entries(rawVars)) {
+      const key = String(rawKey).replace(/^\$+/, '').trim();
+      if (!key || BAD_KEYS.has(key)) return { ok: false, error: `유효하지 않은 변수 키입니다: ${rawKey}` };
+      if (val !== null && typeof val !== 'string' && typeof val !== 'number' && typeof val !== 'boolean') {
+        return { ok: false, error: `chatVariables["${key}"]는 문자열·숫자·불리언·null이어야 합니다.` };
+      }
+      normVars.push({ key, value: val });
+    }
+  }
+
+  if (normMessages.length === 0 && normVars.length === 0) {
+    return {
+      ok: false,
+      error: 'patch_risunest_conversation에는 1개 이상의 messages 또는 chatVariables 패치가 필요합니다.',
+    };
+  }
+
+  // Read live ConversationContext via exact upstream 1-object signature
+  let currentCtx = null;
+  if (typeof adapter.api?.risunestReadConversationContext === 'function') {
+    try {
+      const ctxReq = {
+        ...(characterId && conversationId ? { characterId, conversationId } : {}),
+        ...(normVars.length > 0 ? { chatVariables: normVars.map(v => v.key) } : {}),
+        ...(normMessages.length > 0 ? {
+          messages: {
+            startIndex: Math.min(...normMessages.map(m => m.index)),
+            limit: Math.min(128, Math.max(...normMessages.map(m => m.index)) - Math.min(...normMessages.map(m => m.index)) + 1),
+          },
+        } : {}),
+      };
+      const read = await adapter.api.risunestReadConversationContext(ctxReq);
+      if (read && typeof read === 'object') {
+        currentCtx = read;
+        if (!characterId && read.characterId) characterId = String(read.characterId);
+        if (!conversationId && read.conversationId) conversationId = String(read.conversationId);
+      }
+    } catch {}
+  }
+
+  if (!characterId || !conversationId) {
+    return {
+      ok: false,
+      error: 'RisuNest 대화 패치에 필요한 characterId 또는 conversationId를 확인할 수 없습니다.',
+    };
+  }
+
+  const baseRevision = Number.isSafeInteger(currentCtx?.revision) ? currentCtx.revision : undefined;
+
+  // Hydrate missing `messageId` & capture `before` snapshots for surgical Undo
+  const ctxMsgStart = Number.isSafeInteger(currentCtx?.messages?.startIndex) ? currentCtx.messages.startIndex : 0;
+  const ctxMsgs = Array.isArray(currentCtx?.messages?.messages)
+    ? currentCtx.messages.messages
+    : (Array.isArray(resolvedChat?.message) ? resolvedChat.message : []);
+  const ctxVars = currentCtx?.chatVariables && typeof currentCtx.chatVariables === 'object'
+    ? currentCtx.chatVariables
+    : (resolvedChat?.scriptstate && typeof resolvedChat.scriptstate === 'object' ? resolvedChat.scriptstate : {});
+
+  const beforeMessages = [];
+  const finalMessages = [];
+  for (const m of normMessages) {
+    const liveMsg = Array.isArray(currentCtx?.messages?.messages)
+      ? ctxMsgs[m.index - ctxMsgStart]
+      : ctxMsgs[m.index];
+    const messageId = m.messageId !== undefined
+      ? m.messageId
+      : (typeof liveMsg?.chatId === 'string' && liveMsg.chatId ? liveMsg.chatId : null);
+    if (messageId === null && baseRevision === undefined) {
+      return {
+        ok: false,
+        error: `메시지 #${m.index + 1}에 messageId가 없고 baseRevision도 확인되지 않아 안전하게 패치할 수 없습니다.`,
+      };
+    }
+    const beforeSet = {};
+    for (const field of Object.keys(m.set)) {
+      beforeSet[field] = liveMsg && Object.hasOwn(liveMsg, field) ? clone(liveMsg[field]) : undefined;
+    }
+    beforeMessages.push({ index: m.index, messageId, before: beforeSet, after: clone(m.set) });
+    finalMessages.push({
+      index: m.index,
+      messageId,
+      ...(m.expected ? { expected: m.expected } : {}),
+      set: m.set,
+    });
+  }
+
+  const beforeVars = [];
+  const finalVars = [];
+  for (const v of normVars) {
+    const liveVal = Object.hasOwn(ctxVars, v.key)
+      ? ctxVars[v.key]
+      : (Object.hasOwn(ctxVars, `$${v.key}`) ? ctxVars[`$${v.key}`] : null);
+    const normalizedBefore = (liveVal === undefined || liveVal === null) ? null : liveVal;
+    beforeVars.push({ key: v.key, before: normalizedBefore, after: v.value });
+    finalVars.push({
+      key: v.key,
+      ...(v.expected !== undefined ? { expected: v.expected } : {}),
+      value: v.value,
+    });
+  }
+
+  const request = {
+    characterId,
+    conversationId,
+    mutationId: makeUuid(),
+    ...(baseRevision !== undefined ? { baseRevision } : {}),
+    messages: finalMessages,
+    chatVariables: finalVars,
+  };
+
+  const parts = [];
+  if (finalMessages.length > 0) parts.push(`메시지 ${finalMessages.length}건`);
+  if (finalVars.length > 0) parts.push(`채팅 변수 ${finalVars.length}건`);
+
   return {
     ok: true,
-    ref,
-    cleanPatch,
-    beforeValues,
-    label: `RisuNest 대화 정밀 패치 (${convLabel}: ${Object.keys(cleanPatch).join(', ')})`,
-    before: JSON.stringify(beforeValues, null, 2),
-    after: JSON.stringify(cleanPatch, null, 2),
+    request,
+    beforeMessages,
+    beforeVars,
+    label: `RisuNest 대화 정밀 패치 (${conversationId}: ${parts.join(', ')})`,
+    before: JSON.stringify({ messages: beforeMessages, chatVariables: beforeVars }, null, 2),
+    after: JSON.stringify({ messages: finalMessages, chatVariables: finalVars }, null, 2),
     hostBinding: null,
   };
 }
@@ -5805,16 +6462,16 @@ async function applyM3Proposal(adapter, proposal, target, options = {}) {
       const label = proposal.title || `테마 · 스타일 변경 (${Object.keys(plan.afterSummary).join(', ')})`;
 
       if (proposal.colorSchemeName !== undefined && typeof api?.changeColorScheme === 'function') {
-        await api.changeColorScheme(String(proposal.colorSchemeName));
+        await api.changeColorScheme(String(proposal.colorSchemeName).trim());
       }
-      if (plan.cleanColorScheme && typeof api?.setColorScheme === 'function') {
-        await api.setColorScheme({ ...(plan.currentColorScheme || {}), ...plan.cleanColorScheme });
+      if (plan.mergedColorScheme && typeof api?.setColorScheme === 'function') {
+        await api.setColorScheme(plan.mergedColorScheme);
       }
       if (proposal.textThemeName !== undefined && typeof api?.changeTextTheme === 'function') {
-        await api.changeTextTheme(String(proposal.textThemeName));
+        await api.changeTextTheme(String(proposal.textThemeName).trim());
       }
-      if (plan.cleanTextTheme && typeof api?.setCustomTextTheme === 'function') {
-        await api.setCustomTextTheme({ ...(plan.currentTextTheme || {}), ...plan.cleanTextTheme });
+      if (plan.mergedTextTheme && typeof api?.setCustomTextTheme === 'function') {
+        await api.setCustomTextTheme(plan.mergedTextTheme);
       }
 
       const undoId = adapter._recordChange(
@@ -5828,10 +6485,10 @@ async function applyM3Proposal(adapter, proposal, target, options = {}) {
             customTextTheme: plan.currentTextTheme,
           },
           after: {
-            colorSchemeName: proposal.colorSchemeName !== undefined ? String(proposal.colorSchemeName) : null,
-            colorScheme: plan.cleanColorScheme ? { ...(plan.currentColorScheme || {}), ...plan.cleanColorScheme } : null,
-            textThemeName: proposal.textThemeName !== undefined ? String(proposal.textThemeName) : null,
-            customTextTheme: plan.cleanTextTheme ? { ...(plan.currentTextTheme || {}), ...plan.cleanTextTheme } : null,
+            colorSchemeName: proposal.colorSchemeName !== undefined ? String(proposal.colorSchemeName).trim() : null,
+            colorScheme: plan.mergedColorScheme,
+            textThemeName: proposal.textThemeName !== undefined ? String(proposal.textThemeName).trim() : null,
+            customTextTheme: plan.mergedTextTheme,
           },
         }],
         label
@@ -5872,13 +6529,13 @@ async function applyM3Proposal(adapter, proposal, target, options = {}) {
       if (!plan.ok) throw new Error(plan.error);
 
       if (plan.mode === 'inlay') {
-        const inlayRes = await api.createInlay({
-          name: plan.name,
-          data: plan.decoded.bytes,
-          type: plan.decoded.mimeType.startsWith('image/') ? 'image' : 'text',
-          ext: plan.decoded.mimeType.includes('svg') ? 'svg' : 'txt',
-        });
-        const inlayId = typeof inlayRes === 'string' ? inlayRes : String(inlayRes?.id || makeUuid());
+        // Exact upstream signature: createInlay(data: Uint8Array | string, options?: { name?: string }): Promise<string | null>
+        // Pass a fresh Uint8Array copy because upstream transfers/detaches the ArrayBuffer.
+        const inlayRes = await api.createInlay(new Uint8Array(plan.decoded.bytes), { name: plan.name });
+        if (!inlayRes || (typeof inlayRes !== 'string' && typeof inlayRes?.id !== 'string')) {
+          throw new Error('인레이 생성 권한이 거부되었거나 호스트가 이미지 데이터 변환에 실패했습니다.');
+        }
+        const inlayId = typeof inlayRes === 'string' ? inlayRes : inlayRes.id;
         const undoId = adapter._recordChange(
           { type: 'host_api', kind: 'inlay' },
           [{ op: 'host_api', before: null, after: { inlayId, name: plan.name } }],
@@ -5888,7 +6545,8 @@ async function applyM3Proposal(adapter, proposal, target, options = {}) {
       }
 
       if (plan.mode === 'module_asset') {
-        const saved = await api.saveAsset(plan.decoded.bytes, undefined, `${plan.name}.${plan.ext}`);
+        // Upstream saveAsset(data: Uint8Array): Promise<string>
+        const saved = await api.saveAsset(new Uint8Array(plan.decoded.bytes));
         const savedId = typeof saved === 'string' ? saved : String(saved?.id || saved?.path || `${plan.name}.${plan.ext}`);
         const nextMods = clone(plan.modules);
         if (!Array.isArray(nextMods[plan.moduleIndex].assets)) nextMods[plan.moduleIndex].assets = [];
@@ -5906,7 +6564,7 @@ async function applyM3Proposal(adapter, proposal, target, options = {}) {
       } else if (plan.mode === 'bind_asset') {
         nextChar[plan.targetField].push(plan.entry);
       } else if (plan.mode === 'character_asset') {
-        const saved = await api.saveAsset(plan.decoded.bytes, undefined, `${plan.name}.${plan.ext}`);
+        const saved = await api.saveAsset(new Uint8Array(plan.decoded.bytes));
         savedId = typeof saved === 'string' ? saved : String(saved?.id || saved?.path || `${plan.name}.${plan.ext}`);
         const entry = plan.targetField === 'emotionImages'
           ? [plan.name, savedId]
@@ -6068,22 +6726,43 @@ async function applyM3Proposal(adapter, proposal, target, options = {}) {
       if (!plan.ok) throw new Error(plan.error);
       let undoPayload;
       if (plan.op === 'save_document') {
-        const saved = await plan.bw.saveDocument(plan.nextDoc);
-        const savedId = String(saved?.id || plan.nextDoc.id || '');
+        const saved = await plan.bw.saveDocument(plan.docWrite);
+        if (!saved) throw new Error('BardWiki 문서 저장 권한이 거부되었거나 저장에 실패했습니다.');
+        let finalDoc = saved;
+        if (plan.followUpGrade !== undefined && plan.bw.setGrade && saved.id) {
+          const graded = await plan.bw.setGrade({
+            documentId: saved.id,
+            grade: plan.followUpGrade,
+            gradeBy: 'user',
+            expectedContentHash: saved.contentHash || '',
+          });
+          if (graded) finalDoc = graded;
+        }
+        const savedId = String(finalDoc?.id || saved.id || '');
         undoPayload = {
           bwOp: 'save_document',
           docId: savedId,
           before: plan.existingDoc,
-          after: { ...plan.nextDoc, ...(savedId ? { id: savedId } : {}) },
+          after: {
+            id: savedId,
+            type: finalDoc.type || plan.docWrite.type,
+            title: finalDoc.title || plan.docWrite.title,
+            content: finalDoc.content ?? plan.docWrite.markdown,
+            grade: finalDoc.grade ?? plan.followUpGrade ?? null,
+            contentHash: finalDoc.contentHash || '',
+          },
         };
       } else if (plan.op === 'set_grade') {
-        await plan.bw.setGrade(plan.docId, plan.grade);
+        const res = await plan.bw.setGrade(plan.gradeInput);
+        if (!res) throw new Error('BardWiki 등급 변경 권한이 거부되었거나 문서 해시가 충돌했습니다.');
         undoPayload = { bwOp: 'set_grade', docId: plan.docId, before: plan.beforeGrade, after: plan.grade };
       } else if (plan.op === 'set_context_mode') {
-        await plan.bw.setContextMode(plan.contextMode);
-        undoPayload = { bwOp: 'set_context_mode', before: plan.beforeMode, after: plan.contextMode };
+        const res = await plan.bw.setContextMode(plan.modeInput);
+        if (!res) throw new Error('BardWiki 컨텍스트 모드 변경 권한이 거부되었거나 문서 해시가 충돌했습니다.');
+        undoPayload = { bwOp: 'set_context_mode', docId: plan.docId, before: plan.beforeMode, after: plan.contextMode };
       } else if (plan.op === 'trash_document') {
-        await plan.bw.trashDocument(plan.docId);
+        const res = await plan.bw.trashDocument(plan.docId);
+        if (!res) throw new Error('BardWiki 문서 휴지통 이동 권한이 거부되었거나 실패했습니다.');
         undoPayload = { bwOp: 'trash_document', docId: plan.docId, before: plan.existingDoc, after: null };
       }
       const undoId = adapter._recordChange(
@@ -6097,10 +6776,24 @@ async function applyM3Proposal(adapter, proposal, target, options = {}) {
     case 'patch_risunest_conversation': {
       const plan = await planPatchRisuNestConversation(adapter, proposal);
       if (!plan.ok) throw new Error(plan.error);
-      await api.risunestPatchConversation(plan.ref, plan.cleanPatch);
+      // Upstream RisuNest takes a single ConversationPatchRequest object and returns ConversationPatchResult
+      const res = await api.risunestPatchConversation(plan.request);
+      if (res && typeof res === 'object' && res.status && res.status !== 'applied' && res.status !== 'already-applied') {
+        const reason = res.conflict
+          ? `${res.conflict.target}/${res.conflict.reason}`
+          : res.status;
+        throw new Error(`RisuNest 대화 패치가 호스트에서 거부되었습니다(${reason}).`);
+      }
       const undoId = adapter._recordChange(
         { type: 'host_api', kind: 'risunest_patch' },
-        [{ op: 'host_api', ref: plan.ref, before: plan.beforeValues, after: plan.cleanPatch }],
+        [{
+          op: 'host_api',
+          characterId: plan.request.characterId,
+          conversationId: plan.request.conversationId,
+          messages: plan.beforeMessages,
+          chatVariables: plan.beforeVars,
+          revisionAfter: Number.isSafeInteger(res?.revision) ? res.revision : undefined,
+        }],
         plan.label
       );
       return { ok: true, message: `${plan.label} 완료`, undoId };
@@ -6122,41 +6815,62 @@ async function revertHostApiRecord(adapter, entity, ops) {
   for (const op of ops || []) {
     if (entity.kind === 'theme') {
       const { before, after } = op;
-      if (after.colorSchemeName !== null && typeof api?.changeColorScheme === 'function') {
+      const effectiveAfterColorName = after.colorScheme ? 'custom' : after.colorSchemeName;
+      let colorConflict = false;
+      if (effectiveAfterColorName !== null && typeof api?.changeColorScheme === 'function') {
         const db = (await adapter.readDbSubset(['colorSchemeName'])) || {};
-        if (db.colorSchemeName !== undefined && db.colorSchemeName !== after.colorSchemeName) {
+        if (db.colorSchemeName !== undefined && db.colorSchemeName !== effectiveAfterColorName) {
           conflicts.push({ path: 'theme.colorSchemeName', reason: '적용 이후 색상 스킴이 다시 변경되었습니다.' });
-        } else if (before.colorSchemeName) {
+          colorConflict = true;
+        }
+      }
+      if (!colorConflict && after.colorScheme && typeof api?.setColorScheme === 'function') {
+        let cur = null;
+        try {
+          const rawCur = await api.getColorScheme?.();
+          cur = rawCur ? unwrapColorScheme(rawCur) : null;
+        } catch {}
+        if (cur && !deepEqual(cur, unwrapColorScheme(after.colorScheme))) {
+          conflicts.push({ path: 'theme.colorScheme', reason: '적용 이후 커스텀 색상이 다시 변경되었습니다.' });
+          colorConflict = true;
+        } else if (before.colorScheme) {
+          await api.setColorScheme(unwrapColorScheme(before.colorScheme));
+          reverted++;
+        }
+      }
+      if (!colorConflict && effectiveAfterColorName !== null && typeof api?.changeColorScheme === 'function') {
+        if (before.colorSchemeName && ALLOWED_COLOR_SCHEME_PRESETS.has(before.colorSchemeName)) {
           await api.changeColorScheme(before.colorSchemeName);
           reverted++;
         }
       }
-      if (after.colorScheme && typeof api?.setColorScheme === 'function') {
-        let cur = null;
-        try { cur = await api.getColorScheme?.(); } catch {}
-        if (cur && !deepEqual(cur, after.colorScheme)) {
-          conflicts.push({ path: 'theme.colorScheme', reason: '적용 이후 커스텀 색상이 다시 변경되었습니다.' });
-        } else if (before.colorScheme) {
-          await api.setColorScheme(before.colorScheme);
-          reverted++;
-        }
-      }
-      if (after.textThemeName !== null && typeof api?.changeTextTheme === 'function') {
+
+      const effectiveAfterTextName = after.customTextTheme ? 'custom' : after.textThemeName;
+      let textConflict = false;
+      if (effectiveAfterTextName !== null && typeof api?.changeTextTheme === 'function') {
         const db = (await adapter.readDbSubset(['textTheme'])) || {};
-        if (db.textTheme !== undefined && db.textTheme !== after.textThemeName) {
+        if (db.textTheme !== undefined && db.textTheme !== effectiveAfterTextName) {
           conflicts.push({ path: 'theme.textTheme', reason: '적용 이후 텍스트 테마가 다시 변경되었습니다.' });
-        } else if (before.textThemeName) {
-          await api.changeTextTheme(before.textThemeName);
+          textConflict = true;
+        }
+      }
+      if (!textConflict && after.customTextTheme && typeof api?.setCustomTextTheme === 'function') {
+        let cur = null;
+        try {
+          const rawCur = await api.getTextTheme?.();
+          cur = rawCur ? unwrapTextTheme(rawCur) : null;
+        } catch {}
+        if (cur && !deepEqual(cur, unwrapTextTheme(after.customTextTheme))) {
+          conflicts.push({ path: 'theme.customTextTheme', reason: '적용 이후 커스텀 텍스트 테마가 다시 변경되었습니다.' });
+          textConflict = true;
+        } else if (before.customTextTheme) {
+          await api.setCustomTextTheme(unwrapTextTheme(before.customTextTheme));
           reverted++;
         }
       }
-      if (after.customTextTheme && typeof api?.setCustomTextTheme === 'function') {
-        let cur = null;
-        try { cur = await api.getTextTheme?.(); } catch {}
-        if (cur && !deepEqual(cur, after.customTextTheme)) {
-          conflicts.push({ path: 'theme.customTextTheme', reason: '적용 이후 커스텀 텍스트 테마가 다시 변경되었습니다.' });
-        } else if (before.customTextTheme) {
-          await api.setCustomTextTheme(before.customTextTheme);
+      if (!textConflict && effectiveAfterTextName !== null && typeof api?.changeTextTheme === 'function') {
+        if (before.textThemeName && ALLOWED_TEXT_THEME_PRESETS.has(before.textThemeName)) {
+          await api.changeTextTheme(before.textThemeName);
           reverted++;
         }
       }
@@ -6213,43 +6927,70 @@ async function revertHostApiRecord(adapter, entity, ops) {
     if (entity.kind === 'bard_wiki') {
       const bw = getBardWikiApi(api);
       if (!bw) continue;
-      if (op.bwOp === 'save_document') {
-        let curDoc = null;
-        if (bw.getDocuments && op.docId) {
-          try {
-            const raw = await bw.getDocuments();
-            const list = Array.isArray(raw) ? raw : (Array.isArray(raw?.documents) ? raw.documents : []);
-            curDoc = list.find(d => d && String(d.id) === String(op.docId)) || null;
-          } catch {}
+      const findLiveDoc = async (id) => {
+        if (!bw.getDocuments || !id) return null;
+        try {
+          const raw = await bw.getDocuments();
+          const list = Array.isArray(raw) ? raw : (Array.isArray(raw?.documents) ? raw.documents : []);
+          return list.find(d => d && String(d.id) === String(id)) || null;
+        } catch {
+          return null;
         }
+      };
+
+      if (op.bwOp === 'save_document') {
+        const curDoc = await findLiveDoc(op.docId);
         if (curDoc && op.after && curDoc.content !== op.after.content) {
           conflicts.push({ path: `bardWiki.${op.docId}`, reason: '적용 이후 BardWiki 문서 내용이 다시 변경되었습니다.' });
         } else if (op.before && bw.saveDocument) {
-          await bw.saveDocument(op.before);
+          await bw.saveDocument({
+            ...(curDoc ? { documentId: curDoc.id, expectedContentHash: curDoc.contentHash || '' } : {}),
+            type: op.before.type || 'other',
+            title: op.before.title,
+            ...(Array.isArray(op.before.aliases) ? { aliases: op.before.aliases } : {}),
+            markdown: op.before.content ?? '',
+          });
           reverted++;
         } else if (!op.before && op.docId && bw.trashDocument) {
           await bw.trashDocument(op.docId);
           reverted++;
         }
       } else if (op.bwOp === 'set_grade' && bw.setGrade) {
-        if (op.before !== null && op.before !== undefined) {
-          await bw.setGrade(op.docId, op.before);
+        const curDoc = await findLiveDoc(op.docId);
+        if (!curDoc) {
+          conflicts.push({ path: `bardWiki.${op.docId}`, reason: '되돌릴 BardWiki 문서를 찾을 수 없습니다.' });
+        } else if (curDoc.grade !== op.after) {
+          conflicts.push({ path: `bardWiki.${op.docId}.grade`, reason: '적용 이후 BardWiki 등급이 다시 변경되었습니다.' });
+        } else {
+          await bw.setGrade({
+            documentId: curDoc.id,
+            grade: op.before ?? null,
+            gradeBy: 'user',
+            expectedContentHash: curDoc.contentHash || '',
+          });
           reverted++;
         }
       } else if (op.bwOp === 'set_context_mode' && bw.setContextMode) {
-        let curMode = null;
-        try {
-          const ctx = await bw.getContext?.();
-          curMode = ctx?.mode ?? ctx?.contextMode ?? null;
-        } catch {}
-        if (curMode !== null && curMode !== op.after) {
-          conflicts.push({ path: 'bardWiki.contextMode', reason: '적용 이후 BardWiki 컨텍스트 모드가 다시 변경되었습니다.' });
-        } else if (op.before !== null && op.before !== undefined) {
-          await bw.setContextMode(op.before);
+        const curDoc = await findLiveDoc(op.docId);
+        if (!curDoc) {
+          conflicts.push({ path: `bardWiki.${op.docId}`, reason: '되돌릴 BardWiki 문서를 찾을 수 없습니다.' });
+        } else if (curDoc.contextMode !== op.after) {
+          conflicts.push({ path: `bardWiki.${op.docId}.contextMode`, reason: '적용 이후 BardWiki 컨텍스트 모드가 다시 변경되었습니다.' });
+        } else if (op.before) {
+          await bw.setContextMode({
+            documentId: curDoc.id,
+            contextMode: op.before,
+            expectedContentHash: curDoc.contentHash || '',
+          });
           reverted++;
         }
       } else if (op.bwOp === 'trash_document' && op.before && bw.saveDocument) {
-        await bw.saveDocument(op.before);
+        await bw.saveDocument({
+          type: op.before.type || 'other',
+          title: op.before.title,
+          ...(Array.isArray(op.before.aliases) ? { aliases: op.before.aliases } : {}),
+          markdown: op.before.content ?? '',
+        });
         reverted++;
       }
       continue;
@@ -6259,19 +7000,83 @@ async function revertHostApiRecord(adapter, entity, ops) {
       if (typeof api?.risunestPatchConversation !== 'function') continue;
       let curCtx = null;
       if (typeof api?.risunestReadConversationContext === 'function') {
-        try { curCtx = await api.risunestReadConversationContext(op.ref); } catch {}
+        try {
+          const varKeys = (op.chatVariables || []).map(v => v.key);
+          const msgEntries = op.messages || [];
+          curCtx = await api.risunestReadConversationContext({
+            characterId: op.characterId,
+            conversationId: op.conversationId,
+            ...(varKeys.length > 0 ? { chatVariables: varKeys } : {}),
+            ...(msgEntries.length > 0 ? {
+              messages: {
+                startIndex: Math.min(...msgEntries.map(m => m.index)),
+                limit: Math.min(128, Math.max(...msgEntries.map(m => m.index)) - Math.min(...msgEntries.map(m => m.index)) + 1),
+              },
+            } : {}),
+          });
+        } catch {}
       }
-      const inverse = {};
-      for (const [k, afterVal] of Object.entries(op.after || {})) {
-        if (curCtx && Object.hasOwn(curCtx, k) && !deepEqual(curCtx[k], afterVal)) {
-          conflicts.push({ path: `risunest.${k}`, reason: `적용 이후 "${k}" 값이 다시 변경되었습니다.` });
-        } else {
-          inverse[k] = op.before?.[k] ?? null;
+
+      const curVars = curCtx?.chatVariables && typeof curCtx.chatVariables === 'object' ? curCtx.chatVariables : null;
+      const curMsgStart = Number.isSafeInteger(curCtx?.messages?.startIndex) ? curCtx.messages.startIndex : 0;
+      const curMsgs = Array.isArray(curCtx?.messages?.messages) ? curCtx.messages.messages : null;
+
+      const inverseMessages = [];
+      for (const m of op.messages || []) {
+        const liveMsg = curMsgs ? curMsgs[m.index - curMsgStart] : null;
+        let conflicted = false;
+        if (liveMsg) {
+          for (const [field, afterVal] of Object.entries(m.after || {})) {
+            if (!deepEqual(liveMsg[field], afterVal)) {
+              conflicts.push({ path: `risunest.messages[${m.index}].${field}`, reason: `적용 이후 메시지 #${m.index + 1}의 "${field}" 값이 다시 변경되었습니다.` });
+              conflicted = true;
+            }
+          }
+        }
+        if (!conflicted) {
+          inverseMessages.push({
+            index: m.index,
+            messageId: m.messageId ?? null,
+            expected: clone(m.after),
+            set: clone(m.before),
+          });
         }
       }
-      if (Object.keys(inverse).length > 0) {
-        await api.risunestPatchConversation(op.ref, inverse);
-        reverted++;
+
+      const inverseVars = [];
+      for (const v of op.chatVariables || []) {
+        if (curVars) {
+          const liveVal = Object.hasOwn(curVars, v.key)
+            ? curVars[v.key]
+            : (Object.hasOwn(curVars, `$${v.key}`) ? curVars[`$${v.key}`] : null);
+          const normLive = (liveVal === undefined || liveVal === null) ? null : liveVal;
+          if (!deepEqual(normLive, v.after)) {
+            conflicts.push({ path: `risunest.chatVariables.${v.key}`, reason: `적용 이후 변수 "${v.key}" 값이 다시 변경되었습니다.` });
+            continue;
+          }
+        }
+        inverseVars.push({
+          key: v.key,
+          expected: v.after,
+          value: v.before,
+        });
+      }
+
+      if (inverseMessages.length > 0 || inverseVars.length > 0) {
+        const invReq = {
+          characterId: op.characterId,
+          conversationId: op.conversationId,
+          mutationId: makeUuid(),
+          ...(Number.isSafeInteger(curCtx?.revision) ? { baseRevision: curCtx.revision } : {}),
+          messages: inverseMessages,
+          chatVariables: inverseVars,
+        };
+        const res = await api.risunestPatchConversation(invReq);
+        if (res && typeof res === 'object' && res.status === 'conflict') {
+          conflicts.push({ path: `risunest.${res.conflict?.target || 'conversation'}`, reason: `호스트 충돌(${res.conflict?.reason || 'conflict'})로 되돌리기가 거부되었습니다.` });
+        } else {
+          reverted++;
+        }
       }
     }
   }
@@ -6280,10 +7085,19 @@ async function revertHostApiRecord(adapter, entity, ops) {
 }
 
   __exports.M3_ACTIONS = M3_ACTIONS;
+  __exports.COLOR_SCHEME_REQUIRED_KEYS = COLOR_SCHEME_REQUIRED_KEYS;
+  __exports.TEXT_THEME_REQUIRED_KEYS = TEXT_THEME_REQUIRED_KEYS;
   __exports.ALLOWED_COLOR_SCHEME_KEYS = ALLOWED_COLOR_SCHEME_KEYS;
+  __exports.ALLOWED_COLOR_SCHEME_PRESETS = ALLOWED_COLOR_SCHEME_PRESETS;
   __exports.ALLOWED_TEXT_THEME_KEYS = ALLOWED_TEXT_THEME_KEYS;
+  __exports.ALLOWED_TEXT_THEME_PRESETS = ALLOWED_TEXT_THEME_PRESETS;
   __exports.ALLOWED_ONBOARDING_FIELD_TYPES = ALLOWED_ONBOARDING_FIELD_TYPES;
   __exports.ALLOWED_RISUNEST_PATCH_KEYS = ALLOWED_RISUNEST_PATCH_KEYS;
+  __exports.BARD_WIKI_DOC_TYPES = BARD_WIKI_DOC_TYPES;
+  __exports.BARD_WIKI_CONTEXT_MODES = BARD_WIKI_CONTEXT_MODES;
+  __exports.unwrapColorScheme = unwrapColorScheme;
+  __exports.unwrapTextTheme = unwrapTextTheme;
+  __exports.normalizeBardWikiGrade = normalizeBardWikiGrade;
   __exports.sanitizeChatPanelHtml = sanitizeChatPanelHtml;
   __exports.getBardWikiApi = getBardWikiApi;
   __exports.previewM3Proposal = previewM3Proposal;
@@ -12451,37 +13265,31 @@ async function runListItems(adapter, args) {
   if (kind === 'chat') {
     const { char, charIndex, activeChatIndex, crossCharacter } = await adapter._resolveTargetCharacter(charHint, null, '채팅 목록 조회');
     const curIdx = !crossCharacter && Number.isInteger(activeChatIndex) ? activeChatIndex : (char.chatPage ?? 0);
-    // RisuNest fast path: paginated queryConversations without loading every full chat payload
-    if (adapter.hasCapability('risunestQuery') && typeof adapter.api?.queryConversations === 'function') {
+    // RisuNest fast path: paginated queryConversations (PluginConversationQuery: { characterId, limit, cursor? })
+    if (adapter.hasCapability('risunestQuery') && typeof adapter.api?.queryConversations === 'function' && char?.chaId) {
       try {
         const res = await adapter.api.queryConversations({
-          charId: char?.chaId || undefined,
-          charIndex,
-          offset,
-          limit,
-          query: q || undefined,
+          characterId: String(char.chaId),
+          limit: Math.min(100, Math.max(1, limit)),
         });
         const items = Array.isArray(res) ? res : (Array.isArray(res?.items) ? res.items : null);
         if (items) {
           const rows = items.map((c, idx) => ({
-            chatIndex: Number.isInteger(c?.chatIndex) ? c.chatIndex : (offset + idx),
-            id: c?.id || c?.conversationId || null,
-            name: c?.name || `채팅 ${offset + idx + 1}`,
+            chatIndex: Number.isInteger(c?.chatIndex) ? c.chatIndex : idx,
+            id: c?.conversationId || c?.id || null,
+            name: c?.name || `채팅 ${idx + 1}`,
             messages: Number(c?.messageCount ?? c?.messages ?? 0),
             folderId: c?.folderId || null,
             coldStored: Boolean(c?.coldStored),
-            current: (Number.isInteger(c?.chatIndex) ? c.chatIndex : offset + idx) === curIdx,
+            current: (Number.isInteger(c?.chatIndex) ? c.chatIndex : idx) === curIdx,
           }));
           return {
             ok: true,
             kind,
             usedQueryConversations: true,
             charName: char.name || '(무제)',
-            total: Number(res?.total ?? rows.length),
-            offset,
-            limit,
-            hasMore: Boolean(res?.hasMore ?? (offset + rows.length < Number(res?.total ?? rows.length))),
-            items: rows,
+            ...paginate(rows),
+            hasMore: Boolean(res?.nextCursor || (offset + limit < rows.length)),
           };
         }
       } catch {}
@@ -12532,24 +13340,30 @@ async function runReadChat(adapter, args) {
     return { ok: false, coldStored: true, error: '콜드 스토리지에 보관된 채팅입니다. RisuAI에서 먼저 열어 복원한 뒤 조회해 주세요.' };
   }
 
-  // RisuNest fast path: paginated queryConversationMessages when chat.message is not fully hydrated
+  // RisuNest fast path: paginated queryConversationMessages (PluginConversationMessageQuery)
   let messages = Array.isArray(chat.message) ? chat.message : [];
   let usedQueryMessages = false;
   if (
     adapter.hasCapability('risunestQuery') &&
     typeof adapter.api?.queryConversationMessages === 'function' &&
+    char?.chaId &&
     (args.conversationId || chat.id)
   ) {
     try {
-      const qRes = await adapter.api.queryConversationMessages({
-        conversationId: args.conversationId || chat.id,
-        charIndex,
-        chatIndex,
-        from: optionalInt(args.from),
-        to: optionalInt(args.to),
-        tail: optionalInt(args.tail),
-      });
-      const qItems = Array.isArray(qRes) ? qRes : (Array.isArray(qRes?.items) ? qRes.items : null);
+      const fromIdx = optionalInt(args.from);
+      const toIdx = optionalInt(args.to);
+      const tailN = optionalInt(args.tail);
+      const queryInput = {
+        characterId: String(char.chaId),
+        conversationId: String(args.conversationId || chat.id),
+        ...(fromIdx !== undefined
+          ? { startIndex: fromIdx, limit: Math.min(128, Math.max(1, toIdx !== undefined && toIdx > fromIdx ? toIdx - fromIdx : 30)) }
+          : { limit: Math.min(128, Math.max(1, tailN ?? 30)) }),
+      };
+      const qRes = await adapter.api.queryConversationMessages(queryInput);
+      const qItems = Array.isArray(qRes)
+        ? qRes
+        : (Array.isArray(qRes?.messages) ? qRes.messages : (Array.isArray(qRes?.items) ? qRes.items : null));
       if (qItems && qItems.length > 0 && messages.length === 0) {
         messages = qItems;
         usedQueryMessages = true;
@@ -13044,7 +13858,7 @@ async function runReadBardWiki(adapter, args) {
 
   let context = null;
   if (bw.getContext) {
-    try { context = await bw.getContext(); } catch {}
+    try { context = await bw.getContext(args.query ? { query: String(args.query) } : undefined); } catch {}
   }
   let docs = [];
   if (bw.getDocuments) {
@@ -13077,10 +13891,13 @@ async function runReadBardWiki(adapter, args) {
     totalDocuments: filtered.length,
     documents: filtered.slice(0, 30).map(d => ({
       id: d?.id || '',
+      type: d?.type || 'other',
+      status: d?.status || 'active',
       title: d?.title || '(무제)',
       grade: d?.grade ?? null,
-      category: d?.category ?? null,
-      tags: Array.isArray(d?.tags) ? d.tags : [],
+      contextMode: d?.contextMode ?? 'auto',
+      contentHash: d?.contentHash || '',
+      aliases: Array.isArray(d?.aliases) ? d.aliases : [],
       preview: clipText(d?.content || '', 240).text,
     })),
   };
@@ -13808,8 +14625,8 @@ const PROPOSAL_KEYS_BY_ACTION = {
   update_group_chat: ['name', 'firstMessage', 'orderByOrder', 'useCharacterLore', 'autoMode', 'characters', 'characterActive', 'characterTalks', 'addMembers', 'removeMembers', 'setMemberActive', 'setMemberTalk'],
   organize_chat_folders: ['operation', 'folderId', 'folderName', 'newName', 'folded', 'chatIndices', 'moveToRoot'],
   manage_extensions: ['operation', 'rule', 'ruleId', 'enabled', 'dryRunSample'],
-  manage_bard_wiki: ['operation', 'documentId', 'id', 'title', 'content', 'grade', 'category', 'tags', 'contextMode', 'mode'],
-  patch_risunest_conversation: ['conversationId', 'patch'],
+  manage_bard_wiki: ['operation', 'documentId', 'id', 'type', 'title', 'aliases', 'markdown', 'content', 'grade', 'category', 'tags', 'contextMode', 'mode'],
+  patch_risunest_conversation: ['characterId', 'conversationId', 'messages', 'chatVariables', 'patch'],
 };
 
 function findUnknownProposalKeys(item) {
@@ -14221,8 +15038,12 @@ function validateProposal(item) {
     }
   }
   if (item.action === 'patch_risunest_conversation') {
-    if (!item.patch || typeof item.patch !== 'object' || Array.isArray(item.patch) || Object.keys(item.patch).length === 0) {
-      return 'patch_risunest_conversation에는 1개 이상의 키를 포함한 patch 객체가 필요합니다.';
+    const hasMessages = Array.isArray(item.messages) && item.messages.length > 0;
+    const hasVars = (Array.isArray(item.chatVariables) && item.chatVariables.length > 0) ||
+      (item.chatVariables && typeof item.chatVariables === 'object' && !Array.isArray(item.chatVariables) && Object.keys(item.chatVariables).length > 0);
+    const hasPatch = item.patch && typeof item.patch === 'object' && !Array.isArray(item.patch) && Object.keys(item.patch).length > 0;
+    if (!hasMessages && !hasVars && !hasPatch) {
+      return 'patch_risunest_conversation에는 1개 이상의 messages 또는 chatVariables 패치가 필요합니다.';
     }
   }
   return null;
@@ -21859,6 +22680,7 @@ const DEFAULT_SETTINGS = {
   includeLoreSummary: true,
   includeConfigSummary: false,
   wideMode: false,
+  autoRestoreExtensions: true,
 };
 
 const ACTION_LABELS = {
@@ -22060,7 +22882,7 @@ class RisuHelperApp {
     const trackerStarted = await this.tracker.start().catch(() => false);
     await this.adapter.probeHostFlavor(this.tracker.rootDoc).catch(() => {});
 
-    // Wire & restore user-approved declarative resident extensions (zero arbitrary JS)
+    // Wire & restore user-approved declarative resident extensions (zero arbitrary JS; respects Safe Mode setting)
     this.adapter.extensionRuntime.onAlert = (alert) => {
       const msg = `[${alert.label}] ${(alert.warnings || []).join(' · ')}`;
       this.showToast(msg);
@@ -22069,24 +22891,35 @@ class RisuHelperApp {
       const res = await executeReadTool(this.adapter, { tool: toolId, args });
       return res.result;
     };
-    await this.adapter.extensionRuntime.load().catch(() => {});
+    await this.adapter.extensionRuntime
+      .load({ autoRestore: this.settings.autoRestoreExtensions !== false })
+      .catch(() => {});
 
     // RisuNest-specific lifecycle & message quick-edit button hooks (strictly capability-gated)
+    // Upstream RisuNest risunestOnChatView / risunestOnGenerationEnd return `{ id: string }` unregistered via `unregisterUIPart(id)`
+    const registerRisunestCleanup = (res) => {
+      if (typeof res === 'function') {
+        this._risunestCleanups.push(res);
+      } else if (res && typeof res.id === 'string' && typeof this.api.unregisterUIPart === 'function') {
+        const partId = res.id;
+        this._risunestCleanups.push(() => this.api.unregisterUIPart(partId));
+      }
+    };
     if (this.adapter.hasCapability('risunestEvents')) {
       if (typeof this.api.risunestOnChatView === 'function') {
         try {
-          const unsub = await this.api.risunestOnChatView(() => {
+          const handle = await this.api.risunestOnChatView(() => {
             if (this.isOpen && !this.busy) this.refreshContextSnapshot().catch(() => {});
           });
-          if (typeof unsub === 'function') this._risunestCleanups.push(unsub);
+          registerRisunestCleanup(handle);
         } catch {}
       }
       if (typeof this.api.risunestOnGenerationEnd === 'function') {
         try {
-          const unsub = await this.api.risunestOnGenerationEnd(() => {
+          const handle = await this.api.risunestOnGenerationEnd(() => {
             if (this.isOpen && !this.busy) this.refreshContextSnapshot().catch(() => {});
           });
-          if (typeof unsub === 'function') this._risunestCleanups.push(unsub);
+          registerRisunestCleanup(handle);
         } catch {}
       }
       if (typeof this.api.registerButton === 'function') {
@@ -24270,6 +25103,21 @@ class RisuHelperApp {
               },
             }),
             '모듈 적용/되돌리기 시 열려 있는 본문 입력칸에 자동 채우기 (반영 후 스페이스→백스페이스 1회 필요)'
+          ),
+          h(doc, 'label', {},
+            h(doc, 'input', {
+              type: 'checkbox',
+              checked: this.settings.autoRestoreExtensions !== false,
+              onchange: async (e) => {
+                this.settings.autoRestoreExtensions = Boolean(e.target.checked);
+                await this.saveSettings();
+                this.showToast(this.settings.autoRestoreExtensions
+                  ? '시작 시 승인된 상주 확장을 자동 복원합니다.'
+                  : '안전 모드: 다음 시작 시 상주 확장을 자동 복원하지 않습니다.');
+                this.render();
+              },
+            }),
+            '시작 시 승인된 상주 확장 자동 복원 (끄면 안전 모드)'
           )
         )
       ),
@@ -24402,9 +25250,9 @@ class RisuHelperApp {
             }
           },
         }, '✕ HUD 닫기'),
-        this.adapter.hasCapability('risunestSaveFile') && typeof this.api?.save === 'function' && h(doc, 'button', {
+        h(doc, 'button', {
           class: 'rh-btn',
-          title: '현재 워크스페이스 진단 리포트를 파일로 저장합니다 (RisuNest)',
+          title: '현재 워크스페이스 진단 리포트를 마크다운 파일로 저장합니다',
           onclick: async () => {
             await this.exportAuditReport();
           },
@@ -25015,7 +25863,7 @@ class RisuHelperApp {
         });
         this.showToast('건강검진 완료: 이상 없음');
       } else {
-        const lines = (r.findings || []).map(f => `- [${f.severity === 'error' ? '오류' : '경고'}] **${f.where}**: ${f.detail}`);
+        const lines = (r.findings || []).map(f => `- [${f.severity === 'error' ? '오류' : '경고'}] **${f.location ?? f.where ?? '항목'}**: ${f.message ?? f.detail ?? ''}`);
         this.messages.push({
           role: 'assistant',
           content:
@@ -25042,10 +25890,28 @@ class RisuHelperApp {
         `- 시각: ${new Date().toISOString()}`,
         `- 오류: ${res.result?.errorCount || 0}건 · 경고: ${res.result?.warnCount || 0}건`,
         '',
-        ...(res.result?.findings || []).map(f => `- [${f.severity}] ${f.where}: ${f.detail}`),
+        ...(res.result?.findings || []).map(f => `- [${f.severity}] ${f.location ?? f.where ?? '항목'}: ${f.message ?? f.detail ?? ''}`),
       ];
-      const bytes = new TextEncoder().encode(lines.join('\n') + '\n');
-      await this.api.save('risuhelper-audit.md', bytes);
+      const text = lines.join('\n') + '\n';
+      const bytes = new TextEncoder().encode(text);
+      const isProxyApi = Boolean(this.adapter?.detectHostFlavor?.()?.isProxy);
+      if (!isProxyApi && typeof this.api?.save === 'function') {
+        await this.api.save('risuhelper-audit.md', bytes);
+      } else if (typeof Blob !== 'undefined' && typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function' && this.doc?.body) {
+        // Works universally across browsers and triggers RisuNest Tauri's SandboxHost download handler
+        const blob = new Blob([bytes], { type: 'text/markdown;charset=utf-8' });
+        const href = URL.createObjectURL(blob);
+        const a = this.doc.createElement('a');
+        a.href = href;
+        a.download = 'risuhelper-audit.md';
+        a.style.display = 'none';
+        this.doc.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => { try { URL.revokeObjectURL(href); } catch {} }, 1000);
+      } else {
+        throw new Error('이 환경에서는 파일 다운로드를 지원하지 않습니다.');
+      }
       this.showToast('진단 리포트를 저장했습니다 (risuhelper-audit.md)');
     } catch (err) {
       this.showToast(err?.message || '진단 리포트 저장 실패');
@@ -25056,18 +25922,34 @@ class RisuHelperApp {
     const doc = this.doc;
     const rt = this.adapter.extensionRuntime;
     const rules = rt ? rt.list() : [];
+    const activeCount = rules.filter(r => r.enabled).length;
     const alerts = rt ? rt.recentAlerts.slice(-5).reverse() : [];
 
     return h(doc, 'div', { class: 'rh-settings rh-ext-panel' },
       h(doc, 'div', { class: 'rh-row', style: 'justify-content:space-between;align-items:center;' },
         h(doc, 'strong', {}, `🧩 선언형 상주 확장 (${rules.length}개)`),
-        h(doc, 'button', {
-          class: 'rh-btn ghost',
-          onclick: () => { this.extensionsPanelOpen = false; this.render(); },
-        }, '닫기')
+        h(doc, 'div', { class: 'rh-row', style: 'gap:6px;' },
+          activeCount > 0 && h(doc, 'button', {
+            class: 'rh-btn danger',
+            title: '실행 중인 모든 상주 확장을 즉시 비활성화하고 호스트 훅을 해제합니다',
+            onclick: async () => {
+              try {
+                const stopped = await rt.disableAll();
+                this.showToast(`모든 상주 확장 ${stopped}개를 즉시 중지했습니다.`);
+                this.render();
+              } catch (err) {
+                this.showToast(err?.message || '일괄 중지 실패');
+              }
+            },
+          }, '모두 중지'),
+          h(doc, 'button', {
+            class: 'rh-btn ghost',
+            onclick: () => { this.extensionsPanelOpen = false; this.render(); },
+          }, '닫기')
+        )
       ),
       h(doc, 'div', { style: 'font-size:11.5px;color:var(--rh-muted);margin:4px 0 8px;' },
-        '임의 JS 실행 없이 사용자가 승인한 선언형 규칙만 동작합니다. 끄거나 플러그인을 언로드하면 호스트 훅이 즉시 해제됩니다.'
+        '임의 JS 실행 없이 사용자가 승인한 선언형 규칙만 동작합니다. 지연·오류 시 자동 중지되며 끄거나 언로드하면 호스트 훅이 즉시 해제됩니다.'
       ),
       rules.length === 0
         ? h(doc, 'div', { style: 'font-size:12px;color:var(--rh-muted);padding:8px 0;' },
@@ -25083,8 +25965,10 @@ class RisuHelperApp {
                   `${r.name} `,
                   h(doc, 'span', { style: 'font-size:11px;color:var(--rh-muted);font-weight:400;' }, `(${r.typeLabel})`)
                 ),
-                h(doc, 'div', { style: 'font-size:11px;color:var(--rh-muted);' },
-                  r.supported ? (r.enabled ? '활성 · 호스트 훅 연결됨' : '비활성') : '현재 호스트 미지원'
+                h(doc, 'div', { style: `font-size:11px;color:${r.trippedReason ? 'var(--rh-danger, #e05252)' : 'var(--rh-muted)'};` },
+                  r.trippedReason
+                    ? `⚠️ ${r.trippedReason}`
+                    : (r.supported ? (r.enabled ? '활성 · 호스트 훅 연결됨' : '비활성') : '현재 호스트 미지원')
                 )
               ),
               h(doc, 'div', { class: 'rh-row', style: 'gap:4px;' },
@@ -27335,7 +28219,8 @@ const EVAL_SCENARIOS = [
       const issues = [];
       if (!proposals.some(p => p.proposal?.action === 'update_theme')) issues.push('update_theme 제안 누락');
       if (state.db.colorSchemeName !== 'dark') issues.push(`colorSchemeName 미반영: ${state.db.colorSchemeName}`);
-      if (state.hostMeta?.textTheme?.FontColorStandard !== '#e6edf3') issues.push('customTextTheme 미반영');
+      const fontColor = state.hostMeta?.textTheme?.customTheme?.FontColorStandard ?? state.hostMeta?.textTheme?.FontColorStandard;
+      if (fontColor !== '#e6edf3') issues.push('customTextTheme 미반영');
       return issues;
     },
   },
@@ -27824,7 +28709,7 @@ const EVAL_SCENARIOS = [
     check({ proposals, state }) {
       const issues = [];
       if (!proposals.some(p => p.proposal?.action === 'manage_extensions')) issues.push('manage_extensions 제안 누락');
-      if ((state.hostMeta?.bodyIntercepters?.length || 0) === 0) issues.push('registerBodyIntercepter 미등록');
+      if ((state.hostMeta?.bodyIntercepters?.size || 0) === 0) issues.push('registerBodyIntercepter 미등록');
       return issues;
     },
   },
@@ -27862,7 +28747,7 @@ const EVAL_SCENARIOS = [
     kind: 'positive',
     category: 'M3 · RisuBard BardWiki',
     title: 'RisuBard BardWiki 서사 문서 저장 (manage_bard_wiki)',
-    prompt: '바드 위키(BardWiki)에 "항구 도시 공방" 문서를 새로 저장하고 등급을 A로 설정해 줘. 본문은 "아리아가 연금술을 연구하는 최상층 공방이다."로 넣어 줘.',
+    prompt: '바드 위키(BardWiki)에 "항구 도시 공방" 문서를 새로 저장하고 등급을 A(7)로 설정해 줘. 본문은 "아리아가 연금술을 연구하는 최상층 공방이다."로 넣어 줘.',
     expectMode: 'apply',
     setup() {
       const character = baseCharacter();
@@ -27876,16 +28761,16 @@ const EVAL_SCENARIOS = [
     goldenReply: 'RisuBard BardWiki에 새 문서를 저장하는 제안입니다.\n\n' + proposalFence({
       action: 'manage_bard_wiki',
       operation: 'save_document',
-      documentId: 'wiki-workshop',
+      type: 'location',
       title: '항구 도시 공방',
-      content: '아리아가 연금술을 연구하는 최상층 공방이다.',
-      grade: 'A',
+      markdown: '아리아가 연금술을 연구하는 최상층 공방이다.',
+      grade: 7,
     }),
     check({ proposals, state }) {
       const issues = [];
       if (!proposals.some(p => p.proposal?.action === 'manage_bard_wiki')) issues.push('manage_bard_wiki 제안 누락');
       const doc = (state.hostMeta?.bardWikiDocs || []).find(d => d.title === '항구 도시 공방');
-      if (!doc || doc.grade !== 'A') issues.push('BardWiki 문서 미저장');
+      if (!doc || doc.grade !== 7) issues.push(`BardWiki 문서 미저장 또는 등급 불일치: ${doc?.grade}`);
       return issues;
     },
   },
@@ -27897,7 +28782,7 @@ const EVAL_SCENARIOS = [
     kind: 'positive',
     category: 'M3 · RisuBard BardWiki',
     title: 'RisuBard BardWiki 문서 등급 변경 (manage_bard_wiki)',
-    prompt: '바드 위키 문서 doc-1의 등급을 S로 올려 줘.',
+    prompt: '바드 위키 문서 doc-1의 등급을 S(8)로 올려 줘.',
     expectMode: 'apply',
     setup() {
       const character = baseCharacter();
@@ -27905,21 +28790,21 @@ const EVAL_SCENARIOS = [
         hostFlavor: 'RisuBard',
         character,
         db: baseDb(),
-        bardWikiDocs: [{ id: 'doc-1', title: '왕국 연대기', content: '고대 왕국의 역사.', grade: 'B' }],
+        bardWikiDocs: [{ id: 'doc-1', type: 'event', status: 'active', title: '왕국 연대기', content: '고대 왕국의 역사.', grade: 6, contextMode: 'auto', contentHash: 'hash-doc-1-v1' }],
         context: { screen: 'chat', targetKind: 'general', freeTalk: true, labelText: '자유대화', screenHint: '채팅 화면' },
       };
     },
-    goldenReply: 'BardWiki 문서 `doc-1`의 등급을 `S`로 변경하는 제안입니다.\n\n' + proposalFence({
+    goldenReply: 'BardWiki 문서 `doc-1`의 등급을 `S`(8)로 변경하는 제안입니다.\n\n' + proposalFence({
       action: 'manage_bard_wiki',
       operation: 'set_grade',
       documentId: 'doc-1',
-      grade: 'S',
+      grade: 8,
     }),
     check({ proposals, state }) {
       const issues = [];
       if (!proposals.some(p => p.proposal?.action === 'manage_bard_wiki')) issues.push('manage_bard_wiki 제안 누락');
       const doc = (state.hostMeta?.bardWikiDocs || []).find(d => d.id === 'doc-1');
-      if (doc?.grade !== 'S') issues.push(`BardWiki 등급 미변경: ${doc?.grade}`);
+      if (doc?.grade !== 8) issues.push(`BardWiki 등급 미변경: ${doc?.grade}`);
       return issues;
     },
   },
@@ -27951,70 +28836,87 @@ const EVAL_SCENARIOS = [
     },
   },
 
-  // 69. risunest_native positive 1: patch_risunest_conversation (title + note)
+  // 69. risunest_native positive 1: patch_risunest_conversation (chatVariables)
   {
     id: 'risunest-patch-conversation-note',
     skillId: 'risunest_native',
     kind: 'positive',
     category: 'M3 · RisuNest 네이티브 패치',
-    title: 'RisuNest 네이티브 대화 제목·노트 정밀 패치 (patch_risunest_conversation)',
-    prompt: '리스네스트 네이티브 패치로 대화 conv-1의 제목(name)을 "2부 항구 편"으로, 작가의 노트(note)를 "서정적인 문체 유지"로 패치해 줘.',
+    title: 'RisuNest 네이티브 대화 채팅 변수 정밀 패치 (patch_risunest_conversation)',
+    prompt: '리스네스트 네이티브 패치로 현재 대화(conv-1)의 채팅 변수 hp를 95로, location을 "항구"로 정밀 패치해 줘.',
     expectMode: 'apply',
     setup() {
       const character = baseCharacter();
+      character.chats[0].id = 'conv-1';
       return {
         hostFlavor: 'RisuNest',
         character,
         db: baseDb(),
-        risunestConversations: { 'conv-1': { name: '1부 시작', note: '' } },
+        risunestConversations: {
+          'conv-1': {
+            revision: 1,
+            chatVariables: { hp: 80, location: '숲' },
+            messages: [{ role: 'user', data: '안녕', chatId: 'm-1' }],
+          },
+        },
         context: { screen: 'chat', targetKind: 'general', freeTalk: true, labelText: '자유대화', screenHint: '채팅 화면' },
       };
     },
-    goldenReply: 'RisuNest `risunestPatchConversation`으로 대화 제목과 작가의 노트를 정밀 패치합니다.\n\n' + proposalFence({
+    goldenReply: 'RisuNest `risunestPatchConversation`으로 채팅 변수 `hp`, `location`을 원자적으로 패치합니다.\n\n' + proposalFence({
       action: 'patch_risunest_conversation',
-      title: 'RisuNest 대화 제목·노트 패치',
+      title: 'RisuNest 채팅 변수 패치',
       conversationId: 'conv-1',
-      patch: { name: '2부 항구 편', note: '서정적인 문체 유지' },
+      chatVariables: [
+        { key: 'hp', value: 95 },
+        { key: 'location', value: '항구' },
+      ],
     }),
     check({ proposals, state }) {
       const issues = [];
       if (!proposals.some(p => p.proposal?.action === 'patch_risunest_conversation')) issues.push('patch_risunest_conversation 제안 누락');
       const conv = state.hostMeta?.risunestConversations?.['conv-1'];
-      if (conv?.name !== '2부 항구 편' || conv?.note !== '서정적인 문체 유지') issues.push('RisuNest 대화 패치 미반영');
+      if (conv?.chatVariables?.hp !== 95 || conv?.chatVariables?.location !== '항구') issues.push('RisuNest 채팅 변수 패치 미반영');
       return issues;
     },
   },
 
-  // 70. risunest_native positive 2: patch_risunest_conversation (supaMemoryData)
+  // 70. risunest_native positive 2: patch_risunest_conversation (messages)
   {
     id: 'risunest-patch-conversation-memory',
     skillId: 'risunest_native',
     kind: 'positive',
     category: 'M3 · RisuNest 네이티브 패치',
-    title: 'RisuNest 네이티브 대화 요약 메모리 패치 (patch_risunest_conversation)',
-    prompt: '리스네스트 네이티브 패치로 대화 conv-1의 supaMemoryData를 "아리아와 동맹을 맺었다."로 업데이트해 줘.',
+    title: 'RisuNest 네이티브 대화 메시지 정밀 패치 (patch_risunest_conversation)',
+    prompt: '리스네스트 네이티브 패치로 대화 conv-1의 0번 메시지 본문을 "아리아와 동맹을 맺었다."로 업데이트해 줘.',
     expectMode: 'apply',
     setup() {
       const character = baseCharacter();
+      character.chats[0].id = 'conv-1';
       return {
         hostFlavor: 'RisuNest',
         character,
         db: baseDb(),
-        risunestConversations: { 'conv-1': { name: '1부 시작', supaMemoryData: '' } },
+        risunestConversations: {
+          'conv-1': {
+            revision: 1,
+            chatVariables: {},
+            messages: [{ role: 'char', data: '초기 메시지', chatId: 'm-0' }],
+          },
+        },
         context: { screen: 'chat', targetKind: 'general', freeTalk: true, labelText: '자유대화', screenHint: '채팅 화면' },
       };
     },
-    goldenReply: 'RisuNest 대화 `conv-1`의 `supaMemoryData`를 정밀 패치합니다.\n\n' + proposalFence({
+    goldenReply: 'RisuNest 대화 `conv-1`의 0번 메시지를 정밀 패치합니다.\n\n' + proposalFence({
       action: 'patch_risunest_conversation',
-      title: 'RisuNest 대화 메모리 패치',
+      title: 'RisuNest 메시지 정밀 패치',
       conversationId: 'conv-1',
-      patch: { supaMemoryData: '아리아와 동맹을 맺었다.' },
+      messages: [{ index: 0, set: { data: '아리아와 동맹을 맺었다.' } }],
     }),
     check({ proposals, state }) {
       const issues = [];
       if (!proposals.some(p => p.proposal?.action === 'patch_risunest_conversation')) issues.push('patch_risunest_conversation 제안 누락');
       const conv = state.hostMeta?.risunestConversations?.['conv-1'];
-      if (conv?.supaMemoryData !== '아리아와 동맹을 맺었다.') issues.push('RisuNest supaMemoryData 패치 미반영');
+      if (conv?.messages?.[0]?.data !== '아리아와 동맹을 맺었다.') issues.push('RisuNest 메시지 패치 미반영');
       return issues;
     },
   },
@@ -28094,21 +28996,49 @@ const deepClone = (v) => (typeof structuredClone === 'function' ? structuredClon
 
 function createScenarioHost(setupRes, callModelFn) {
   const hostFlavor = setupRes.hostFlavor || 'RisuAI';
+  const COLOR_KEYS = ['bgcolor', 'darkbg', 'borderc', 'selected', 'draculared', 'textcolor', 'textcolor2', 'darkBorderc', 'darkbutton', 'type'];
+  const TEXT_KEYS = ['FontColorStandard', 'FontColorBold', 'FontColorItalic', 'FontColorItalicBold', 'FontColorQuote1', 'FontColorQuote2'];
+  let nextBiId = 1;
+  let nextHashSeq = 2;
+
   const hostMeta = {
-    colorScheme: { bgcolor: '#1e1e2e', textcolor: '#cdd6f4', type: 'dark' },
-    textTheme: { FontColorStandard: '#cdd6f4', FontColorItalic: '#a6adc8', name: 'standard' },
+    colorScheme: {
+      name: 'dark',
+      scheme: {
+        bgcolor: '#1e1e2e',
+        darkbg: '#181825',
+        borderc: '#585b70',
+        selected: '#313244',
+        draculared: '#f38ba8',
+        textcolor: '#cdd6f4',
+        textcolor2: '#a6adc8',
+        darkBorderc: '#45475a',
+        darkbutton: '#313244',
+        type: 'dark',
+      },
+    },
+    textTheme: {
+      name: 'standard',
+      customTheme: {
+        FontColorStandard: '#cdd6f4',
+        FontColorBold: '#ffffff',
+        FontColorItalic: '#a6adc8',
+        FontColorItalicBold: '#bac2de',
+        FontColorQuote1: '#89dceb',
+        FontColorQuote2: '#fab387',
+      },
+    },
     chatPanelHtml: null,
     savedAssets: [],
     charOrderChecked: false,
     scriptHandlers: [],
     replacers: [],
     chatListeners: [],
-    bodyIntercepters: [],
+    bodyIntercepters: new Map(),
     mcps: new Map(),
     ttsPreInstalled: false,
-    ttsPostInstalled: false,
     bardWikiDocs: deepClone(setupRes.bardWikiDocs || []),
-    bardWikiContext: { mode: 'auto' },
+    bardWikiContext: { content: '컨텍스트', sources: [] },
     risunestConversations: deepClone(setupRes.risunestConversations || {}),
   };
   const state = {
@@ -28131,15 +29061,32 @@ function createScenarioHost(setupRes, callModelFn) {
       return { app: { id: hostFlavor.toLowerCase(), version: '1.0.0' }, platform: 'eval' };
     },
     async getColorScheme() { return deepClone(hostMeta.colorScheme); },
-    async changeColorScheme(name) { state.db.colorSchemeName = String(name); },
-    async setColorScheme(scheme) { hostMeta.colorScheme = deepClone(scheme); },
+    async changeColorScheme(name) { state.db.colorSchemeName = String(name); hostMeta.colorScheme.name = String(name); },
+    async setColorScheme(scheme) {
+      for (const k of COLOR_KEYS) {
+        if (typeof scheme?.[k] !== 'string') throw new Error(`Color scheme missing key: ${k}`);
+      }
+      state.db.colorSchemeName = 'custom';
+      hostMeta.colorScheme = { name: 'custom', scheme: deepClone(scheme) };
+    },
     async getTextTheme() { return deepClone(hostMeta.textTheme); },
-    async changeTextTheme(name) { state.db.textTheme = String(name); },
-    async setCustomTextTheme(theme) { hostMeta.textTheme = deepClone(theme); },
-    async setChatPanel(html) { hostMeta.chatPanelHtml = html ? String(html) : null; },
-    async saveAsset(bytes, customId, fileName) {
-      const id = customId || `asset_${hostMeta.savedAssets.length + 1}_${fileName || 'file'}`;
-      hostMeta.savedAssets.push({ id, fileName, bytes: bytes?.length || 0 });
+    async changeTextTheme(name) {
+      if (!['standard', 'highcontrast'].includes(name)) throw new Error(`Invalid textTheme: ${name}`);
+      state.db.textTheme = String(name);
+      hostMeta.textTheme.name = String(name);
+    },
+    async setCustomTextTheme(theme) {
+      for (const k of TEXT_KEYS) {
+        if (typeof theme?.[k] !== 'string') throw new Error(`CustomTextTheme missing key: ${k}`);
+      }
+      state.db.textTheme = 'custom';
+      hostMeta.textTheme = { name: 'custom', customTheme: deepClone(theme) };
+    },
+    async setChatPanel(html) { hostMeta.chatPanelHtml = html ? String(html) : null; return { id: 'risuhelper:default' }; },
+    async saveAsset(bytes) {
+      if (!(bytes instanceof Uint8Array)) throw new Error('saveAsset requires Uint8Array');
+      const id = `asset_${hostMeta.savedAssets.length + 1}`;
+      hostMeta.savedAssets.push({ id, bytes: bytes.length });
       return id;
     },
     async checkCharOrder() {
@@ -28151,64 +29098,131 @@ function createScenarioHost(setupRes, callModelFn) {
       const idx = hostMeta.scriptHandlers.findIndex(x => x.mode === mode && x.fn === fn);
       if (idx >= 0) hostMeta.scriptHandlers.splice(idx, 1);
     },
-    async addRisuReplacer(stage, fn) { hostMeta.replacers.push({ stage, fn }); },
+    async addRisuReplacer(stage, fn) {
+      if (stage !== 'beforeRequest' && stage !== 'afterRequest') throw new Error(`Invalid replacer stage: ${stage}`);
+      hostMeta.replacers.push({ stage, fn });
+    },
     async removeRisuReplacer(stage, fn) {
       const idx = hostMeta.replacers.findIndex(x => x.stage === stage && x.fn === fn);
       if (idx >= 0) hostMeta.replacers.splice(idx, 1);
     },
-    async addRisuChatListener(fn) { hostMeta.chatListeners.push(fn); },
-    async removeRisuChatListener(fn) {
-      const idx = hostMeta.chatListeners.indexOf(fn);
+    async addRisuChatListener(mode, fn) {
+      if (mode !== 'output') throw new Error(`Invalid chat listener mode: ${mode}`);
+      hostMeta.chatListeners.push({ mode, fn });
+    },
+    async removeRisuChatListener(mode, fn) {
+      if (mode !== 'output') throw new Error(`Invalid chat listener mode: ${mode}`);
+      const idx = hostMeta.chatListeners.findIndex(x => x.mode === mode && x.fn === fn);
       if (idx >= 0) hostMeta.chatListeners.splice(idx, 1);
     },
-    async registerBodyIntercepter(fn) { hostMeta.bodyIntercepters.push(fn); },
-    async unregisterBodyIntercepter(fn) {
-      const idx = hostMeta.bodyIntercepters.indexOf(fn);
-      if (idx >= 0) hostMeta.bodyIntercepters.splice(idx, 1);
+    async registerBodyIntercepter(fn) {
+      const id = `eval_bi_${nextBiId++}`;
+      hostMeta.bodyIntercepters.set(id, fn);
+      return { id };
     },
-    async registerMCP(cfg, getTools, callTool) { hostMeta.mcps.set(cfg.identifier, { cfg, getTools, callTool }); },
+    async unregisterBodyIntercepter(id) {
+      if (typeof id !== 'string') return;
+      hostMeta.bodyIntercepters.delete(id);
+    },
+    async registerMCP(cfg, getTools, callTool) {
+      if (!String(cfg?.identifier || '').startsWith('plugin:')) throw new Error('MCP identifier must start with plugin:');
+      hostMeta.mcps.set(cfg.identifier, { cfg, getTools, callTool });
+    },
     async unregisterMCP(id) { hostMeta.mcps.delete(id); },
     async addTTSPreprocessor() { hostMeta.ttsPreInstalled = true; },
-    async addTTSPostprocessor() { hostMeta.ttsPostInstalled = true; },
     async addPluginChannelListener() { return () => {}; },
     async postPluginChannelMessage() {},
     ...(hostFlavor === 'RisuAI' ? {
-      async createInlay(payload) { return `inlay_${payload?.name || 'item'}`; },
+      async createInlay(data, options = {}) {
+        if (!(data instanceof Uint8Array) && typeof data !== 'string') throw new Error('createInlay requires Uint8Array or data URI');
+        return `inlay_${options?.name || 'item'}`;
+      },
     } : {}),
     ...(hostFlavor === 'RisuBard' ? {
       bardWiki: {
         async getContext() { return deepClone(hostMeta.bardWikiContext); },
         async getDocuments() { return deepClone(hostMeta.bardWikiDocs); },
         async saveDocument(doc) {
-          const id = doc.id || `bw_${hostMeta.bardWikiDocs.length + 1}`;
-          const next = { ...deepClone(doc), id };
+          if (!doc || typeof doc.markdown !== 'string' || typeof doc.title !== 'string') {
+            throw new Error('saveDocument requires { type, title, markdown }');
+          }
+          const id = doc.documentId || `bw_${hostMeta.bardWikiDocs.length + 1}`;
+          const existing = hostMeta.bardWikiDocs.find(d => d.id === id);
+          if (existing && existing.contentHash !== doc.expectedContentHash) return null;
+          const next = {
+            id,
+            type: doc.type || existing?.type || 'other',
+            status: 'active',
+            title: doc.title,
+            content: doc.markdown,
+            contextMode: existing?.contextMode || 'auto',
+            grade: existing?.grade ?? null,
+            contentHash: `hash-${id}-v${nextHashSeq++}`,
+          };
           const idx = hostMeta.bardWikiDocs.findIndex(d => d.id === id);
           if (idx >= 0) hostMeta.bardWikiDocs[idx] = next;
           else hostMeta.bardWikiDocs.push(next);
-          return next;
+          return deepClone(next);
         },
-        async setGrade(id, grade) {
-          const doc = hostMeta.bardWikiDocs.find(d => d.id === id);
-          if (doc) doc.grade = String(grade);
+        async setGrade(input) {
+          if (!input || typeof input !== 'object' || !input.documentId) throw new Error('setGrade requires object input');
+          const doc = hostMeta.bardWikiDocs.find(d => d.id === input.documentId);
+          if (!doc || doc.contentHash !== input.expectedContentHash) return null;
+          doc.grade = input.grade;
+          doc.contentHash = `hash-${doc.id}-v${nextHashSeq++}`;
+          return deepClone(doc);
         },
-        async setContextMode(mode) { hostMeta.bardWikiContext.mode = String(mode); },
+        async setContextMode(input) {
+          if (!input || typeof input !== 'object' || !input.documentId) throw new Error('setContextMode requires object input');
+          const doc = hostMeta.bardWikiDocs.find(d => d.id === input.documentId);
+          if (!doc || doc.contentHash !== input.expectedContentHash) return null;
+          doc.contextMode = input.contextMode;
+          doc.contentHash = `hash-${doc.id}-v${nextHashSeq++}`;
+          return deepClone(doc);
+        },
         async trashDocument(id) {
           const idx = hostMeta.bardWikiDocs.findIndex(d => d.id === id);
-          if (idx >= 0) hostMeta.bardWikiDocs.splice(idx, 1);
+          if (idx < 0) return null;
+          hostMeta.bardWikiDocs.splice(idx, 1);
+          return { id, trashed: true };
         },
       },
     } : {}),
     ...(hostFlavor === 'RisuNest' ? {
-      async queryConversations() { return { items: [], total: 0, hasMore: false }; },
-      async queryConversationMessages() { return { items: [], total: 0 }; },
-      async risunestReadConversationContext(ref) {
-        const id = ref?.conversationId || 'conv-1';
-        return deepClone(hostMeta.risunestConversations[id] || {});
+      async queryConversations() { return { revision: 1, items: [] }; },
+      async queryConversationMessages() { return { revision: 1, messages: [], startIndex: 0, endIndex: 0, totalMessages: 0, hasMoreBefore: false, hasMoreAfter: false }; },
+      async risunestReadConversationContext(input = {}) {
+        const id = input.conversationId || 'conv-1';
+        const conv = hostMeta.risunestConversations[id] || { revision: 1, chatVariables: {}, messages: [] };
+        return {
+          revision: conv.revision || 1,
+          characterId: input.characterId || state.character.chaId || 'eval-char-1',
+          conversationId: id,
+          characterIndex: 0,
+          chatIndex: 0,
+          selected: true,
+          messageCount: (conv.messages || []).length,
+          conversation: { id },
+          chatVariables: deepClone(conv.chatVariables || {}),
+          messages: { startIndex: 0, messages: deepClone(conv.messages || []) },
+        };
       },
-      async risunestPatchConversation(ref, patch) {
-        const id = ref?.conversationId || 'conv-1';
-        const cur = hostMeta.risunestConversations[id] || {};
-        hostMeta.risunestConversations[id] = { ...cur, ...deepClone(patch) };
+      async risunestPatchConversation(request) {
+        if (!request || typeof request !== 'object' || !request.characterId || !request.conversationId || !request.mutationId) {
+          throw new Error('risunestPatchConversation requires ConversationPatchRequest');
+        }
+        const id = request.conversationId;
+        const conv = hostMeta.risunestConversations[id] || (hostMeta.risunestConversations[id] = { revision: 1, chatVariables: {}, messages: [] });
+        for (const m of request.messages || []) {
+          if (!conv.messages[m.index]) return { status: 'conflict', conflict: { target: 'message', reason: 'not-found' }, revision: conv.revision };
+          Object.assign(conv.messages[m.index], deepClone(m.set));
+        }
+        for (const v of request.chatVariables || []) {
+          if (v.value === null) delete conv.chatVariables[v.key];
+          else conv.chatVariables[v.key] = v.value;
+        }
+        conv.revision = (conv.revision || 1) + 1;
+        return { status: 'applied', revision: conv.revision };
       },
       async risunestListHostTools() {
         return [{ name: 'search_notes', description: 'Read-only note search', readOnly: true }];

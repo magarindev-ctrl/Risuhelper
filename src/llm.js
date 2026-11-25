@@ -552,8 +552,8 @@ const PROPOSAL_KEYS_BY_ACTION = {
   update_group_chat: ['name', 'firstMessage', 'orderByOrder', 'useCharacterLore', 'autoMode', 'characters', 'characterActive', 'characterTalks', 'addMembers', 'removeMembers', 'setMemberActive', 'setMemberTalk'],
   organize_chat_folders: ['operation', 'folderId', 'folderName', 'newName', 'folded', 'chatIndices', 'moveToRoot'],
   manage_extensions: ['operation', 'rule', 'ruleId', 'enabled', 'dryRunSample'],
-  manage_bard_wiki: ['operation', 'documentId', 'id', 'title', 'content', 'grade', 'category', 'tags', 'contextMode', 'mode'],
-  patch_risunest_conversation: ['conversationId', 'patch'],
+  manage_bard_wiki: ['operation', 'documentId', 'id', 'type', 'title', 'aliases', 'markdown', 'content', 'grade', 'category', 'tags', 'contextMode', 'mode'],
+  patch_risunest_conversation: ['characterId', 'conversationId', 'messages', 'chatVariables', 'patch'],
 };
 
 function findUnknownProposalKeys(item) {
@@ -965,8 +965,12 @@ function validateProposal(item) {
     }
   }
   if (item.action === 'patch_risunest_conversation') {
-    if (!item.patch || typeof item.patch !== 'object' || Array.isArray(item.patch) || Object.keys(item.patch).length === 0) {
-      return 'patch_risunest_conversation에는 1개 이상의 키를 포함한 patch 객체가 필요합니다.';
+    const hasMessages = Array.isArray(item.messages) && item.messages.length > 0;
+    const hasVars = (Array.isArray(item.chatVariables) && item.chatVariables.length > 0) ||
+      (item.chatVariables && typeof item.chatVariables === 'object' && !Array.isArray(item.chatVariables) && Object.keys(item.chatVariables).length > 0);
+    const hasPatch = item.patch && typeof item.patch === 'object' && !Array.isArray(item.patch) && Object.keys(item.patch).length > 0;
+    if (!hasMessages && !hasVars && !hasPatch) {
+      return 'patch_risunest_conversation에는 1개 이상의 messages 또는 chatVariables 패치가 필요합니다.';
     }
   }
   return null;

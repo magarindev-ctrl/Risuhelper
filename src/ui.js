@@ -35,6 +35,7 @@ const DEFAULT_SETTINGS = {
   includeLoreSummary: true,
   includeConfigSummary: false,
   wideMode: false,
+  autoRestoreExtensions: true,
 };
 
 const ACTION_LABELS = {
@@ -236,7 +237,7 @@ class RisuHelperApp {
     const trackerStarted = await this.tracker.start().catch(() => false);
     await this.adapter.probeHostFlavor(this.tracker.rootDoc).catch(() => {});
 
-    // Wire & restore user-approved declarative resident extensions (zero arbitrary JS)
+    // Wire & restore user-approved declarative resident extensions (zero arbitrary JS; respects Safe Mode setting)
     this.adapter.extensionRuntime.onAlert = (alert) => {
       const msg = `[${alert.label}] ${(alert.warnings || []).join(' · ')}`;
       this.showToast(msg);
@@ -245,24 +246,35 @@ class RisuHelperApp {
       const res = await executeReadTool(this.adapter, { tool: toolId, args });
       return res.result;
     };
-    await this.adapter.extensionRuntime.load().catch(() => {});
+    await this.adapter.extensionRuntime
+      .load({ autoRestore: this.settings.autoRestoreExtensions !== false })
+      .catch(() => {});
 
     // RisuNest-specific lifecycle & message quick-edit button hooks (strictly capability-gated)
+    // Upstream RisuNest risunestOnChatView / risunestOnGenerationEnd return `{ id: string }` unregistered via `unregisterUIPart(id)`
+    const registerRisunestCleanup = (res) => {
+      if (typeof res === 'function') {
+        this._risunestCleanups.push(res);
+      } else if (res && typeof res.id === 'string' && typeof this.api.unregisterUIPart === 'function') {
+        const partId = res.id;
+        this._risunestCleanups.push(() => this.api.unregisterUIPart(partId));
+      }
+    };
     if (this.adapter.hasCapability('risunestEvents')) {
       if (typeof this.api.risunestOnChatView === 'function') {
         try {
-          const unsub = await this.api.risunestOnChatView(() => {
+          const handle = await this.api.risunestOnChatView(() => {
             if (this.isOpen && !this.busy) this.refreshContextSnapshot().catch(() => {});
           });
-          if (typeof unsub === 'function') this._risunestCleanups.push(unsub);
+          registerRisunestCleanup(handle);
         } catch {}
       }
       if (typeof this.api.risunestOnGenerationEnd === 'function') {
         try {
-          const unsub = await this.api.risunestOnGenerationEnd(() => {
+          const handle = await this.api.risunestOnGenerationEnd(() => {
             if (this.isOpen && !this.busy) this.refreshContextSnapshot().catch(() => {});
           });
-          if (typeof unsub === 'function') this._risunestCleanups.push(unsub);
+          registerRisunestCleanup(handle);
         } catch {}
       }
       if (typeof this.api.registerButton === 'function') {
@@ -2446,6 +2458,21 @@ class RisuHelperApp {
               },
             }),
             '모듈 적용/되돌리기 시 열려 있는 본문 입력칸에 자동 채우기 (반영 후 스페이스→백스페이스 1회 필요)'
+          ),
+          h(doc, 'label', {},
+            h(doc, 'input', {
+              type: 'checkbox',
+              checked: this.settings.autoRestoreExtensions !== false,
+              onchange: async (e) => {
+                this.settings.autoRestoreExtensions = Boolean(e.target.checked);
+                await this.saveSettings();
+                this.showToast(this.settings.autoRestoreExtensions
+                  ? '시작 시 승인된 상주 확장을 자동 복원합니다.'
+                  : '안전 모드: 다음 시작 시 상주 확장을 자동 복원하지 않습니다.');
+                this.render();
+              },
+            }),
+            '시작 시 승인된 상주 확장 자동 복원 (끄면 안전 모드)'
           )
         )
       ),
@@ -2578,9 +2605,9 @@ class RisuHelperApp {
             }
           },
         }, '✕ HUD 닫기'),
-        this.adapter.hasCapability('risunestSaveFile') && typeof this.api?.save === 'function' && h(doc, 'button', {
+        h(doc, 'button', {
           class: 'rh-btn',
-          title: '현재 워크스페이스 진단 리포트를 파일로 저장합니다 (RisuNest)',
+          title: '현재 워크스페이스 진단 리포트를 마크다운 파일로 저장합니다',
           onclick: async () => {
             await this.exportAuditReport();
           },
@@ -3191,7 +3218,7 @@ class RisuHelperApp {
         });
         this.showToast('건강검진 완료: 이상 없음');
       } else {
-        const lines = (r.findings || []).map(f => `- [${f.severity === 'error' ? '오류' : '경고'}] **${f.where}**: ${f.detail}`);
+        const lines = (r.findings || []).map(f => `- [${f.severity === 'error' ? '오류' : '경고'}] **${f.location ?? f.where ?? '항목'}**: ${f.message ?? f.detail ?? ''}`);
         this.messages.push({
           role: 'assistant',
           content:
@@ -3218,10 +3245,28 @@ class RisuHelperApp {
         `- 시각: ${new Date().toISOString()}`,
         `- 오류: ${res.result?.errorCount || 0}건 · 경고: ${res.result?.warnCount || 0}건`,
         '',
-        ...(res.result?.findings || []).map(f => `- [${f.severity}] ${f.where}: ${f.detail}`),
+        ...(res.result?.findings || []).map(f => `- [${f.severity}] ${f.location ?? f.where ?? '항목'}: ${f.message ?? f.detail ?? ''}`),
       ];
-      const bytes = new TextEncoder().encode(lines.join('\n') + '\n');
-      await this.api.save('risuhelper-audit.md', bytes);
+      const text = lines.join('\n') + '\n';
+      const bytes = new TextEncoder().encode(text);
+      const isProxyApi = Boolean(this.adapter?.detectHostFlavor?.()?.isProxy);
+      if (!isProxyApi && typeof this.api?.save === 'function') {
+        await this.api.save('risuhelper-audit.md', bytes);
+      } else if (typeof Blob !== 'undefined' && typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function' && this.doc?.body) {
+        // Works universally across browsers and triggers RisuNest Tauri's SandboxHost download handler
+        const blob = new Blob([bytes], { type: 'text/markdown;charset=utf-8' });
+        const href = URL.createObjectURL(blob);
+        const a = this.doc.createElement('a');
+        a.href = href;
+        a.download = 'risuhelper-audit.md';
+        a.style.display = 'none';
+        this.doc.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => { try { URL.revokeObjectURL(href); } catch {} }, 1000);
+      } else {
+        throw new Error('이 환경에서는 파일 다운로드를 지원하지 않습니다.');
+      }
       this.showToast('진단 리포트를 저장했습니다 (risuhelper-audit.md)');
     } catch (err) {
       this.showToast(err?.message || '진단 리포트 저장 실패');
@@ -3232,18 +3277,34 @@ class RisuHelperApp {
     const doc = this.doc;
     const rt = this.adapter.extensionRuntime;
     const rules = rt ? rt.list() : [];
+    const activeCount = rules.filter(r => r.enabled).length;
     const alerts = rt ? rt.recentAlerts.slice(-5).reverse() : [];
 
     return h(doc, 'div', { class: 'rh-settings rh-ext-panel' },
       h(doc, 'div', { class: 'rh-row', style: 'justify-content:space-between;align-items:center;' },
         h(doc, 'strong', {}, `🧩 선언형 상주 확장 (${rules.length}개)`),
-        h(doc, 'button', {
-          class: 'rh-btn ghost',
-          onclick: () => { this.extensionsPanelOpen = false; this.render(); },
-        }, '닫기')
+        h(doc, 'div', { class: 'rh-row', style: 'gap:6px;' },
+          activeCount > 0 && h(doc, 'button', {
+            class: 'rh-btn danger',
+            title: '실행 중인 모든 상주 확장을 즉시 비활성화하고 호스트 훅을 해제합니다',
+            onclick: async () => {
+              try {
+                const stopped = await rt.disableAll();
+                this.showToast(`모든 상주 확장 ${stopped}개를 즉시 중지했습니다.`);
+                this.render();
+              } catch (err) {
+                this.showToast(err?.message || '일괄 중지 실패');
+              }
+            },
+          }, '모두 중지'),
+          h(doc, 'button', {
+            class: 'rh-btn ghost',
+            onclick: () => { this.extensionsPanelOpen = false; this.render(); },
+          }, '닫기')
+        )
       ),
       h(doc, 'div', { style: 'font-size:11.5px;color:var(--rh-muted);margin:4px 0 8px;' },
-        '임의 JS 실행 없이 사용자가 승인한 선언형 규칙만 동작합니다. 끄거나 플러그인을 언로드하면 호스트 훅이 즉시 해제됩니다.'
+        '임의 JS 실행 없이 사용자가 승인한 선언형 규칙만 동작합니다. 지연·오류 시 자동 중지되며 끄거나 언로드하면 호스트 훅이 즉시 해제됩니다.'
       ),
       rules.length === 0
         ? h(doc, 'div', { style: 'font-size:12px;color:var(--rh-muted);padding:8px 0;' },
@@ -3259,8 +3320,10 @@ class RisuHelperApp {
                   `${r.name} `,
                   h(doc, 'span', { style: 'font-size:11px;color:var(--rh-muted);font-weight:400;' }, `(${r.typeLabel})`)
                 ),
-                h(doc, 'div', { style: 'font-size:11px;color:var(--rh-muted);' },
-                  r.supported ? (r.enabled ? '활성 · 호스트 훅 연결됨' : '비활성') : '현재 호스트 미지원'
+                h(doc, 'div', { style: `font-size:11px;color:${r.trippedReason ? 'var(--rh-danger, #e05252)' : 'var(--rh-muted)'};` },
+                  r.trippedReason
+                    ? `⚠️ ${r.trippedReason}`
+                    : (r.supported ? (r.enabled ? '활성 · 호스트 훅 연결됨' : '비활성') : '현재 호스트 미지원')
                 )
               ),
               h(doc, 'div', { class: 'rh-row', style: 'gap:4px;' },

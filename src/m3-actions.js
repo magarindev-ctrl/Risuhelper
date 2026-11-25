@@ -30,18 +30,96 @@ const M3_ACTIONS = new Set([
 ]);
 
 const BAD_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
-const ALLOWED_COLOR_SCHEME_KEYS = new Set([
-  'bgcolor', 'darkbg', 'borderc', 'selected', 'draculared', 'textcolor', 'textcolor2',
-  'darkBorderc', 'darkbutton', 'type', 'custom', 'name',
+
+// Upstream kwaroran/Risuai ColorScheme requires all 10 keys (risuai.d.ts:431-442, v3.svelte.ts:849-876)
+const COLOR_SCHEME_REQUIRED_KEYS = [
+  'bgcolor', 'darkbg', 'borderc', 'selected', 'draculared',
+  'textcolor', 'textcolor2', 'darkBorderc', 'darkbutton', 'type',
+];
+const ALLOWED_COLOR_SCHEME_KEYS = new Set(COLOR_SCHEME_REQUIRED_KEYS);
+const ALLOWED_COLOR_SCHEME_PRESETS = new Set([
+  'default', 'dark', 'light', 'cherry', 'galaxy', 'nature', 'realblack', 'monokai-light', 'monokai-black',
 ]);
-const ALLOWED_TEXT_THEME_KEYS = new Set([
-  'FontColorStandard', 'FontColorItalic', 'FontColorBold', 'FontColorItalicBold',
-  'FontColorQuote1', 'FontColorQuote2', 'name',
-]);
+const DEFAULT_DARK_COLOR_SCHEME = {
+  bgcolor: '#282a36',
+  darkbg: '#21222c',
+  borderc: '#6272a4',
+  selected: '#44475a',
+  draculared: '#ff5555',
+  textcolor: '#f8f8f2',
+  textcolor2: '#64748b',
+  darkBorderc: '#4b5563',
+  darkbutton: '#374151',
+  type: 'dark',
+};
+
+// Upstream kwaroran/Risuai CustomTextTheme requires all 6 keys (risuai.d.ts:447-454, v3.svelte.ts:887-907)
+const TEXT_THEME_REQUIRED_KEYS = [
+  'FontColorStandard', 'FontColorBold', 'FontColorItalic',
+  'FontColorItalicBold', 'FontColorQuote1', 'FontColorQuote2',
+];
+const ALLOWED_TEXT_THEME_KEYS = new Set(TEXT_THEME_REQUIRED_KEYS);
+const ALLOWED_TEXT_THEME_PRESETS = new Set(['standard', 'highcontrast']);
+const DEFAULT_CUSTOM_TEXT_THEME = {
+  FontColorStandard: '#f8f8f2',
+  FontColorBold: '#f8f8f2',
+  FontColorItalic: '#8c8d93',
+  FontColorItalicBold: '#8c8d93',
+  FontColorQuote1: '#8be9fd',
+  FontColorQuote2: '#ffb86c',
+};
+
 const ALLOWED_ONBOARDING_FIELD_TYPES = new Set(['text', 'textarea', 'select', 'checkbox', 'radio', 'number']);
-const ALLOWED_RISUNEST_PATCH_KEYS = new Set([
-  'name', 'note', 'folderId', 'fmIndex', 'bindedPersona', 'scriptstate', 'supaMemoryData', 'localLore', 'modules', 'metadata',
+const BARD_WIKI_DOC_TYPES = new Set([
+  'event', 'character', 'location', 'scene', 'faction', 'creature', 'item', 'concept', 'other',
 ]);
+const BARD_WIKI_CONTEXT_MODES = new Set(['always', 'auto', 'never']);
+const BARD_WIKI_GRADE_ALIASES = {
+  EX: 9, S: 8, A: 7, B: 6, C: 5, D: 3, NONE: 0,
+};
+// Upstream rsyumi/RisuNest ConversationPatchRequest supports atomic `messages` + `chatVariables` patches
+const ALLOWED_RISUNEST_PATCH_KEYS = new Set(['messages', 'chatVariables']);
+
+function unwrapColorScheme(raw) {
+  const src = raw && typeof raw === 'object' && raw.scheme && typeof raw.scheme === 'object'
+    ? raw.scheme
+    : (raw && typeof raw === 'object' ? raw : {});
+  const out = {};
+  for (const k of COLOR_SCHEME_REQUIRED_KEYS) {
+    if (k === 'type') {
+      out.type = src.type === 'light' ? 'light' : 'dark';
+    } else {
+      out[k] = typeof src[k] === 'string' && src[k] ? src[k] : DEFAULT_DARK_COLOR_SCHEME[k];
+    }
+  }
+  return out;
+}
+
+function unwrapTextTheme(raw) {
+  const src = raw && typeof raw === 'object' && raw.customTheme && typeof raw.customTheme === 'object'
+    ? raw.customTheme
+    : (raw && typeof raw === 'object' ? raw : {});
+  const out = {};
+  for (const k of TEXT_THEME_REQUIRED_KEYS) {
+    out[k] = typeof src[k] === 'string' && src[k] ? src[k] : DEFAULT_CUSTOM_TEXT_THEME[k];
+  }
+  return out;
+}
+
+function normalizeBardWikiGrade(raw) {
+  if (raw === null || raw === '') return { ok: true, value: null };
+  if (typeof raw === 'number') {
+    if (Number.isInteger(raw) && raw >= 0 && raw <= 9) return { ok: true, value: raw };
+    return { ok: false, error: 'BardWiki grade는 0~9 정수, null, 또는 EX/S/A/B/C/D 등급이어야 합니다.' };
+  }
+  const s = String(raw).trim().toUpperCase();
+  if (!s) return { ok: true, value: null };
+  if (/^[0-9]$/.test(s)) return { ok: true, value: Number(s) };
+  if (Object.hasOwn(BARD_WIKI_GRADE_ALIASES, s)) {
+    return { ok: true, value: BARD_WIKI_GRADE_ALIASES[s] };
+  }
+  return { ok: false, error: `유효하지 않은 BardWiki grade입니다: ${raw} (0~9 정수, null, 또는 EX/S/A/B/C/D 허용)` };
+}
 
 function clone(v) {
   return JSON.parse(JSON.stringify(v));
@@ -116,20 +194,22 @@ function getBardWikiApi(api) {
   if (!api || typeof api !== 'object') return null;
   const bw = api.bardWiki && typeof api.bardWiki === 'object' ? api.bardWiki : {};
   const getContext = typeof bw.getContext === 'function'
-    ? () => bw.getContext()
-    : (typeof api._getBardWikiContext === 'function' ? () => api._getBardWikiContext() : null);
+    ? (opts) => bw.getContext(opts)
+    : (typeof api._getBardWikiContext === 'function' ? (opts) => api._getBardWikiContext(opts) : null);
   const getDocuments = typeof bw.getDocuments === 'function'
     ? (opts) => bw.getDocuments(opts)
     : (typeof api._getBardWikiDocuments === 'function' ? (opts) => api._getBardWikiDocuments(opts) : null);
   const saveDocument = typeof bw.saveDocument === 'function'
     ? (doc) => bw.saveDocument(doc)
     : (typeof api._saveBardWikiDocument === 'function' ? (doc) => api._saveBardWikiDocument(doc) : null);
+  // Upstream RisuBard takes a single object `{ documentId, contextMode, expectedContentHash }`
   const setContextMode = typeof bw.setContextMode === 'function'
-    ? (mode) => bw.setContextMode(mode)
-    : (typeof api._setBardWikiContextMode === 'function' ? (mode) => api._setBardWikiContextMode(mode) : null);
+    ? (input) => bw.setContextMode(input)
+    : (typeof api._setBardWikiContextMode === 'function' ? (input) => api._setBardWikiContextMode(input) : null);
+  // Upstream RisuBard takes a single object `{ documentId, grade, gradeBy?, expectedContentHash }`
   const setGrade = typeof bw.setGrade === 'function'
-    ? (id, grade) => bw.setGrade(id, grade)
-    : (typeof api._setBardWikiGrade === 'function' ? (id, grade) => api._setBardWikiGrade(id, grade) : null);
+    ? (input) => bw.setGrade(input)
+    : (typeof api._setBardWikiGrade === 'function' ? (input) => api._setBardWikiGrade(input) : null);
   const trashDocument = typeof bw.trashDocument === 'function'
     ? (id) => bw.trashDocument(id)
     : (typeof api._trashBardWikiDocument === 'function' ? (id) => api._trashBardWikiDocument(id) : null);
@@ -192,12 +272,34 @@ async function planThemeUpdate(adapter, proposal) {
     return { ok: false, error: '현재 호스트는 TextTheme API를 지원하지 않습니다.' };
   }
 
+  if (proposal.colorSchemeName !== undefined) {
+    const preset = String(proposal.colorSchemeName).trim();
+    if (!ALLOWED_COLOR_SCHEME_PRESETS.has(preset)) {
+      return {
+        ok: false,
+        error: `허용되지 않는 colorSchemeName 프리셋입니다: ${preset}. 허용값: ${[...ALLOWED_COLOR_SCHEME_PRESETS].join(', ')}`,
+      };
+    }
+  }
+  if (proposal.textThemeName !== undefined) {
+    const preset = String(proposal.textThemeName).trim();
+    if (!ALLOWED_TEXT_THEME_PRESETS.has(preset)) {
+      return {
+        ok: false,
+        error: `허용되지 않는 textThemeName 프리셋입니다: ${preset}. 허용값: standard, highcontrast`,
+      };
+    }
+  }
+
   let cleanColorScheme = null;
   if (proposal.colorScheme && typeof proposal.colorScheme === 'object') {
     cleanColorScheme = {};
     for (const [k, v] of Object.entries(proposal.colorScheme)) {
       if (BAD_KEYS.has(k) || !ALLOWED_COLOR_SCHEME_KEYS.has(k)) {
         return { ok: false, error: `허용되지 않는 colorScheme 키입니다: ${k}` };
+      }
+      if (k === 'type' && v !== 'light' && v !== 'dark') {
+        return { ok: false, error: 'colorScheme.type은 "light" 또는 "dark"여야 합니다.' };
       }
       cleanColorScheme[k] = String(v);
     }
@@ -213,36 +315,51 @@ async function planThemeUpdate(adapter, proposal) {
     }
   }
 
+  let currentColorMeta = null;
   let currentColorScheme = null;
   if (wantsColor && typeof api?.getColorScheme === 'function') {
-    try { currentColorScheme = clone(await api.getColorScheme()); } catch {}
+    try {
+      currentColorMeta = clone(await api.getColorScheme());
+      currentColorScheme = unwrapColorScheme(currentColorMeta);
+    } catch {}
   }
+  let currentTextMeta = null;
   let currentTextTheme = null;
   if (wantsText && typeof api?.getTextTheme === 'function') {
-    try { currentTextTheme = clone(await api.getTextTheme()); } catch {}
+    try {
+      currentTextMeta = clone(await api.getTextTheme());
+      currentTextTheme = unwrapTextTheme(currentTextMeta);
+    } catch {}
   }
   const dbKeys = ['colorSchemeName', 'textTheme'];
   if (proposal.customCSS !== undefined) dbKeys.push('customCSS');
   if (proposal.guiHTML !== undefined) dbKeys.push('guiHTML');
   const currentDb = (await adapter.readDbSubset(dbKeys)) || {};
 
+  const mergedColorScheme = cleanColorScheme
+    ? unwrapColorScheme({ ...(currentColorScheme || DEFAULT_DARK_COLOR_SCHEME), ...cleanColorScheme })
+    : null;
+  const mergedTextTheme = cleanTextTheme
+    ? unwrapTextTheme({ ...(currentTextTheme || DEFAULT_CUSTOM_TEXT_THEME), ...cleanTextTheme })
+    : null;
+
   const beforeSummary = {};
   const afterSummary = {};
   if (proposal.colorSchemeName !== undefined) {
-    beforeSummary.colorSchemeName = currentDb.colorSchemeName ?? '(현재)';
-    afterSummary.colorSchemeName = String(proposal.colorSchemeName);
+    beforeSummary.colorSchemeName = currentDb.colorSchemeName ?? currentColorMeta?.name ?? '(현재)';
+    afterSummary.colorSchemeName = String(proposal.colorSchemeName).trim();
   }
-  if (cleanColorScheme) {
-    beforeSummary.colorScheme = currentColorScheme || {};
-    afterSummary.colorScheme = { ...(currentColorScheme || {}), ...cleanColorScheme };
+  if (mergedColorScheme) {
+    beforeSummary.colorScheme = currentColorScheme || DEFAULT_DARK_COLOR_SCHEME;
+    afterSummary.colorScheme = mergedColorScheme;
   }
   if (proposal.textThemeName !== undefined) {
-    beforeSummary.textThemeName = currentDb.textTheme ?? '(현재)';
-    afterSummary.textThemeName = String(proposal.textThemeName);
+    beforeSummary.textThemeName = currentDb.textTheme ?? currentTextMeta?.name ?? '(현재)';
+    afterSummary.textThemeName = String(proposal.textThemeName).trim();
   }
-  if (cleanTextTheme) {
-    beforeSummary.customTextTheme = currentTextTheme || {};
-    afterSummary.customTextTheme = { ...(currentTextTheme || {}), ...cleanTextTheme };
+  if (mergedTextTheme) {
+    beforeSummary.customTextTheme = currentTextTheme || DEFAULT_CUSTOM_TEXT_THEME;
+    afterSummary.customTextTheme = mergedTextTheme;
   }
   if (proposal.customCSS !== undefined) {
     beforeSummary.customCSS = currentDb.customCSS ?? '';
@@ -257,6 +374,8 @@ async function planThemeUpdate(adapter, proposal) {
     ok: true,
     cleanColorScheme,
     cleanTextTheme,
+    mergedColorScheme,
+    mergedTextTheme,
     currentColorScheme,
     currentTextTheme,
     currentDb,
@@ -1139,7 +1258,7 @@ function planManageExtensions(adapter, proposal) {
 }
 
 // ---------------------------------------------------------------------------
-// 11. manage_bard_wiki (RisuBard-only)
+// 11. manage_bard_wiki (RisuBard-only · exact upstream BardWikiAPI contract)
 // ---------------------------------------------------------------------------
 
 async function planManageBardWiki(adapter, proposal) {
@@ -1161,10 +1280,6 @@ async function planManageBardWiki(adapter, proposal) {
       docs = Array.isArray(rawDocs) ? rawDocs : (Array.isArray(rawDocs?.documents) ? rawDocs.documents : []);
     } catch {}
   }
-  let ctx = null;
-  if (bw.getContext) {
-    try { ctx = await bw.getContext(); } catch {}
-  }
   const docId = String(proposal.documentId || proposal.id || '').trim();
   const existingDoc = docId ? (docs.find(d => d && String(d.id) === docId) || null) : null;
   const scopeNote = '(RisuBard 현재 열린 캐릭터·채팅 스코프 기준)';
@@ -1172,28 +1287,47 @@ async function planManageBardWiki(adapter, proposal) {
   if (op === 'save_document') {
     if (!bw.saveDocument) return { ok: false, error: 'bardWiki.saveDocument API를 사용할 수 없습니다.' };
     const title = String(proposal.title || existingDoc?.title || '').trim();
-    const content = typeof proposal.content === 'string' ? proposal.content : existingDoc?.content;
-    if (!title || typeof content !== 'string') {
-      return { ok: false, error: 'save_document에는 title과 content 문자열이 필요합니다.' };
+    const markdown = typeof proposal.markdown === 'string'
+      ? proposal.markdown
+      : (typeof proposal.content === 'string' ? proposal.content : existingDoc?.content);
+    if (!title || typeof markdown !== 'string') {
+      return { ok: false, error: 'save_document에는 title과 markdown(또는 content) 문자열이 필요합니다.' };
     }
-    const nextDoc = {
-      ...(existingDoc ? clone(existingDoc) : {}),
-      ...(docId ? { id: docId } : {}),
+    const docType = String(proposal.type || existingDoc?.type || 'other').trim();
+    if (!BARD_WIKI_DOC_TYPES.has(docType)) {
+      return {
+        ok: false,
+        error: `허용되지 않는 BardWiki 문서 type입니다: ${docType}. 허용값: ${[...BARD_WIKI_DOC_TYPES].join(', ')}`,
+      };
+    }
+    let followUpGrade = undefined;
+    if (proposal.grade !== undefined) {
+      const parsedGrade = normalizeBardWikiGrade(proposal.grade);
+      if (!parsedGrade.ok) return parsedGrade;
+      followUpGrade = parsedGrade.value;
+    }
+    const aliases = Array.isArray(proposal.aliases)
+      ? proposal.aliases.map(String).filter(Boolean)
+      : (Array.isArray(existingDoc?.aliases) ? existingDoc.aliases : undefined);
+
+    // Exact upstream BardWikiDocumentWrite shape (risubard.d.ts:1284-1293)
+    const docWrite = {
+      ...(existingDoc ? { documentId: existingDoc.id, expectedContentHash: existingDoc.contentHash } : {}),
+      type: docType,
       title,
-      content,
-      ...(proposal.grade !== undefined ? { grade: String(proposal.grade) } : {}),
-      ...(proposal.category !== undefined ? { category: String(proposal.category) } : {}),
-      ...(Array.isArray(proposal.tags) ? { tags: proposal.tags.map(String) } : {}),
+      ...(aliases ? { aliases } : {}),
+      markdown,
     };
     return {
       ok: true,
       op,
       bw,
-      nextDoc,
+      docWrite,
+      followUpGrade,
       existingDoc: existingDoc ? clone(existingDoc) : null,
       label: `BardWiki 문서 ${existingDoc ? '수정' : '생성'}: ${title}`,
       before: existingDoc ? JSON.stringify(existingDoc, null, 2) : `(새 BardWiki 문서) ${scopeNote}`,
-      after: `${JSON.stringify(nextDoc, null, 2)}\n${scopeNote}`,
+      after: `${JSON.stringify({ ...docWrite, ...(followUpGrade !== undefined ? { grade: followUpGrade } : {}) }, null, 2)}\n${scopeNote}`,
       hostBinding: null,
     };
   }
@@ -1203,17 +1337,29 @@ async function planManageBardWiki(adapter, proposal) {
     if (!docId || proposal.grade === undefined) {
       return { ok: false, error: 'set_grade에는 documentId와 grade가 필요합니다.' };
     }
+    if (!existingDoc) {
+      return { ok: false, error: `BardWiki 문서(${docId})를 찾을 수 없습니다(contentHash 확인 필요).` };
+    }
+    const parsedGrade = normalizeBardWikiGrade(proposal.grade);
+    if (!parsedGrade.ok) return parsedGrade;
+    const gradeInput = {
+      documentId: existingDoc.id,
+      grade: parsedGrade.value,
+      gradeBy: 'user',
+      expectedContentHash: existingDoc.contentHash || '',
+    };
     return {
       ok: true,
       op,
       bw,
-      docId,
-      grade: String(proposal.grade),
-      beforeGrade: existingDoc?.grade ?? null,
-      existingDoc: existingDoc ? clone(existingDoc) : null,
-      label: `BardWiki 등급 변경: ${existingDoc?.title || docId} → ${proposal.grade}`,
-      before: `grade: ${existingDoc?.grade ?? '(미상)'}`,
-      after: `grade: ${proposal.grade}\n${scopeNote}`,
+      docId: existingDoc.id,
+      gradeInput,
+      grade: parsedGrade.value,
+      beforeGrade: existingDoc.grade ?? null,
+      existingDoc: clone(existingDoc),
+      label: `BardWiki 등급 변경: ${existingDoc.title || docId} → ${parsedGrade.value === null ? '해제' : parsedGrade.value}`,
+      before: `grade: ${existingDoc.grade ?? '(없음)'}`,
+      after: `grade: ${parsedGrade.value === null ? 'null' : parsedGrade.value}\n${scopeNote}`,
       hostBinding: null,
     };
   }
@@ -1221,16 +1367,35 @@ async function planManageBardWiki(adapter, proposal) {
   if (op === 'set_context_mode') {
     if (!bw.setContextMode) return { ok: false, error: 'bardWiki.setContextMode API를 사용할 수 없습니다.' };
     const mode = String(proposal.contextMode || proposal.mode || '').trim();
-    if (!mode) return { ok: false, error: 'set_context_mode에는 contextMode(또는 mode) 문자열이 필요합니다.' };
-    const beforeMode = ctx?.mode ?? ctx?.contextMode ?? null;
+    if (!BARD_WIKI_CONTEXT_MODES.has(mode)) {
+      return {
+        ok: false,
+        error: `BardWiki contextMode는 always, auto, never 중 하나여야 합니다(입력: ${mode || '없음'}).`,
+      };
+    }
+    if (!docId) {
+      return { ok: false, error: 'RisuBard setContextMode는 문서별 API이므로 대상 documentId가 필요합니다.' };
+    }
+    if (!existingDoc) {
+      return { ok: false, error: `BardWiki 문서(${docId})를 찾을 수 없습니다(contentHash 확인 필요).` };
+    }
+    const modeInput = {
+      documentId: existingDoc.id,
+      contextMode: mode,
+      expectedContentHash: existingDoc.contentHash || '',
+    };
+    const beforeMode = existingDoc.contextMode ?? 'auto';
     return {
       ok: true,
       op,
       bw,
+      docId: existingDoc.id,
+      modeInput,
       contextMode: mode,
       beforeMode,
-      label: `BardWiki 컨텍스트 모드 변경: ${mode}`,
-      before: `contextMode: ${beforeMode ?? '(현재)'}`,
+      existingDoc: clone(existingDoc),
+      label: `BardWiki 컨텍스트 모드 변경: ${existingDoc.title || docId} → ${mode}`,
+      before: `contextMode: ${beforeMode}`,
       after: `contextMode: ${mode}\n${scopeNote}`,
       hostBinding: null,
     };
@@ -1256,53 +1421,221 @@ async function planManageBardWiki(adapter, proposal) {
 }
 
 // ---------------------------------------------------------------------------
-// 12. patch_risunest_conversation (RisuNest-only)
+// 12. patch_risunest_conversation (RisuNest-only · exact ConversationPatchRequest)
 // ---------------------------------------------------------------------------
 
 async function planPatchRisuNestConversation(adapter, proposal) {
   if (!adapter.hasCapability('risunestPatch') || typeof adapter.api?.risunestPatchConversation !== 'function') {
     return { ok: false, error: '현재 호스트는 RisuNest risunestPatchConversation API를 지원하지 않습니다.' };
   }
-  const patch = proposal.patch;
-  if (!patch || typeof patch !== 'object' || Array.isArray(patch) || Object.keys(patch).length === 0) {
-    return { ok: false, error: 'patch_risunest_conversation에는 1개 이상의 키를 포함한 patch 객체가 필요합니다.' };
-  }
-  const cleanPatch = {};
-  for (const [k, v] of Object.entries(patch)) {
-    if (BAD_KEYS.has(k) || !ALLOWED_RISUNEST_PATCH_KEYS.has(k)) {
-      return { ok: false, error: `허용되지 않는 RisuNest 대화 패치 키입니다: ${k}` };
+
+  // Reject legacy/unsupported metadata keys clearly with actionable alternatives
+  if (proposal.patch && typeof proposal.patch === 'object' && !Array.isArray(proposal.patch)) {
+    const unsupported = Object.keys(proposal.patch).filter(
+      k => !['messages', 'chatVariables', 'scriptstate'].includes(k)
+    );
+    if (unsupported.length > 0) {
+      return {
+        ok: false,
+        error: `RisuNest risunestPatchConversation은 messages와 chatVariables 정밀 패치 전용입니다(미지원 키: ${unsupported.join(', ')}). 작가의 노트·메모리·채팅 제목 수정에는 update_field(authorNote)/update_memory를 사용하세요.`,
+      };
     }
-    cleanPatch[k] = v;
   }
 
-  const ref = {
-    ...(proposal.conversationId ? { conversationId: String(proposal.conversationId) } : {}),
-    ...(Number.isInteger(proposal.targetCharIndex) ? { charIndex: proposal.targetCharIndex } : {}),
-    ...(Number.isInteger(proposal.targetChatIndex) ? { chatIndex: proposal.targetChatIndex } : {}),
-  };
+  // Resolve target characterId & conversationId (either explicit or from active/target chat)
+  let characterId = typeof proposal.characterId === 'string' && proposal.characterId.trim()
+    ? proposal.characterId.trim()
+    : '';
+  let conversationId = typeof proposal.conversationId === 'string' && proposal.conversationId.trim()
+    ? proposal.conversationId.trim()
+    : '';
+  let resolvedChat = null;
 
-  let currentCtx = {};
-  if (typeof adapter.api?.risunestReadConversationContext === 'function') {
+  if (!characterId || !conversationId) {
     try {
-      const read = await adapter.api.risunestReadConversationContext(ref);
-      if (read && typeof read === 'object') currentCtx = read;
+      const res = await adapter._resolveTargetChat(proposal, null, '조회');
+      if (!characterId && res?.char?.chaId) characterId = String(res.char.chaId);
+      if (!conversationId && res?.chat?.id) conversationId = String(res.chat.id);
+      resolvedChat = res?.chat || null;
     } catch {}
   }
 
-  const beforeValues = {};
-  for (const k of Object.keys(cleanPatch)) {
-    beforeValues[k] = Object.hasOwn(currentCtx, k) ? clone(currentCtx[k]) : null;
+  // Normalize `messages` entries into ConversationPatchMessage[]
+  const rawMessages = Array.isArray(proposal.messages)
+    ? proposal.messages
+    : (Array.isArray(proposal.patch?.messages) ? proposal.patch.messages : []);
+  const normMessages = [];
+  for (let i = 0; i < rawMessages.length; i++) {
+    const entry = rawMessages[i];
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      return { ok: false, error: `messages[${i}]는 객체여야 합니다.` };
+    }
+    if (!Number.isInteger(entry.index) || entry.index < 0) {
+      return { ok: false, error: `messages[${i}].index는 0 이상의 정수여야 합니다.` };
+    }
+    const rawSet = entry.set && typeof entry.set === 'object' && !Array.isArray(entry.set)
+      ? entry.set
+      : (typeof entry.data === 'string' ? { data: entry.data } : null);
+    if (!rawSet || Object.keys(rawSet).length === 0) {
+      return { ok: false, error: `messages[${i}]에는 set 객체(또는 data 문자열)가 필요합니다.` };
+    }
+    for (const k of Object.keys(rawSet)) {
+      if (BAD_KEYS.has(k)) return { ok: false, error: `허용되지 않는 키입니다: ${k}` };
+    }
+    normMessages.push({
+      index: entry.index,
+      messageId: entry.messageId !== undefined ? (entry.messageId === null ? null : String(entry.messageId)) : undefined,
+      ...(entry.expected && typeof entry.expected === 'object' ? { expected: clone(entry.expected) } : {}),
+      set: clone(rawSet),
+    });
   }
 
-  const convLabel = ref.conversationId || (Number.isInteger(ref.chatIndex) ? `채팅 #${ref.chatIndex + 1}` : '현재 대화');
+  // Normalize `chatVariables` (supports array `[{ key, value, expected? }]` or map `{ hp: 90, gold: null }`)
+  const rawVars = proposal.chatVariables !== undefined
+    ? proposal.chatVariables
+    : (proposal.patch?.chatVariables !== undefined ? proposal.patch.chatVariables : proposal.patch?.scriptstate);
+  const normVars = [];
+  if (Array.isArray(rawVars)) {
+    for (let i = 0; i < rawVars.length; i++) {
+      const v = rawVars[i];
+      if (!v || typeof v !== 'object' || !String(v.key || '').trim()) {
+        return { ok: false, error: `chatVariables[${i}]에는 key가 필요합니다.` };
+      }
+      const key = String(v.key).replace(/^\$+/, '').trim();
+      if (!key || BAD_KEYS.has(key)) return { ok: false, error: `유효하지 않은 변수 키입니다: ${v.key}` };
+      const val = v.value;
+      if (val !== null && typeof val !== 'string' && typeof val !== 'number' && typeof val !== 'boolean') {
+        return { ok: false, error: `chatVariables[${i}].value는 문자열·숫자·불리언·null이어야 합니다.` };
+      }
+      normVars.push({
+        key,
+        ...(v.expected !== undefined ? { expected: v.expected } : {}),
+        value: val,
+      });
+    }
+  } else if (rawVars && typeof rawVars === 'object') {
+    for (const [rawKey, val] of Object.entries(rawVars)) {
+      const key = String(rawKey).replace(/^\$+/, '').trim();
+      if (!key || BAD_KEYS.has(key)) return { ok: false, error: `유효하지 않은 변수 키입니다: ${rawKey}` };
+      if (val !== null && typeof val !== 'string' && typeof val !== 'number' && typeof val !== 'boolean') {
+        return { ok: false, error: `chatVariables["${key}"]는 문자열·숫자·불리언·null이어야 합니다.` };
+      }
+      normVars.push({ key, value: val });
+    }
+  }
+
+  if (normMessages.length === 0 && normVars.length === 0) {
+    return {
+      ok: false,
+      error: 'patch_risunest_conversation에는 1개 이상의 messages 또는 chatVariables 패치가 필요합니다.',
+    };
+  }
+
+  // Read live ConversationContext via exact upstream 1-object signature
+  let currentCtx = null;
+  if (typeof adapter.api?.risunestReadConversationContext === 'function') {
+    try {
+      const ctxReq = {
+        ...(characterId && conversationId ? { characterId, conversationId } : {}),
+        ...(normVars.length > 0 ? { chatVariables: normVars.map(v => v.key) } : {}),
+        ...(normMessages.length > 0 ? {
+          messages: {
+            startIndex: Math.min(...normMessages.map(m => m.index)),
+            limit: Math.min(128, Math.max(...normMessages.map(m => m.index)) - Math.min(...normMessages.map(m => m.index)) + 1),
+          },
+        } : {}),
+      };
+      const read = await adapter.api.risunestReadConversationContext(ctxReq);
+      if (read && typeof read === 'object') {
+        currentCtx = read;
+        if (!characterId && read.characterId) characterId = String(read.characterId);
+        if (!conversationId && read.conversationId) conversationId = String(read.conversationId);
+      }
+    } catch {}
+  }
+
+  if (!characterId || !conversationId) {
+    return {
+      ok: false,
+      error: 'RisuNest 대화 패치에 필요한 characterId 또는 conversationId를 확인할 수 없습니다.',
+    };
+  }
+
+  const baseRevision = Number.isSafeInteger(currentCtx?.revision) ? currentCtx.revision : undefined;
+
+  // Hydrate missing `messageId` & capture `before` snapshots for surgical Undo
+  const ctxMsgStart = Number.isSafeInteger(currentCtx?.messages?.startIndex) ? currentCtx.messages.startIndex : 0;
+  const ctxMsgs = Array.isArray(currentCtx?.messages?.messages)
+    ? currentCtx.messages.messages
+    : (Array.isArray(resolvedChat?.message) ? resolvedChat.message : []);
+  const ctxVars = currentCtx?.chatVariables && typeof currentCtx.chatVariables === 'object'
+    ? currentCtx.chatVariables
+    : (resolvedChat?.scriptstate && typeof resolvedChat.scriptstate === 'object' ? resolvedChat.scriptstate : {});
+
+  const beforeMessages = [];
+  const finalMessages = [];
+  for (const m of normMessages) {
+    const liveMsg = Array.isArray(currentCtx?.messages?.messages)
+      ? ctxMsgs[m.index - ctxMsgStart]
+      : ctxMsgs[m.index];
+    const messageId = m.messageId !== undefined
+      ? m.messageId
+      : (typeof liveMsg?.chatId === 'string' && liveMsg.chatId ? liveMsg.chatId : null);
+    if (messageId === null && baseRevision === undefined) {
+      return {
+        ok: false,
+        error: `메시지 #${m.index + 1}에 messageId가 없고 baseRevision도 확인되지 않아 안전하게 패치할 수 없습니다.`,
+      };
+    }
+    const beforeSet = {};
+    for (const field of Object.keys(m.set)) {
+      beforeSet[field] = liveMsg && Object.hasOwn(liveMsg, field) ? clone(liveMsg[field]) : undefined;
+    }
+    beforeMessages.push({ index: m.index, messageId, before: beforeSet, after: clone(m.set) });
+    finalMessages.push({
+      index: m.index,
+      messageId,
+      ...(m.expected ? { expected: m.expected } : {}),
+      set: m.set,
+    });
+  }
+
+  const beforeVars = [];
+  const finalVars = [];
+  for (const v of normVars) {
+    const liveVal = Object.hasOwn(ctxVars, v.key)
+      ? ctxVars[v.key]
+      : (Object.hasOwn(ctxVars, `$${v.key}`) ? ctxVars[`$${v.key}`] : null);
+    const normalizedBefore = (liveVal === undefined || liveVal === null) ? null : liveVal;
+    beforeVars.push({ key: v.key, before: normalizedBefore, after: v.value });
+    finalVars.push({
+      key: v.key,
+      ...(v.expected !== undefined ? { expected: v.expected } : {}),
+      value: v.value,
+    });
+  }
+
+  const request = {
+    characterId,
+    conversationId,
+    mutationId: makeUuid(),
+    ...(baseRevision !== undefined ? { baseRevision } : {}),
+    messages: finalMessages,
+    chatVariables: finalVars,
+  };
+
+  const parts = [];
+  if (finalMessages.length > 0) parts.push(`메시지 ${finalMessages.length}건`);
+  if (finalVars.length > 0) parts.push(`채팅 변수 ${finalVars.length}건`);
+
   return {
     ok: true,
-    ref,
-    cleanPatch,
-    beforeValues,
-    label: `RisuNest 대화 정밀 패치 (${convLabel}: ${Object.keys(cleanPatch).join(', ')})`,
-    before: JSON.stringify(beforeValues, null, 2),
-    after: JSON.stringify(cleanPatch, null, 2),
+    request,
+    beforeMessages,
+    beforeVars,
+    label: `RisuNest 대화 정밀 패치 (${conversationId}: ${parts.join(', ')})`,
+    before: JSON.stringify({ messages: beforeMessages, chatVariables: beforeVars }, null, 2),
+    after: JSON.stringify({ messages: finalMessages, chatVariables: finalVars }, null, 2),
     hostBinding: null,
   };
 }
@@ -1473,16 +1806,16 @@ async function applyM3Proposal(adapter, proposal, target, options = {}) {
       const label = proposal.title || `테마 · 스타일 변경 (${Object.keys(plan.afterSummary).join(', ')})`;
 
       if (proposal.colorSchemeName !== undefined && typeof api?.changeColorScheme === 'function') {
-        await api.changeColorScheme(String(proposal.colorSchemeName));
+        await api.changeColorScheme(String(proposal.colorSchemeName).trim());
       }
-      if (plan.cleanColorScheme && typeof api?.setColorScheme === 'function') {
-        await api.setColorScheme({ ...(plan.currentColorScheme || {}), ...plan.cleanColorScheme });
+      if (plan.mergedColorScheme && typeof api?.setColorScheme === 'function') {
+        await api.setColorScheme(plan.mergedColorScheme);
       }
       if (proposal.textThemeName !== undefined && typeof api?.changeTextTheme === 'function') {
-        await api.changeTextTheme(String(proposal.textThemeName));
+        await api.changeTextTheme(String(proposal.textThemeName).trim());
       }
-      if (plan.cleanTextTheme && typeof api?.setCustomTextTheme === 'function') {
-        await api.setCustomTextTheme({ ...(plan.currentTextTheme || {}), ...plan.cleanTextTheme });
+      if (plan.mergedTextTheme && typeof api?.setCustomTextTheme === 'function') {
+        await api.setCustomTextTheme(plan.mergedTextTheme);
       }
 
       const undoId = adapter._recordChange(
@@ -1496,10 +1829,10 @@ async function applyM3Proposal(adapter, proposal, target, options = {}) {
             customTextTheme: plan.currentTextTheme,
           },
           after: {
-            colorSchemeName: proposal.colorSchemeName !== undefined ? String(proposal.colorSchemeName) : null,
-            colorScheme: plan.cleanColorScheme ? { ...(plan.currentColorScheme || {}), ...plan.cleanColorScheme } : null,
-            textThemeName: proposal.textThemeName !== undefined ? String(proposal.textThemeName) : null,
-            customTextTheme: plan.cleanTextTheme ? { ...(plan.currentTextTheme || {}), ...plan.cleanTextTheme } : null,
+            colorSchemeName: proposal.colorSchemeName !== undefined ? String(proposal.colorSchemeName).trim() : null,
+            colorScheme: plan.mergedColorScheme,
+            textThemeName: proposal.textThemeName !== undefined ? String(proposal.textThemeName).trim() : null,
+            customTextTheme: plan.mergedTextTheme,
           },
         }],
         label
@@ -1540,13 +1873,13 @@ async function applyM3Proposal(adapter, proposal, target, options = {}) {
       if (!plan.ok) throw new Error(plan.error);
 
       if (plan.mode === 'inlay') {
-        const inlayRes = await api.createInlay({
-          name: plan.name,
-          data: plan.decoded.bytes,
-          type: plan.decoded.mimeType.startsWith('image/') ? 'image' : 'text',
-          ext: plan.decoded.mimeType.includes('svg') ? 'svg' : 'txt',
-        });
-        const inlayId = typeof inlayRes === 'string' ? inlayRes : String(inlayRes?.id || makeUuid());
+        // Exact upstream signature: createInlay(data: Uint8Array | string, options?: { name?: string }): Promise<string | null>
+        // Pass a fresh Uint8Array copy because upstream transfers/detaches the ArrayBuffer.
+        const inlayRes = await api.createInlay(new Uint8Array(plan.decoded.bytes), { name: plan.name });
+        if (!inlayRes || (typeof inlayRes !== 'string' && typeof inlayRes?.id !== 'string')) {
+          throw new Error('인레이 생성 권한이 거부되었거나 호스트가 이미지 데이터 변환에 실패했습니다.');
+        }
+        const inlayId = typeof inlayRes === 'string' ? inlayRes : inlayRes.id;
         const undoId = adapter._recordChange(
           { type: 'host_api', kind: 'inlay' },
           [{ op: 'host_api', before: null, after: { inlayId, name: plan.name } }],
@@ -1556,7 +1889,8 @@ async function applyM3Proposal(adapter, proposal, target, options = {}) {
       }
 
       if (plan.mode === 'module_asset') {
-        const saved = await api.saveAsset(plan.decoded.bytes, undefined, `${plan.name}.${plan.ext}`);
+        // Upstream saveAsset(data: Uint8Array): Promise<string>
+        const saved = await api.saveAsset(new Uint8Array(plan.decoded.bytes));
         const savedId = typeof saved === 'string' ? saved : String(saved?.id || saved?.path || `${plan.name}.${plan.ext}`);
         const nextMods = clone(plan.modules);
         if (!Array.isArray(nextMods[plan.moduleIndex].assets)) nextMods[plan.moduleIndex].assets = [];
@@ -1574,7 +1908,7 @@ async function applyM3Proposal(adapter, proposal, target, options = {}) {
       } else if (plan.mode === 'bind_asset') {
         nextChar[plan.targetField].push(plan.entry);
       } else if (plan.mode === 'character_asset') {
-        const saved = await api.saveAsset(plan.decoded.bytes, undefined, `${plan.name}.${plan.ext}`);
+        const saved = await api.saveAsset(new Uint8Array(plan.decoded.bytes));
         savedId = typeof saved === 'string' ? saved : String(saved?.id || saved?.path || `${plan.name}.${plan.ext}`);
         const entry = plan.targetField === 'emotionImages'
           ? [plan.name, savedId]
@@ -1736,22 +2070,43 @@ async function applyM3Proposal(adapter, proposal, target, options = {}) {
       if (!plan.ok) throw new Error(plan.error);
       let undoPayload;
       if (plan.op === 'save_document') {
-        const saved = await plan.bw.saveDocument(plan.nextDoc);
-        const savedId = String(saved?.id || plan.nextDoc.id || '');
+        const saved = await plan.bw.saveDocument(plan.docWrite);
+        if (!saved) throw new Error('BardWiki 문서 저장 권한이 거부되었거나 저장에 실패했습니다.');
+        let finalDoc = saved;
+        if (plan.followUpGrade !== undefined && plan.bw.setGrade && saved.id) {
+          const graded = await plan.bw.setGrade({
+            documentId: saved.id,
+            grade: plan.followUpGrade,
+            gradeBy: 'user',
+            expectedContentHash: saved.contentHash || '',
+          });
+          if (graded) finalDoc = graded;
+        }
+        const savedId = String(finalDoc?.id || saved.id || '');
         undoPayload = {
           bwOp: 'save_document',
           docId: savedId,
           before: plan.existingDoc,
-          after: { ...plan.nextDoc, ...(savedId ? { id: savedId } : {}) },
+          after: {
+            id: savedId,
+            type: finalDoc.type || plan.docWrite.type,
+            title: finalDoc.title || plan.docWrite.title,
+            content: finalDoc.content ?? plan.docWrite.markdown,
+            grade: finalDoc.grade ?? plan.followUpGrade ?? null,
+            contentHash: finalDoc.contentHash || '',
+          },
         };
       } else if (plan.op === 'set_grade') {
-        await plan.bw.setGrade(plan.docId, plan.grade);
+        const res = await plan.bw.setGrade(plan.gradeInput);
+        if (!res) throw new Error('BardWiki 등급 변경 권한이 거부되었거나 문서 해시가 충돌했습니다.');
         undoPayload = { bwOp: 'set_grade', docId: plan.docId, before: plan.beforeGrade, after: plan.grade };
       } else if (plan.op === 'set_context_mode') {
-        await plan.bw.setContextMode(plan.contextMode);
-        undoPayload = { bwOp: 'set_context_mode', before: plan.beforeMode, after: plan.contextMode };
+        const res = await plan.bw.setContextMode(plan.modeInput);
+        if (!res) throw new Error('BardWiki 컨텍스트 모드 변경 권한이 거부되었거나 문서 해시가 충돌했습니다.');
+        undoPayload = { bwOp: 'set_context_mode', docId: plan.docId, before: plan.beforeMode, after: plan.contextMode };
       } else if (plan.op === 'trash_document') {
-        await plan.bw.trashDocument(plan.docId);
+        const res = await plan.bw.trashDocument(plan.docId);
+        if (!res) throw new Error('BardWiki 문서 휴지통 이동 권한이 거부되었거나 실패했습니다.');
         undoPayload = { bwOp: 'trash_document', docId: plan.docId, before: plan.existingDoc, after: null };
       }
       const undoId = adapter._recordChange(
@@ -1765,10 +2120,24 @@ async function applyM3Proposal(adapter, proposal, target, options = {}) {
     case 'patch_risunest_conversation': {
       const plan = await planPatchRisuNestConversation(adapter, proposal);
       if (!plan.ok) throw new Error(plan.error);
-      await api.risunestPatchConversation(plan.ref, plan.cleanPatch);
+      // Upstream RisuNest takes a single ConversationPatchRequest object and returns ConversationPatchResult
+      const res = await api.risunestPatchConversation(plan.request);
+      if (res && typeof res === 'object' && res.status && res.status !== 'applied' && res.status !== 'already-applied') {
+        const reason = res.conflict
+          ? `${res.conflict.target}/${res.conflict.reason}`
+          : res.status;
+        throw new Error(`RisuNest 대화 패치가 호스트에서 거부되었습니다(${reason}).`);
+      }
       const undoId = adapter._recordChange(
         { type: 'host_api', kind: 'risunest_patch' },
-        [{ op: 'host_api', ref: plan.ref, before: plan.beforeValues, after: plan.cleanPatch }],
+        [{
+          op: 'host_api',
+          characterId: plan.request.characterId,
+          conversationId: plan.request.conversationId,
+          messages: plan.beforeMessages,
+          chatVariables: plan.beforeVars,
+          revisionAfter: Number.isSafeInteger(res?.revision) ? res.revision : undefined,
+        }],
         plan.label
       );
       return { ok: true, message: `${plan.label} 완료`, undoId };
@@ -1790,41 +2159,62 @@ async function revertHostApiRecord(adapter, entity, ops) {
   for (const op of ops || []) {
     if (entity.kind === 'theme') {
       const { before, after } = op;
-      if (after.colorSchemeName !== null && typeof api?.changeColorScheme === 'function') {
+      const effectiveAfterColorName = after.colorScheme ? 'custom' : after.colorSchemeName;
+      let colorConflict = false;
+      if (effectiveAfterColorName !== null && typeof api?.changeColorScheme === 'function') {
         const db = (await adapter.readDbSubset(['colorSchemeName'])) || {};
-        if (db.colorSchemeName !== undefined && db.colorSchemeName !== after.colorSchemeName) {
+        if (db.colorSchemeName !== undefined && db.colorSchemeName !== effectiveAfterColorName) {
           conflicts.push({ path: 'theme.colorSchemeName', reason: '적용 이후 색상 스킴이 다시 변경되었습니다.' });
-        } else if (before.colorSchemeName) {
+          colorConflict = true;
+        }
+      }
+      if (!colorConflict && after.colorScheme && typeof api?.setColorScheme === 'function') {
+        let cur = null;
+        try {
+          const rawCur = await api.getColorScheme?.();
+          cur = rawCur ? unwrapColorScheme(rawCur) : null;
+        } catch {}
+        if (cur && !deepEqual(cur, unwrapColorScheme(after.colorScheme))) {
+          conflicts.push({ path: 'theme.colorScheme', reason: '적용 이후 커스텀 색상이 다시 변경되었습니다.' });
+          colorConflict = true;
+        } else if (before.colorScheme) {
+          await api.setColorScheme(unwrapColorScheme(before.colorScheme));
+          reverted++;
+        }
+      }
+      if (!colorConflict && effectiveAfterColorName !== null && typeof api?.changeColorScheme === 'function') {
+        if (before.colorSchemeName && ALLOWED_COLOR_SCHEME_PRESETS.has(before.colorSchemeName)) {
           await api.changeColorScheme(before.colorSchemeName);
           reverted++;
         }
       }
-      if (after.colorScheme && typeof api?.setColorScheme === 'function') {
-        let cur = null;
-        try { cur = await api.getColorScheme?.(); } catch {}
-        if (cur && !deepEqual(cur, after.colorScheme)) {
-          conflicts.push({ path: 'theme.colorScheme', reason: '적용 이후 커스텀 색상이 다시 변경되었습니다.' });
-        } else if (before.colorScheme) {
-          await api.setColorScheme(before.colorScheme);
-          reverted++;
-        }
-      }
-      if (after.textThemeName !== null && typeof api?.changeTextTheme === 'function') {
+
+      const effectiveAfterTextName = after.customTextTheme ? 'custom' : after.textThemeName;
+      let textConflict = false;
+      if (effectiveAfterTextName !== null && typeof api?.changeTextTheme === 'function') {
         const db = (await adapter.readDbSubset(['textTheme'])) || {};
-        if (db.textTheme !== undefined && db.textTheme !== after.textThemeName) {
+        if (db.textTheme !== undefined && db.textTheme !== effectiveAfterTextName) {
           conflicts.push({ path: 'theme.textTheme', reason: '적용 이후 텍스트 테마가 다시 변경되었습니다.' });
-        } else if (before.textThemeName) {
-          await api.changeTextTheme(before.textThemeName);
+          textConflict = true;
+        }
+      }
+      if (!textConflict && after.customTextTheme && typeof api?.setCustomTextTheme === 'function') {
+        let cur = null;
+        try {
+          const rawCur = await api.getTextTheme?.();
+          cur = rawCur ? unwrapTextTheme(rawCur) : null;
+        } catch {}
+        if (cur && !deepEqual(cur, unwrapTextTheme(after.customTextTheme))) {
+          conflicts.push({ path: 'theme.customTextTheme', reason: '적용 이후 커스텀 텍스트 테마가 다시 변경되었습니다.' });
+          textConflict = true;
+        } else if (before.customTextTheme) {
+          await api.setCustomTextTheme(unwrapTextTheme(before.customTextTheme));
           reverted++;
         }
       }
-      if (after.customTextTheme && typeof api?.setCustomTextTheme === 'function') {
-        let cur = null;
-        try { cur = await api.getTextTheme?.(); } catch {}
-        if (cur && !deepEqual(cur, after.customTextTheme)) {
-          conflicts.push({ path: 'theme.customTextTheme', reason: '적용 이후 커스텀 텍스트 테마가 다시 변경되었습니다.' });
-        } else if (before.customTextTheme) {
-          await api.setCustomTextTheme(before.customTextTheme);
+      if (!textConflict && effectiveAfterTextName !== null && typeof api?.changeTextTheme === 'function') {
+        if (before.textThemeName && ALLOWED_TEXT_THEME_PRESETS.has(before.textThemeName)) {
+          await api.changeTextTheme(before.textThemeName);
           reverted++;
         }
       }
@@ -1881,43 +2271,70 @@ async function revertHostApiRecord(adapter, entity, ops) {
     if (entity.kind === 'bard_wiki') {
       const bw = getBardWikiApi(api);
       if (!bw) continue;
-      if (op.bwOp === 'save_document') {
-        let curDoc = null;
-        if (bw.getDocuments && op.docId) {
-          try {
-            const raw = await bw.getDocuments();
-            const list = Array.isArray(raw) ? raw : (Array.isArray(raw?.documents) ? raw.documents : []);
-            curDoc = list.find(d => d && String(d.id) === String(op.docId)) || null;
-          } catch {}
+      const findLiveDoc = async (id) => {
+        if (!bw.getDocuments || !id) return null;
+        try {
+          const raw = await bw.getDocuments();
+          const list = Array.isArray(raw) ? raw : (Array.isArray(raw?.documents) ? raw.documents : []);
+          return list.find(d => d && String(d.id) === String(id)) || null;
+        } catch {
+          return null;
         }
+      };
+
+      if (op.bwOp === 'save_document') {
+        const curDoc = await findLiveDoc(op.docId);
         if (curDoc && op.after && curDoc.content !== op.after.content) {
           conflicts.push({ path: `bardWiki.${op.docId}`, reason: '적용 이후 BardWiki 문서 내용이 다시 변경되었습니다.' });
         } else if (op.before && bw.saveDocument) {
-          await bw.saveDocument(op.before);
+          await bw.saveDocument({
+            ...(curDoc ? { documentId: curDoc.id, expectedContentHash: curDoc.contentHash || '' } : {}),
+            type: op.before.type || 'other',
+            title: op.before.title,
+            ...(Array.isArray(op.before.aliases) ? { aliases: op.before.aliases } : {}),
+            markdown: op.before.content ?? '',
+          });
           reverted++;
         } else if (!op.before && op.docId && bw.trashDocument) {
           await bw.trashDocument(op.docId);
           reverted++;
         }
       } else if (op.bwOp === 'set_grade' && bw.setGrade) {
-        if (op.before !== null && op.before !== undefined) {
-          await bw.setGrade(op.docId, op.before);
+        const curDoc = await findLiveDoc(op.docId);
+        if (!curDoc) {
+          conflicts.push({ path: `bardWiki.${op.docId}`, reason: '되돌릴 BardWiki 문서를 찾을 수 없습니다.' });
+        } else if (curDoc.grade !== op.after) {
+          conflicts.push({ path: `bardWiki.${op.docId}.grade`, reason: '적용 이후 BardWiki 등급이 다시 변경되었습니다.' });
+        } else {
+          await bw.setGrade({
+            documentId: curDoc.id,
+            grade: op.before ?? null,
+            gradeBy: 'user',
+            expectedContentHash: curDoc.contentHash || '',
+          });
           reverted++;
         }
       } else if (op.bwOp === 'set_context_mode' && bw.setContextMode) {
-        let curMode = null;
-        try {
-          const ctx = await bw.getContext?.();
-          curMode = ctx?.mode ?? ctx?.contextMode ?? null;
-        } catch {}
-        if (curMode !== null && curMode !== op.after) {
-          conflicts.push({ path: 'bardWiki.contextMode', reason: '적용 이후 BardWiki 컨텍스트 모드가 다시 변경되었습니다.' });
-        } else if (op.before !== null && op.before !== undefined) {
-          await bw.setContextMode(op.before);
+        const curDoc = await findLiveDoc(op.docId);
+        if (!curDoc) {
+          conflicts.push({ path: `bardWiki.${op.docId}`, reason: '되돌릴 BardWiki 문서를 찾을 수 없습니다.' });
+        } else if (curDoc.contextMode !== op.after) {
+          conflicts.push({ path: `bardWiki.${op.docId}.contextMode`, reason: '적용 이후 BardWiki 컨텍스트 모드가 다시 변경되었습니다.' });
+        } else if (op.before) {
+          await bw.setContextMode({
+            documentId: curDoc.id,
+            contextMode: op.before,
+            expectedContentHash: curDoc.contentHash || '',
+          });
           reverted++;
         }
       } else if (op.bwOp === 'trash_document' && op.before && bw.saveDocument) {
-        await bw.saveDocument(op.before);
+        await bw.saveDocument({
+          type: op.before.type || 'other',
+          title: op.before.title,
+          ...(Array.isArray(op.before.aliases) ? { aliases: op.before.aliases } : {}),
+          markdown: op.before.content ?? '',
+        });
         reverted++;
       }
       continue;
@@ -1927,19 +2344,83 @@ async function revertHostApiRecord(adapter, entity, ops) {
       if (typeof api?.risunestPatchConversation !== 'function') continue;
       let curCtx = null;
       if (typeof api?.risunestReadConversationContext === 'function') {
-        try { curCtx = await api.risunestReadConversationContext(op.ref); } catch {}
+        try {
+          const varKeys = (op.chatVariables || []).map(v => v.key);
+          const msgEntries = op.messages || [];
+          curCtx = await api.risunestReadConversationContext({
+            characterId: op.characterId,
+            conversationId: op.conversationId,
+            ...(varKeys.length > 0 ? { chatVariables: varKeys } : {}),
+            ...(msgEntries.length > 0 ? {
+              messages: {
+                startIndex: Math.min(...msgEntries.map(m => m.index)),
+                limit: Math.min(128, Math.max(...msgEntries.map(m => m.index)) - Math.min(...msgEntries.map(m => m.index)) + 1),
+              },
+            } : {}),
+          });
+        } catch {}
       }
-      const inverse = {};
-      for (const [k, afterVal] of Object.entries(op.after || {})) {
-        if (curCtx && Object.hasOwn(curCtx, k) && !deepEqual(curCtx[k], afterVal)) {
-          conflicts.push({ path: `risunest.${k}`, reason: `적용 이후 "${k}" 값이 다시 변경되었습니다.` });
-        } else {
-          inverse[k] = op.before?.[k] ?? null;
+
+      const curVars = curCtx?.chatVariables && typeof curCtx.chatVariables === 'object' ? curCtx.chatVariables : null;
+      const curMsgStart = Number.isSafeInteger(curCtx?.messages?.startIndex) ? curCtx.messages.startIndex : 0;
+      const curMsgs = Array.isArray(curCtx?.messages?.messages) ? curCtx.messages.messages : null;
+
+      const inverseMessages = [];
+      for (const m of op.messages || []) {
+        const liveMsg = curMsgs ? curMsgs[m.index - curMsgStart] : null;
+        let conflicted = false;
+        if (liveMsg) {
+          for (const [field, afterVal] of Object.entries(m.after || {})) {
+            if (!deepEqual(liveMsg[field], afterVal)) {
+              conflicts.push({ path: `risunest.messages[${m.index}].${field}`, reason: `적용 이후 메시지 #${m.index + 1}의 "${field}" 값이 다시 변경되었습니다.` });
+              conflicted = true;
+            }
+          }
+        }
+        if (!conflicted) {
+          inverseMessages.push({
+            index: m.index,
+            messageId: m.messageId ?? null,
+            expected: clone(m.after),
+            set: clone(m.before),
+          });
         }
       }
-      if (Object.keys(inverse).length > 0) {
-        await api.risunestPatchConversation(op.ref, inverse);
-        reverted++;
+
+      const inverseVars = [];
+      for (const v of op.chatVariables || []) {
+        if (curVars) {
+          const liveVal = Object.hasOwn(curVars, v.key)
+            ? curVars[v.key]
+            : (Object.hasOwn(curVars, `$${v.key}`) ? curVars[`$${v.key}`] : null);
+          const normLive = (liveVal === undefined || liveVal === null) ? null : liveVal;
+          if (!deepEqual(normLive, v.after)) {
+            conflicts.push({ path: `risunest.chatVariables.${v.key}`, reason: `적용 이후 변수 "${v.key}" 값이 다시 변경되었습니다.` });
+            continue;
+          }
+        }
+        inverseVars.push({
+          key: v.key,
+          expected: v.after,
+          value: v.before,
+        });
+      }
+
+      if (inverseMessages.length > 0 || inverseVars.length > 0) {
+        const invReq = {
+          characterId: op.characterId,
+          conversationId: op.conversationId,
+          mutationId: makeUuid(),
+          ...(Number.isSafeInteger(curCtx?.revision) ? { baseRevision: curCtx.revision } : {}),
+          messages: inverseMessages,
+          chatVariables: inverseVars,
+        };
+        const res = await api.risunestPatchConversation(invReq);
+        if (res && typeof res === 'object' && res.status === 'conflict') {
+          conflicts.push({ path: `risunest.${res.conflict?.target || 'conversation'}`, reason: `호스트 충돌(${res.conflict?.reason || 'conflict'})로 되돌리기가 거부되었습니다.` });
+        } else {
+          reverted++;
+        }
       }
     }
   }
@@ -1949,10 +2430,19 @@ async function revertHostApiRecord(adapter, entity, ops) {
 
 export {
   M3_ACTIONS,
+  COLOR_SCHEME_REQUIRED_KEYS,
+  TEXT_THEME_REQUIRED_KEYS,
   ALLOWED_COLOR_SCHEME_KEYS,
+  ALLOWED_COLOR_SCHEME_PRESETS,
   ALLOWED_TEXT_THEME_KEYS,
+  ALLOWED_TEXT_THEME_PRESETS,
   ALLOWED_ONBOARDING_FIELD_TYPES,
   ALLOWED_RISUNEST_PATCH_KEYS,
+  BARD_WIKI_DOC_TYPES,
+  BARD_WIKI_CONTEXT_MODES,
+  unwrapColorScheme,
+  unwrapTextTheme,
+  normalizeBardWikiGrade,
   sanitizeChatPanelHtml,
   getBardWikiApi,
   previewM3Proposal,

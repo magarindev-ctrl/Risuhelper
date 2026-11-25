@@ -110,7 +110,7 @@ const KNOWLEDGE_SECTIONS = {
   - \`tags\`: 캐릭터 태그 문자열 배열. 부분 추가/제거는 \`addTags\`/\`removeTags\` 사용.`,
 
   theme_hud: `[테마 · 스타일 · 채팅 HUD 패널]
-- \`update_theme\`: 색상 스킴 프리셋(\`colorSchemeName\`), 커스텀 색상(\`colorScheme\`), 텍스트 테마 프리셋(\`textThemeName\`), 커스텀 텍스트 색상(\`customTextTheme\`), \`customCSS\`/\`guiHTML\`을 즉시 반영하며 원클릭 되돌리기를 지원합니다.
+- \`update_theme\`: 색상 스킴 프리셋(\`colorSchemeName\`), 커스텀 색상(\`colorScheme\`, 10키 자동 병합), 텍스트 테마 프리셋(\`textThemeName\`: \`standard\`/\`highcontrast\`), 커스텀 텍스트 색상(\`customTextTheme\`, 6키 자동 병합), \`customCSS\`/\`guiHTML\`을 즉시 반영하며 원클릭 되돌리기를 지원합니다.
 - \`set_chat_panel\`: 채팅 화면에 정화된 HTML/CSS/CBS 라이브 HUD 패널을 띄우거나(\`html\`) 닫습니다(\`clear: true\`). 보안상 \`<script>\`·\`<iframe>\`·이벤트 핸들러는 자동 제거됩니다.`,
 
   assets_repair: `[에셋 · 인레이 · 워크스페이스 건강검진 수리]
@@ -127,17 +127,17 @@ const KNOWLEDGE_SECTIONS = {
 - \`update_onboarding\`: 캐릭터 시작 시 사용자에게 보여 주는 온보딩 입력 폼(\`enabled\`, \`title\`, \`description\`, \`fields[]\`: text/textarea/select/checkbox/radio/number)을 생성·수정합니다.`,
 
   extensions: `[선언형 상주 확장 (임의 JS 실행 금지)]
-- \`manage_extensions\`: 사용자가 승인한 선언형 JSON 규칙만 상주 실행하며 패널 \`상주 확장 관리\`에서 언제든 켜고 끌 수 있습니다(재시작 복원 · 언로드 완전 해제).
-- 지원 종류: \`script_handler\`(전역 정규식), \`replacer\`(전역 치환), \`chat_listener\`(응답 후 태그/변수 점검 알림), \`body_intercepter\`(조건부 요청 본문 JSON 패치 · 보안 키 차단), \`mcp_server\`(읽기 전용 진단 MCP 도구 노출), \`tts_processor\`(TTS 전/후처리 텍스트 정리), \`plugin_channel\`(V3 플러그인 연동 채널).
-- 보안 원칙: 임의 JS 코드(\`code\`/\`js\`/\`eval\`)나 API 키/헤더 수정은 절대 금지됩니다.`,
+- \`manage_extensions\`: 사용자가 승인한 선언형 JSON 규칙만 상주 실행하며 패널 \`상주 확장\`에서 언제든 켜고 끄거나 일괄 중지할 수 있습니다(ReDoS 차단 · 실행 지연/오류 자동 중지 · 언로드 완전 해제).
+- 지원 종류: \`script_handler\`(display/output/input/process 전역 정규식), \`replacer\`(beforeRequest 메시지 배열 / afterRequest 응답 문자열 치환), \`chat_listener\`(output 응답 후 태그/변수 점검 알림), \`body_intercepter\`(조건부 요청 본문 파라미터 패치 · 안전 파라미터 허용목록만 허용), \`mcp_server\`(읽기 전용 진단 MCP 도구 노출), \`tts_processor\`(TTS 합성 전 \`pre\` 텍스트 정리), \`plugin_channel\`(V3 플러그인 연동 채널).
+- 보안 원칙: 임의 JS 코드(\`code\`/\`js\`/\`eval\`), 프롬프트·모델·인증 키 변조(\`messages\`/\`model\`/\`apiKey\`/\`authorization\`)는 절대 금지됩니다.`,
 
   bard_wiki: `[RisuBard BardWiki 서사 메모리]
-- RisuBard 전용 \`bardWiki.*\` API는 현재 열려 있는 캐릭터·채팅 스코프 기준으로 동작합니다.
-- 먼저 \`read_bard_wiki\` 도구로 문서 목록·컨텍스트를 조회하고, \`manage_bard_wiki\`로 문서 저장(\`save_document\`), 등급 변경(\`set_grade\`), 컨텍스트 모드 전환(\`set_context_mode\`), 휴지통 이동(\`trash_document\`)을 승인 카드로 제안하세요.`,
+- RisuBard 전용 \`bardWiki.*\` API는 현재 열려 있는 캐릭터·채팅 스코프 기준으로 동작하며, 수정 시 \`contentHash\` 충돌 검사를 거칩니다.
+- 먼저 \`read_bard_wiki\` 도구로 문서 목록·컨텍스트를 조회하고, \`manage_bard_wiki\`로 문서 저장(\`save_document\`, type/title/markdown), 등급 변경(\`set_grade\`, 0~9 또는 EX/S/A/B/C/D), 문서별 컨텍스트 모드 전환(\`set_context_mode\`, documentId + always/auto/never), 휴지통 이동(\`trash_document\`)을 승인 카드로 제안하세요.`,
 
   risunest_native: `[RisuNest 전용 네이티브 대화 패치 · 조회]
 - RisuNest에서는 \`list_items\`/\`read_chat\`이 \`queryCharacters\`/\`queryConversations\`/\`queryConversationMessages\` 페이지네이션 고속 경로를 우선 사용합니다.
-- \`patch_risunest_conversation\`: \`risunestReadConversationContext\`로 현재 값을 확인한 뒤 \`risunestPatchConversation\`으로 대화 메타데이터(\`name\`, \`note\`, \`folderId\`, \`scriptstate\`, \`supaMemoryData\` 등)를 정밀 패치합니다.`,
+- \`patch_risunest_conversation\`: \`risunestReadConversationContext\`로 현재 리비전·값을 확인한 뒤 \`risunestPatchConversation\`으로 대화 메시지(\`messages[]\`)와 채팅 변수(\`chatVariables\`)를 원자적·낙관적 잠금(\`mutationId\`/\`expected\`)으로 정밀 패치합니다.`,
 };
 
 function buildKnowledgeForContext(context) {

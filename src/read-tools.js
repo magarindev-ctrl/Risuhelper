@@ -728,37 +728,31 @@ async function runListItems(adapter, args) {
   if (kind === 'chat') {
     const { char, charIndex, activeChatIndex, crossCharacter } = await adapter._resolveTargetCharacter(charHint, null, '채팅 목록 조회');
     const curIdx = !crossCharacter && Number.isInteger(activeChatIndex) ? activeChatIndex : (char.chatPage ?? 0);
-    // RisuNest fast path: paginated queryConversations without loading every full chat payload
-    if (adapter.hasCapability('risunestQuery') && typeof adapter.api?.queryConversations === 'function') {
+    // RisuNest fast path: paginated queryConversations (PluginConversationQuery: { characterId, limit, cursor? })
+    if (adapter.hasCapability('risunestQuery') && typeof adapter.api?.queryConversations === 'function' && char?.chaId) {
       try {
         const res = await adapter.api.queryConversations({
-          charId: char?.chaId || undefined,
-          charIndex,
-          offset,
-          limit,
-          query: q || undefined,
+          characterId: String(char.chaId),
+          limit: Math.min(100, Math.max(1, limit)),
         });
         const items = Array.isArray(res) ? res : (Array.isArray(res?.items) ? res.items : null);
         if (items) {
           const rows = items.map((c, idx) => ({
-            chatIndex: Number.isInteger(c?.chatIndex) ? c.chatIndex : (offset + idx),
-            id: c?.id || c?.conversationId || null,
-            name: c?.name || `채팅 ${offset + idx + 1}`,
+            chatIndex: Number.isInteger(c?.chatIndex) ? c.chatIndex : idx,
+            id: c?.conversationId || c?.id || null,
+            name: c?.name || `채팅 ${idx + 1}`,
             messages: Number(c?.messageCount ?? c?.messages ?? 0),
             folderId: c?.folderId || null,
             coldStored: Boolean(c?.coldStored),
-            current: (Number.isInteger(c?.chatIndex) ? c.chatIndex : offset + idx) === curIdx,
+            current: (Number.isInteger(c?.chatIndex) ? c.chatIndex : idx) === curIdx,
           }));
           return {
             ok: true,
             kind,
             usedQueryConversations: true,
             charName: char.name || '(무제)',
-            total: Number(res?.total ?? rows.length),
-            offset,
-            limit,
-            hasMore: Boolean(res?.hasMore ?? (offset + rows.length < Number(res?.total ?? rows.length))),
-            items: rows,
+            ...paginate(rows),
+            hasMore: Boolean(res?.nextCursor || (offset + limit < rows.length)),
           };
         }
       } catch {}
@@ -809,24 +803,30 @@ async function runReadChat(adapter, args) {
     return { ok: false, coldStored: true, error: '콜드 스토리지에 보관된 채팅입니다. RisuAI에서 먼저 열어 복원한 뒤 조회해 주세요.' };
   }
 
-  // RisuNest fast path: paginated queryConversationMessages when chat.message is not fully hydrated
+  // RisuNest fast path: paginated queryConversationMessages (PluginConversationMessageQuery)
   let messages = Array.isArray(chat.message) ? chat.message : [];
   let usedQueryMessages = false;
   if (
     adapter.hasCapability('risunestQuery') &&
     typeof adapter.api?.queryConversationMessages === 'function' &&
+    char?.chaId &&
     (args.conversationId || chat.id)
   ) {
     try {
-      const qRes = await adapter.api.queryConversationMessages({
-        conversationId: args.conversationId || chat.id,
-        charIndex,
-        chatIndex,
-        from: optionalInt(args.from),
-        to: optionalInt(args.to),
-        tail: optionalInt(args.tail),
-      });
-      const qItems = Array.isArray(qRes) ? qRes : (Array.isArray(qRes?.items) ? qRes.items : null);
+      const fromIdx = optionalInt(args.from);
+      const toIdx = optionalInt(args.to);
+      const tailN = optionalInt(args.tail);
+      const queryInput = {
+        characterId: String(char.chaId),
+        conversationId: String(args.conversationId || chat.id),
+        ...(fromIdx !== undefined
+          ? { startIndex: fromIdx, limit: Math.min(128, Math.max(1, toIdx !== undefined && toIdx > fromIdx ? toIdx - fromIdx : 30)) }
+          : { limit: Math.min(128, Math.max(1, tailN ?? 30)) }),
+      };
+      const qRes = await adapter.api.queryConversationMessages(queryInput);
+      const qItems = Array.isArray(qRes)
+        ? qRes
+        : (Array.isArray(qRes?.messages) ? qRes.messages : (Array.isArray(qRes?.items) ? qRes.items : null));
       if (qItems && qItems.length > 0 && messages.length === 0) {
         messages = qItems;
         usedQueryMessages = true;
@@ -1321,7 +1321,7 @@ async function runReadBardWiki(adapter, args) {
 
   let context = null;
   if (bw.getContext) {
-    try { context = await bw.getContext(); } catch {}
+    try { context = await bw.getContext(args.query ? { query: String(args.query) } : undefined); } catch {}
   }
   let docs = [];
   if (bw.getDocuments) {
@@ -1354,10 +1354,13 @@ async function runReadBardWiki(adapter, args) {
     totalDocuments: filtered.length,
     documents: filtered.slice(0, 30).map(d => ({
       id: d?.id || '',
+      type: d?.type || 'other',
+      status: d?.status || 'active',
       title: d?.title || '(무제)',
       grade: d?.grade ?? null,
-      category: d?.category ?? null,
-      tags: Array.isArray(d?.tags) ? d.tags : [],
+      contextMode: d?.contextMode ?? 'auto',
+      contentHash: d?.contentHash || '',
+      aliases: Array.isArray(d?.aliases) ? d.aliases : [],
       preview: clipText(d?.content || '', 240).text,
     })),
   };

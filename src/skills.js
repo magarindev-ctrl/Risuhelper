@@ -500,17 +500,17 @@ const SKILL_DEFS = [
     },
     knowledge: ['bard_wiki'],
     rules: [
-      'RisuBard 환경에서는 `read_bard_wiki`로 현재 스코프 문서를 확인하고 `manage_bard_wiki`로 저장·등급·컨텍스트 모드·휴지통 이동을 제안하세요.',
+      'RisuBard 환경에서는 `read_bard_wiki`로 현재 스코프 문서를 확인하고 `manage_bard_wiki`로 저장·등급·문서별 컨텍스트 모드·휴지통 이동을 제안하세요.',
     ],
     schemas: [
-      '- BardWiki 문서 관리: {"action":"manage_bard_wiki","operation":"save_document|set_grade|set_context_mode|trash_document","documentId":"doc-1","title":"문서명","content":"내용","grade":"A","contextMode":"auto"}',
+      '- BardWiki 문서 관리: {"action":"manage_bard_wiki","operation":"save_document|set_grade|set_context_mode|trash_document","documentId":"doc-1","type":"location|character|event|other","title":"문서명","markdown":"내용","grade":7,"contextMode":"auto|always|never"}',
     ],
     rawDelimiters: false,
   },
   {
     id: 'risunest_native',
     label: 'RisuNest 패치',
-    summary: 'RisuNest 전용 대화 정밀 패치(patch_risunest_conversation) 및 호스트 툴 조회',
+    summary: 'RisuNest 전용 대화 메시지·변수 정밀 패치(patch_risunest_conversation) 및 호스트 툴 조회',
     requiresCapabilities: ['risunestPatch'],
     actions: ['patch_risunest_conversation'],
     tools: ['inspect_host_tools', 'list_items', 'read_chat', 'host_info'],
@@ -524,10 +524,10 @@ const SKILL_DEFS = [
     },
     knowledge: ['risunest_native'],
     rules: [
-      'RisuNest 대화 메타데이터·노트·변수를 네이티브 API로 직접 패치할 때 `patch_risunest_conversation`을 사용하세요.',
+      'RisuNest 대화의 메시지·채팅 변수를 네이티브 원자 패치 API로 직접 수정할 때 `patch_risunest_conversation`을 사용하세요.',
     ],
     schemas: [
-      '- RisuNest 대화 정밀 패치: {"action":"patch_risunest_conversation","title":"설명","conversationId":"conv-1","patch":{"name":"새 제목","note":"작가의 노트"}}',
+      '- RisuNest 대화 정밀 패치: {"action":"patch_risunest_conversation","title":"설명","conversationId":"conv-1","messages":[{"index":0,"set":{"data":"수정 본문"}}],"chatVariables":[{"key":"hp","value":90}]}',
     ],
     rawDelimiters: false,
   },

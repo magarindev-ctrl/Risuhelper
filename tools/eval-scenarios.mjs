@@ -2066,7 +2066,8 @@ const EVAL_SCENARIOS = [
       const issues = [];
       if (!proposals.some(p => p.proposal?.action === 'update_theme')) issues.push('update_theme 제안 누락');
       if (state.db.colorSchemeName !== 'dark') issues.push(`colorSchemeName 미반영: ${state.db.colorSchemeName}`);
-      if (state.hostMeta?.textTheme?.FontColorStandard !== '#e6edf3') issues.push('customTextTheme 미반영');
+      const fontColor = state.hostMeta?.textTheme?.customTheme?.FontColorStandard ?? state.hostMeta?.textTheme?.FontColorStandard;
+      if (fontColor !== '#e6edf3') issues.push('customTextTheme 미반영');
       return issues;
     },
   },
@@ -2555,7 +2556,7 @@ const EVAL_SCENARIOS = [
     check({ proposals, state }) {
       const issues = [];
       if (!proposals.some(p => p.proposal?.action === 'manage_extensions')) issues.push('manage_extensions 제안 누락');
-      if ((state.hostMeta?.bodyIntercepters?.length || 0) === 0) issues.push('registerBodyIntercepter 미등록');
+      if ((state.hostMeta?.bodyIntercepters?.size || 0) === 0) issues.push('registerBodyIntercepter 미등록');
       return issues;
     },
   },
@@ -2593,7 +2594,7 @@ const EVAL_SCENARIOS = [
     kind: 'positive',
     category: 'M3 · RisuBard BardWiki',
     title: 'RisuBard BardWiki 서사 문서 저장 (manage_bard_wiki)',
-    prompt: '바드 위키(BardWiki)에 "항구 도시 공방" 문서를 새로 저장하고 등급을 A로 설정해 줘. 본문은 "아리아가 연금술을 연구하는 최상층 공방이다."로 넣어 줘.',
+    prompt: '바드 위키(BardWiki)에 "항구 도시 공방" 문서를 새로 저장하고 등급을 A(7)로 설정해 줘. 본문은 "아리아가 연금술을 연구하는 최상층 공방이다."로 넣어 줘.',
     expectMode: 'apply',
     setup() {
       const character = baseCharacter();
@@ -2607,16 +2608,16 @@ const EVAL_SCENARIOS = [
     goldenReply: 'RisuBard BardWiki에 새 문서를 저장하는 제안입니다.\n\n' + proposalFence({
       action: 'manage_bard_wiki',
       operation: 'save_document',
-      documentId: 'wiki-workshop',
+      type: 'location',
       title: '항구 도시 공방',
-      content: '아리아가 연금술을 연구하는 최상층 공방이다.',
-      grade: 'A',
+      markdown: '아리아가 연금술을 연구하는 최상층 공방이다.',
+      grade: 7,
     }),
     check({ proposals, state }) {
       const issues = [];
       if (!proposals.some(p => p.proposal?.action === 'manage_bard_wiki')) issues.push('manage_bard_wiki 제안 누락');
       const doc = (state.hostMeta?.bardWikiDocs || []).find(d => d.title === '항구 도시 공방');
-      if (!doc || doc.grade !== 'A') issues.push('BardWiki 문서 미저장');
+      if (!doc || doc.grade !== 7) issues.push(`BardWiki 문서 미저장 또는 등급 불일치: ${doc?.grade}`);
       return issues;
     },
   },
@@ -2628,7 +2629,7 @@ const EVAL_SCENARIOS = [
     kind: 'positive',
     category: 'M3 · RisuBard BardWiki',
     title: 'RisuBard BardWiki 문서 등급 변경 (manage_bard_wiki)',
-    prompt: '바드 위키 문서 doc-1의 등급을 S로 올려 줘.',
+    prompt: '바드 위키 문서 doc-1의 등급을 S(8)로 올려 줘.',
     expectMode: 'apply',
     setup() {
       const character = baseCharacter();
@@ -2636,21 +2637,21 @@ const EVAL_SCENARIOS = [
         hostFlavor: 'RisuBard',
         character,
         db: baseDb(),
-        bardWikiDocs: [{ id: 'doc-1', title: '왕국 연대기', content: '고대 왕국의 역사.', grade: 'B' }],
+        bardWikiDocs: [{ id: 'doc-1', type: 'event', status: 'active', title: '왕국 연대기', content: '고대 왕국의 역사.', grade: 6, contextMode: 'auto', contentHash: 'hash-doc-1-v1' }],
         context: { screen: 'chat', targetKind: 'general', freeTalk: true, labelText: '자유대화', screenHint: '채팅 화면' },
       };
     },
-    goldenReply: 'BardWiki 문서 `doc-1`의 등급을 `S`로 변경하는 제안입니다.\n\n' + proposalFence({
+    goldenReply: 'BardWiki 문서 `doc-1`의 등급을 `S`(8)로 변경하는 제안입니다.\n\n' + proposalFence({
       action: 'manage_bard_wiki',
       operation: 'set_grade',
       documentId: 'doc-1',
-      grade: 'S',
+      grade: 8,
     }),
     check({ proposals, state }) {
       const issues = [];
       if (!proposals.some(p => p.proposal?.action === 'manage_bard_wiki')) issues.push('manage_bard_wiki 제안 누락');
       const doc = (state.hostMeta?.bardWikiDocs || []).find(d => d.id === 'doc-1');
-      if (doc?.grade !== 'S') issues.push(`BardWiki 등급 미변경: ${doc?.grade}`);
+      if (doc?.grade !== 8) issues.push(`BardWiki 등급 미변경: ${doc?.grade}`);
       return issues;
     },
   },
@@ -2682,70 +2683,87 @@ const EVAL_SCENARIOS = [
     },
   },
 
-  // 69. risunest_native positive 1: patch_risunest_conversation (title + note)
+  // 69. risunest_native positive 1: patch_risunest_conversation (chatVariables)
   {
     id: 'risunest-patch-conversation-note',
     skillId: 'risunest_native',
     kind: 'positive',
     category: 'M3 · RisuNest 네이티브 패치',
-    title: 'RisuNest 네이티브 대화 제목·노트 정밀 패치 (patch_risunest_conversation)',
-    prompt: '리스네스트 네이티브 패치로 대화 conv-1의 제목(name)을 "2부 항구 편"으로, 작가의 노트(note)를 "서정적인 문체 유지"로 패치해 줘.',
+    title: 'RisuNest 네이티브 대화 채팅 변수 정밀 패치 (patch_risunest_conversation)',
+    prompt: '리스네스트 네이티브 패치로 현재 대화(conv-1)의 채팅 변수 hp를 95로, location을 "항구"로 정밀 패치해 줘.',
     expectMode: 'apply',
     setup() {
       const character = baseCharacter();
+      character.chats[0].id = 'conv-1';
       return {
         hostFlavor: 'RisuNest',
         character,
         db: baseDb(),
-        risunestConversations: { 'conv-1': { name: '1부 시작', note: '' } },
+        risunestConversations: {
+          'conv-1': {
+            revision: 1,
+            chatVariables: { hp: 80, location: '숲' },
+            messages: [{ role: 'user', data: '안녕', chatId: 'm-1' }],
+          },
+        },
         context: { screen: 'chat', targetKind: 'general', freeTalk: true, labelText: '자유대화', screenHint: '채팅 화면' },
       };
     },
-    goldenReply: 'RisuNest `risunestPatchConversation`으로 대화 제목과 작가의 노트를 정밀 패치합니다.\n\n' + proposalFence({
+    goldenReply: 'RisuNest `risunestPatchConversation`으로 채팅 변수 `hp`, `location`을 원자적으로 패치합니다.\n\n' + proposalFence({
       action: 'patch_risunest_conversation',
-      title: 'RisuNest 대화 제목·노트 패치',
+      title: 'RisuNest 채팅 변수 패치',
       conversationId: 'conv-1',
-      patch: { name: '2부 항구 편', note: '서정적인 문체 유지' },
+      chatVariables: [
+        { key: 'hp', value: 95 },
+        { key: 'location', value: '항구' },
+      ],
     }),
     check({ proposals, state }) {
       const issues = [];
       if (!proposals.some(p => p.proposal?.action === 'patch_risunest_conversation')) issues.push('patch_risunest_conversation 제안 누락');
       const conv = state.hostMeta?.risunestConversations?.['conv-1'];
-      if (conv?.name !== '2부 항구 편' || conv?.note !== '서정적인 문체 유지') issues.push('RisuNest 대화 패치 미반영');
+      if (conv?.chatVariables?.hp !== 95 || conv?.chatVariables?.location !== '항구') issues.push('RisuNest 채팅 변수 패치 미반영');
       return issues;
     },
   },
 
-  // 70. risunest_native positive 2: patch_risunest_conversation (supaMemoryData)
+  // 70. risunest_native positive 2: patch_risunest_conversation (messages)
   {
     id: 'risunest-patch-conversation-memory',
     skillId: 'risunest_native',
     kind: 'positive',
     category: 'M3 · RisuNest 네이티브 패치',
-    title: 'RisuNest 네이티브 대화 요약 메모리 패치 (patch_risunest_conversation)',
-    prompt: '리스네스트 네이티브 패치로 대화 conv-1의 supaMemoryData를 "아리아와 동맹을 맺었다."로 업데이트해 줘.',
+    title: 'RisuNest 네이티브 대화 메시지 정밀 패치 (patch_risunest_conversation)',
+    prompt: '리스네스트 네이티브 패치로 대화 conv-1의 0번 메시지 본문을 "아리아와 동맹을 맺었다."로 업데이트해 줘.',
     expectMode: 'apply',
     setup() {
       const character = baseCharacter();
+      character.chats[0].id = 'conv-1';
       return {
         hostFlavor: 'RisuNest',
         character,
         db: baseDb(),
-        risunestConversations: { 'conv-1': { name: '1부 시작', supaMemoryData: '' } },
+        risunestConversations: {
+          'conv-1': {
+            revision: 1,
+            chatVariables: {},
+            messages: [{ role: 'char', data: '초기 메시지', chatId: 'm-0' }],
+          },
+        },
         context: { screen: 'chat', targetKind: 'general', freeTalk: true, labelText: '자유대화', screenHint: '채팅 화면' },
       };
     },
-    goldenReply: 'RisuNest 대화 `conv-1`의 `supaMemoryData`를 정밀 패치합니다.\n\n' + proposalFence({
+    goldenReply: 'RisuNest 대화 `conv-1`의 0번 메시지를 정밀 패치합니다.\n\n' + proposalFence({
       action: 'patch_risunest_conversation',
-      title: 'RisuNest 대화 메모리 패치',
+      title: 'RisuNest 메시지 정밀 패치',
       conversationId: 'conv-1',
-      patch: { supaMemoryData: '아리아와 동맹을 맺었다.' },
+      messages: [{ index: 0, set: { data: '아리아와 동맹을 맺었다.' } }],
     }),
     check({ proposals, state }) {
       const issues = [];
       if (!proposals.some(p => p.proposal?.action === 'patch_risunest_conversation')) issues.push('patch_risunest_conversation 제안 누락');
       const conv = state.hostMeta?.risunestConversations?.['conv-1'];
-      if (conv?.supaMemoryData !== '아리아와 동맹을 맺었다.') issues.push('RisuNest supaMemoryData 패치 미반영');
+      if (conv?.messages?.[0]?.data !== '아리아와 동맹을 맺었다.') issues.push('RisuNest 메시지 패치 미반영');
       return issues;
     },
   },
@@ -2825,21 +2843,49 @@ const deepClone = (v) => (typeof structuredClone === 'function' ? structuredClon
 
 function createScenarioHost(setupRes, callModelFn) {
   const hostFlavor = setupRes.hostFlavor || 'RisuAI';
+  const COLOR_KEYS = ['bgcolor', 'darkbg', 'borderc', 'selected', 'draculared', 'textcolor', 'textcolor2', 'darkBorderc', 'darkbutton', 'type'];
+  const TEXT_KEYS = ['FontColorStandard', 'FontColorBold', 'FontColorItalic', 'FontColorItalicBold', 'FontColorQuote1', 'FontColorQuote2'];
+  let nextBiId = 1;
+  let nextHashSeq = 2;
+
   const hostMeta = {
-    colorScheme: { bgcolor: '#1e1e2e', textcolor: '#cdd6f4', type: 'dark' },
-    textTheme: { FontColorStandard: '#cdd6f4', FontColorItalic: '#a6adc8', name: 'standard' },
+    colorScheme: {
+      name: 'dark',
+      scheme: {
+        bgcolor: '#1e1e2e',
+        darkbg: '#181825',
+        borderc: '#585b70',
+        selected: '#313244',
+        draculared: '#f38ba8',
+        textcolor: '#cdd6f4',
+        textcolor2: '#a6adc8',
+        darkBorderc: '#45475a',
+        darkbutton: '#313244',
+        type: 'dark',
+      },
+    },
+    textTheme: {
+      name: 'standard',
+      customTheme: {
+        FontColorStandard: '#cdd6f4',
+        FontColorBold: '#ffffff',
+        FontColorItalic: '#a6adc8',
+        FontColorItalicBold: '#bac2de',
+        FontColorQuote1: '#89dceb',
+        FontColorQuote2: '#fab387',
+      },
+    },
     chatPanelHtml: null,
     savedAssets: [],
     charOrderChecked: false,
     scriptHandlers: [],
     replacers: [],
     chatListeners: [],
-    bodyIntercepters: [],
+    bodyIntercepters: new Map(),
     mcps: new Map(),
     ttsPreInstalled: false,
-    ttsPostInstalled: false,
     bardWikiDocs: deepClone(setupRes.bardWikiDocs || []),
-    bardWikiContext: { mode: 'auto' },
+    bardWikiContext: { content: '컨텍스트', sources: [] },
     risunestConversations: deepClone(setupRes.risunestConversations || {}),
   };
   const state = {
@@ -2862,15 +2908,32 @@ function createScenarioHost(setupRes, callModelFn) {
       return { app: { id: hostFlavor.toLowerCase(), version: '1.0.0' }, platform: 'eval' };
     },
     async getColorScheme() { return deepClone(hostMeta.colorScheme); },
-    async changeColorScheme(name) { state.db.colorSchemeName = String(name); },
-    async setColorScheme(scheme) { hostMeta.colorScheme = deepClone(scheme); },
+    async changeColorScheme(name) { state.db.colorSchemeName = String(name); hostMeta.colorScheme.name = String(name); },
+    async setColorScheme(scheme) {
+      for (const k of COLOR_KEYS) {
+        if (typeof scheme?.[k] !== 'string') throw new Error(`Color scheme missing key: ${k}`);
+      }
+      state.db.colorSchemeName = 'custom';
+      hostMeta.colorScheme = { name: 'custom', scheme: deepClone(scheme) };
+    },
     async getTextTheme() { return deepClone(hostMeta.textTheme); },
-    async changeTextTheme(name) { state.db.textTheme = String(name); },
-    async setCustomTextTheme(theme) { hostMeta.textTheme = deepClone(theme); },
-    async setChatPanel(html) { hostMeta.chatPanelHtml = html ? String(html) : null; },
-    async saveAsset(bytes, customId, fileName) {
-      const id = customId || `asset_${hostMeta.savedAssets.length + 1}_${fileName || 'file'}`;
-      hostMeta.savedAssets.push({ id, fileName, bytes: bytes?.length || 0 });
+    async changeTextTheme(name) {
+      if (!['standard', 'highcontrast'].includes(name)) throw new Error(`Invalid textTheme: ${name}`);
+      state.db.textTheme = String(name);
+      hostMeta.textTheme.name = String(name);
+    },
+    async setCustomTextTheme(theme) {
+      for (const k of TEXT_KEYS) {
+        if (typeof theme?.[k] !== 'string') throw new Error(`CustomTextTheme missing key: ${k}`);
+      }
+      state.db.textTheme = 'custom';
+      hostMeta.textTheme = { name: 'custom', customTheme: deepClone(theme) };
+    },
+    async setChatPanel(html) { hostMeta.chatPanelHtml = html ? String(html) : null; return { id: 'risuhelper:default' }; },
+    async saveAsset(bytes) {
+      if (!(bytes instanceof Uint8Array)) throw new Error('saveAsset requires Uint8Array');
+      const id = `asset_${hostMeta.savedAssets.length + 1}`;
+      hostMeta.savedAssets.push({ id, bytes: bytes.length });
       return id;
     },
     async checkCharOrder() {
@@ -2882,64 +2945,131 @@ function createScenarioHost(setupRes, callModelFn) {
       const idx = hostMeta.scriptHandlers.findIndex(x => x.mode === mode && x.fn === fn);
       if (idx >= 0) hostMeta.scriptHandlers.splice(idx, 1);
     },
-    async addRisuReplacer(stage, fn) { hostMeta.replacers.push({ stage, fn }); },
+    async addRisuReplacer(stage, fn) {
+      if (stage !== 'beforeRequest' && stage !== 'afterRequest') throw new Error(`Invalid replacer stage: ${stage}`);
+      hostMeta.replacers.push({ stage, fn });
+    },
     async removeRisuReplacer(stage, fn) {
       const idx = hostMeta.replacers.findIndex(x => x.stage === stage && x.fn === fn);
       if (idx >= 0) hostMeta.replacers.splice(idx, 1);
     },
-    async addRisuChatListener(fn) { hostMeta.chatListeners.push(fn); },
-    async removeRisuChatListener(fn) {
-      const idx = hostMeta.chatListeners.indexOf(fn);
+    async addRisuChatListener(mode, fn) {
+      if (mode !== 'output') throw new Error(`Invalid chat listener mode: ${mode}`);
+      hostMeta.chatListeners.push({ mode, fn });
+    },
+    async removeRisuChatListener(mode, fn) {
+      if (mode !== 'output') throw new Error(`Invalid chat listener mode: ${mode}`);
+      const idx = hostMeta.chatListeners.findIndex(x => x.mode === mode && x.fn === fn);
       if (idx >= 0) hostMeta.chatListeners.splice(idx, 1);
     },
-    async registerBodyIntercepter(fn) { hostMeta.bodyIntercepters.push(fn); },
-    async unregisterBodyIntercepter(fn) {
-      const idx = hostMeta.bodyIntercepters.indexOf(fn);
-      if (idx >= 0) hostMeta.bodyIntercepters.splice(idx, 1);
+    async registerBodyIntercepter(fn) {
+      const id = `eval_bi_${nextBiId++}`;
+      hostMeta.bodyIntercepters.set(id, fn);
+      return { id };
     },
-    async registerMCP(cfg, getTools, callTool) { hostMeta.mcps.set(cfg.identifier, { cfg, getTools, callTool }); },
+    async unregisterBodyIntercepter(id) {
+      if (typeof id !== 'string') return;
+      hostMeta.bodyIntercepters.delete(id);
+    },
+    async registerMCP(cfg, getTools, callTool) {
+      if (!String(cfg?.identifier || '').startsWith('plugin:')) throw new Error('MCP identifier must start with plugin:');
+      hostMeta.mcps.set(cfg.identifier, { cfg, getTools, callTool });
+    },
     async unregisterMCP(id) { hostMeta.mcps.delete(id); },
     async addTTSPreprocessor() { hostMeta.ttsPreInstalled = true; },
-    async addTTSPostprocessor() { hostMeta.ttsPostInstalled = true; },
     async addPluginChannelListener() { return () => {}; },
     async postPluginChannelMessage() {},
     ...(hostFlavor === 'RisuAI' ? {
-      async createInlay(payload) { return `inlay_${payload?.name || 'item'}`; },
+      async createInlay(data, options = {}) {
+        if (!(data instanceof Uint8Array) && typeof data !== 'string') throw new Error('createInlay requires Uint8Array or data URI');
+        return `inlay_${options?.name || 'item'}`;
+      },
     } : {}),
     ...(hostFlavor === 'RisuBard' ? {
       bardWiki: {
         async getContext() { return deepClone(hostMeta.bardWikiContext); },
         async getDocuments() { return deepClone(hostMeta.bardWikiDocs); },
         async saveDocument(doc) {
-          const id = doc.id || `bw_${hostMeta.bardWikiDocs.length + 1}`;
-          const next = { ...deepClone(doc), id };
+          if (!doc || typeof doc.markdown !== 'string' || typeof doc.title !== 'string') {
+            throw new Error('saveDocument requires { type, title, markdown }');
+          }
+          const id = doc.documentId || `bw_${hostMeta.bardWikiDocs.length + 1}`;
+          const existing = hostMeta.bardWikiDocs.find(d => d.id === id);
+          if (existing && existing.contentHash !== doc.expectedContentHash) return null;
+          const next = {
+            id,
+            type: doc.type || existing?.type || 'other',
+            status: 'active',
+            title: doc.title,
+            content: doc.markdown,
+            contextMode: existing?.contextMode || 'auto',
+            grade: existing?.grade ?? null,
+            contentHash: `hash-${id}-v${nextHashSeq++}`,
+          };
           const idx = hostMeta.bardWikiDocs.findIndex(d => d.id === id);
           if (idx >= 0) hostMeta.bardWikiDocs[idx] = next;
           else hostMeta.bardWikiDocs.push(next);
-          return next;
+          return deepClone(next);
         },
-        async setGrade(id, grade) {
-          const doc = hostMeta.bardWikiDocs.find(d => d.id === id);
-          if (doc) doc.grade = String(grade);
+        async setGrade(input) {
+          if (!input || typeof input !== 'object' || !input.documentId) throw new Error('setGrade requires object input');
+          const doc = hostMeta.bardWikiDocs.find(d => d.id === input.documentId);
+          if (!doc || doc.contentHash !== input.expectedContentHash) return null;
+          doc.grade = input.grade;
+          doc.contentHash = `hash-${doc.id}-v${nextHashSeq++}`;
+          return deepClone(doc);
         },
-        async setContextMode(mode) { hostMeta.bardWikiContext.mode = String(mode); },
+        async setContextMode(input) {
+          if (!input || typeof input !== 'object' || !input.documentId) throw new Error('setContextMode requires object input');
+          const doc = hostMeta.bardWikiDocs.find(d => d.id === input.documentId);
+          if (!doc || doc.contentHash !== input.expectedContentHash) return null;
+          doc.contextMode = input.contextMode;
+          doc.contentHash = `hash-${doc.id}-v${nextHashSeq++}`;
+          return deepClone(doc);
+        },
         async trashDocument(id) {
           const idx = hostMeta.bardWikiDocs.findIndex(d => d.id === id);
-          if (idx >= 0) hostMeta.bardWikiDocs.splice(idx, 1);
+          if (idx < 0) return null;
+          hostMeta.bardWikiDocs.splice(idx, 1);
+          return { id, trashed: true };
         },
       },
     } : {}),
     ...(hostFlavor === 'RisuNest' ? {
-      async queryConversations() { return { items: [], total: 0, hasMore: false }; },
-      async queryConversationMessages() { return { items: [], total: 0 }; },
-      async risunestReadConversationContext(ref) {
-        const id = ref?.conversationId || 'conv-1';
-        return deepClone(hostMeta.risunestConversations[id] || {});
+      async queryConversations() { return { revision: 1, items: [] }; },
+      async queryConversationMessages() { return { revision: 1, messages: [], startIndex: 0, endIndex: 0, totalMessages: 0, hasMoreBefore: false, hasMoreAfter: false }; },
+      async risunestReadConversationContext(input = {}) {
+        const id = input.conversationId || 'conv-1';
+        const conv = hostMeta.risunestConversations[id] || { revision: 1, chatVariables: {}, messages: [] };
+        return {
+          revision: conv.revision || 1,
+          characterId: input.characterId || state.character.chaId || 'eval-char-1',
+          conversationId: id,
+          characterIndex: 0,
+          chatIndex: 0,
+          selected: true,
+          messageCount: (conv.messages || []).length,
+          conversation: { id },
+          chatVariables: deepClone(conv.chatVariables || {}),
+          messages: { startIndex: 0, messages: deepClone(conv.messages || []) },
+        };
       },
-      async risunestPatchConversation(ref, patch) {
-        const id = ref?.conversationId || 'conv-1';
-        const cur = hostMeta.risunestConversations[id] || {};
-        hostMeta.risunestConversations[id] = { ...cur, ...deepClone(patch) };
+      async risunestPatchConversation(request) {
+        if (!request || typeof request !== 'object' || !request.characterId || !request.conversationId || !request.mutationId) {
+          throw new Error('risunestPatchConversation requires ConversationPatchRequest');
+        }
+        const id = request.conversationId;
+        const conv = hostMeta.risunestConversations[id] || (hostMeta.risunestConversations[id] = { revision: 1, chatVariables: {}, messages: [] });
+        for (const m of request.messages || []) {
+          if (!conv.messages[m.index]) return { status: 'conflict', conflict: { target: 'message', reason: 'not-found' }, revision: conv.revision };
+          Object.assign(conv.messages[m.index], deepClone(m.set));
+        }
+        for (const v of request.chatVariables || []) {
+          if (v.value === null) delete conv.chatVariables[v.key];
+          else conv.chatVariables[v.key] = v.value;
+        }
+        conv.revision = (conv.revision || 1) + 1;
+        return { status: 'applied', revision: conv.revision };
       },
       async risunestListHostTools() {
         return [{ name: 'search_notes', description: 'Read-only note search', readOnly: true }];
