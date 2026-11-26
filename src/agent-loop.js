@@ -1,19 +1,27 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// Bounded 3-call LLM orchestrator for RisuHelper 1.0.0.
-// Enforces a hard maximum of 3 LLM calls per user request (Call 1: skill/tool selection or direct answer,
-// Call 2: data analysis & proposal verification, Call 3: final answer or automatic error repair).
-// Automatic steps are 100% Read-Only; writes happen ONLY when the user clicks "적용" on a proposal card.
+// Bounded 3-call LLM orchestrator + dynamic 3-stage planned pipeline handoff for RisuHelper 1.1.0.
+// Normal requests finish in 1..3 calls (Call 1: direct answer or tool selection, Call 2: analyze, Call 3: repair).
+// Large-scale requests (e.g. 40K full rewrite or 100-item batch edits) can emit `risuhelper-plan` to enter
+// the dynamic staged pipeline (Step 1 -> Step 2 0..N -> Step 3 0..M) with user confirmation gate, rolling summary,
+// and raw-chunk eviction. All automatic steps are 100% Read-Only; writes happen ONLY when the user clicks "적용".
 
+import {
+  DEFAULT_MAX_REQUEST_CHARS,
+} from './version.js';
 import {
   callRisuModel,
   parseAssistantReply,
   buildToolResultsFollowUpMessage,
   buildAutoRepairFollowUpMessage,
+  enforceRequestCharBudget,
 } from './llm.js';
 import {
   executeReadToolBatch,
   describeToolCall,
 } from './read-tools.js';
+import {
+  runStagedPipeline,
+} from './staged-pipeline.js';
 
 const MAX_AGENT_CALLS = 3;
 
@@ -40,7 +48,7 @@ function throwIfCancelled(job) {
 function extractReadExcerptFromBatch(batch) {
   for (const run of batch?.runs || []) {
     if (!run?.ok || run.tool !== 'read_item' || !run.result) continue;
-    for (const key of ['content', 'code', 'out', 'prompt']) {
+    for (const key of ['content', 'code', 'out', 'prompt', 'personaPrompt']) {
       if (typeof run.result[key] === 'string' && run.result[key].trim()) {
         return run.result[key];
       }
@@ -50,10 +58,8 @@ function extractReadExcerptFromBatch(batch) {
 }
 
 /**
- * Runs a single user request through a strictly bounded 1..3 call LLM loop:
- *   - Call 1: direct answer/proposal, OR Read-Only `risuhelper-tool` batch (including L2 `load_skill`).
- *   - Call 2: analyze fetched data -> answer/proposal (or one more Read-Only batch / auto-repair).
- *   - Call 3: final answer or auto-repair of parse/schema/preview errors. Hard stop: NEVER a 4th call.
+ * Runs a single user request through a strictly bounded 1..3 call LLM loop, with optional handoff
+ * to the dynamic 3-stage planned pipeline when the model emits a valid `risuhelper-plan` block.
  */
 async function runAgentLoop({
   api,
@@ -65,17 +71,24 @@ async function runAgentLoop({
   pinnedCtx = null,
   currentSourceExcerpt = '',
   maxCalls = MAX_AGENT_CALLS,
+  maxRequestChars = DEFAULT_MAX_REQUEST_CHARS,
+  enablePipeline = true,
+  pipelineLimits = {},
+  confirmLargePlan = true,
+  onConfirmPlan = null,
   toolContext = {},
   onProgress = null,
 }) {
   const budget = normalizeMaxCalls(maxCalls);
-  const currentMessages = Array.isArray(initialMessages) ? initialMessages.map(m => ({ ...m })) : [];
+  let currentMessages = Array.isArray(initialMessages) ? initialMessages.map(m => ({ ...m })) : [];
   const livePinnedCtx = pinnedCtx ? JSON.parse(JSON.stringify(pinnedCtx)) : {};
   const loadedSkillIds = new Set();
   const fieldsShownFull = new Set(Array.isArray(livePinnedCtx.fieldsShownFull) ? livePinnedCtx.fieldsShownFull : []);
   const greetingsShownFull = new Set(Array.isArray(livePinnedCtx.greetingsShownFull) ? livePinnedCtx.greetingsShownFull : []);
+  const itemsShownFull = new Set(Array.isArray(livePinnedCtx.itemsShownFull) ? livePinnedCtx.itemsShownFull : []);
 
   let totalPromptChars = 0;
+  let budgetTrimmedNotes = [];
   const steps = [];
   const toolRuns = [];
   const repairHistory = [];
@@ -91,6 +104,12 @@ async function runAgentLoop({
 
   for (let call = 1; call <= budget; call++) {
     throwIfCancelled(job);
+
+    const budgeted = enforceRequestCharBudget(currentMessages, maxRequestChars);
+    currentMessages = budgeted.messages;
+    if (budgeted.trimmed) {
+      budgetTrimmedNotes = budgeted.trimmedNotes;
+    }
 
     const promptChars = measureMessagesChars(currentMessages);
     totalPromptChars += promptChars;
@@ -156,6 +175,33 @@ async function runAgentLoop({
 
     const parsed = parseAssistantReply(rawReply);
 
+    // Branch P: Dynamic 3-Stage Planned Pipeline (`risuhelper-plan`)
+    if (enablePipeline && budget > 1 && parsed.plan) {
+      const pipeRes = await runStagedPipeline({
+        api,
+        adapter,
+        plan: parsed.plan,
+        step1CallCount: call,
+        step1PromptChars: totalPromptChars,
+        callModel,
+        modelOptions,
+        job,
+        pinnedCtx: livePinnedCtx,
+        toolContext,
+        maxRequestChars,
+        pipelineLimits,
+        confirmLargePlan,
+        onConfirmPlan,
+        onProgress,
+      });
+      // Prepend any pre-plan steps/tools (e.g. if Call 1 ran search_workspace and Call 2 emitted plan)
+      pipeRes.steps = [...steps, ...pipeRes.steps];
+      pipeRes.toolRuns = [...toolRuns, ...pipeRes.toolRuns];
+      pipeRes.loadedSkillIds = [...new Set([...loadedSkillIds, ...(pipeRes.loadedSkillIds || [])])];
+      pipeRes.budgetTrimmedNotes = budgetTrimmedNotes;
+      return pipeRes;
+    }
+
     // Branch A: Read-Only tool calls (only allowed while budget remains)
     if (parsed.toolCalls.length > 0 && call < budget) {
       const toolSig = JSON.stringify(parsed.toolCalls);
@@ -188,8 +234,10 @@ async function runAgentLoop({
       for (const id of batch.loadedSkillIds || []) loadedSkillIds.add(id);
       for (const f of batch.fieldsShownFull || []) fieldsShownFull.add(f);
       for (const g of batch.greetingsShownFull || []) greetingsShownFull.add(g);
+      for (const k of batch.itemsShownFull || []) itemsShownFull.add(k);
       livePinnedCtx.fieldsShownFull = [...fieldsShownFull];
       livePinnedCtx.greetingsShownFull = [...greetingsShownFull];
+      livePinnedCtx.itemsShownFull = [...itemsShownFull];
 
       const freshExcerpt = extractReadExcerptFromBatch(batch);
       if (freshExcerpt) lastSourceExcerpt = freshExcerpt;
@@ -233,7 +281,7 @@ async function runAgentLoop({
     }
 
     const failedProposals = previewedProposals.filter(item => !item.preview?.ok);
-    const hasParseErrors = parsed.errors.length > 0;
+    const hasParseErrors = parsed.errors.length > 0 || (parsed.planErrors?.length > 0 && parsed.proposals.length === 0);
     const hasPreviewFailures = failedProposals.length > 0;
     const hasBlockingToolErrors = parsed.toolErrors.length > 0 && parsed.proposals.length === 0 && !parsed.prose;
     const needsRepair = hasParseErrors || hasPreviewFailures || hasBlockingToolErrors;
@@ -257,6 +305,7 @@ async function runAgentLoop({
           callsUsed: call,
           maxCalls: budget,
           totalPromptChars,
+          budgetTrimmedNotes,
           steps,
           toolRuns,
           repairedCount,
@@ -264,6 +313,7 @@ async function runAgentLoop({
           loadedSkillIds: [...loadedSkillIds],
           fieldsShownFull: [...fieldsShownFull],
           greetingsShownFull: [...greetingsShownFull],
+          itemsShownFull: [...itemsShownFull],
         };
       }
 
@@ -271,6 +321,7 @@ async function runAgentLoop({
       repairedCount++;
       const repairReasons = [
         ...(parsed.errors || []).map(e => `파싱 실패: ${e?.error || String(e)}`),
+        ...(parsed.planErrors || []).map(e => `계획 블록 오류: ${e?.error || String(e)}`),
         ...(parsed.toolErrors || []).map(e => `도구 오류: ${e?.error || String(e)}`),
         ...failedProposals.map(item => {
           const act = item?.proposal?.action || 'unknown';
@@ -299,7 +350,7 @@ async function runAgentLoop({
       currentMessages.push({
         role: 'user',
         content: buildAutoRepairFollowUpMessage({
-          parseErrors: [...parsed.errors, ...parsed.toolErrors],
+          parseErrors: [...parsed.errors, ...(parsed.planErrors || []), ...parsed.toolErrors],
           failedProposals,
           currentSourceExcerpt: lastSourceExcerpt,
           callNumber: call + 1,
@@ -331,6 +382,7 @@ async function runAgentLoop({
       callsUsed: call,
       maxCalls: budget,
       totalPromptChars,
+      budgetTrimmedNotes,
       steps,
       toolRuns,
       repairedCount,
@@ -338,6 +390,7 @@ async function runAgentLoop({
       loadedSkillIds: [...loadedSkillIds],
       fieldsShownFull: [...fieldsShownFull],
       greetingsShownFull: [...greetingsShownFull],
+      itemsShownFull: [...itemsShownFull],
     };
   }
 

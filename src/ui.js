@@ -1,7 +1,23 @@
-import { VERSION, STORAGE_KEY, PRESET_STORAGE_KEY, UNDO_STORAGE_KEY, DEFAULT_MAX_CONTENT_CHARS, MAX_CONTENT_CHAR_OPTIONS, CHAR_FIELD_META, MODULE_FIELD_META, CONFIG_FIELD_META, SCREEN_LABELS } from './version.js';
+import {
+  VERSION,
+  STORAGE_KEY,
+  PRESET_STORAGE_KEY,
+  UNDO_STORAGE_KEY,
+  DEFAULT_MAX_CONTENT_CHARS,
+  MAX_CONTENT_CHAR_OPTIONS,
+  LARGE_TARGET_OUTLINE_THRESHOLD,
+  DEFAULT_MAX_REQUEST_CHARS,
+  MAX_REQUEST_CHAR_OPTIONS,
+  DEFAULT_PIPELINE_LIMITS,
+  PIPELINE_CALL_LIMIT_OPTIONS,
+  CHAR_FIELD_META,
+  MODULE_FIELD_META,
+  CONFIG_FIELD_META,
+  SCREEN_LABELS,
+} from './version.js';
 import { STYLES } from './style.js';
 import { FocusTracker, normalizeChipPos, MIN_DOCK_VIEWPORT_PX } from './focus-detector.js';
-import { HostAdapter, resolveModuleIndex, summarizeLoreList } from './host-adapter.js';
+import { HostAdapter, resolveModuleIndex, summarizeLoreList, buildShownItemKey } from './host-adapter.js';
 import { callRisuModel, buildConversationMessages, findUnknownProposalKeys, DELETE_ACTIONS, requiresConfirmation } from './llm.js';
 import { runAgentLoop, normalizeMaxCalls } from './agent-loop.js';
 import { executeReadTool } from './read-tools.js';
@@ -23,6 +39,9 @@ const DEFAULT_SETTINGS = {
   maxLlmCalls: 3,
   maxHistoryTurns: 12,
   maxContentChars: DEFAULT_MAX_CONTENT_CHARS,
+  maxRequestChars: DEFAULT_MAX_REQUEST_CHARS,
+  maxPipelineCalls: DEFAULT_PIPELINE_LIMITS.maxTotalCalls,
+  confirmLargePlan: true,
   showFloatingChip: true,
   showDetectDiagnostics: false,
   autoFillModuleEditor: false,
@@ -364,6 +383,11 @@ class RisuHelperApp {
   applyContentLimit() {
     const n = Number(this.settings.maxContentChars);
     this.settings.maxContentChars = MAX_CONTENT_CHAR_OPTIONS.includes(n) ? n : DEFAULT_MAX_CONTENT_CHARS;
+    const reqN = Number(this.settings.maxRequestChars);
+    this.settings.maxRequestChars = MAX_REQUEST_CHAR_OPTIONS.includes(reqN) ? reqN : DEFAULT_MAX_REQUEST_CHARS;
+    const pipeN = Number(this.settings.maxPipelineCalls);
+    this.settings.maxPipelineCalls = PIPELINE_CALL_LIMIT_OPTIONS.includes(pipeN) ? pipeN : DEFAULT_PIPELINE_LIMITS.maxTotalCalls;
+    this.settings.confirmLargePlan = this.settings.confirmLargePlan !== false;
     this.adapter.maxContentChars = this.settings.maxContentChars;
   }
 
@@ -1040,12 +1064,23 @@ class RisuHelperApp {
       } catch {}
     }
 
-    // If the currently selected target is itself a character field, author note, or greeting whose
-    // full text fit inside maxContentChars, record it as shown-in-full so update_field /
-    // update_greeting overwrites are never falsely rejected for lacking a keyword mention.
+    // Record items whose full text actually fits inside the prompt so overwrite guards never falsely
+    // reject full-shown targets, while strictly flagging auto-outlined / truncated targets!
+    extra.itemsShownFull = [];
+    extra.contentTruncated = false;
+    const addFullItem = (key) => {
+      if (key && !extra.itemsShownFull.includes(key)) extra.itemsShownFull.push(key);
+    };
+    const toolsEnabledNow = normalizeMaxCalls(this.settings.maxLlmCalls) > 1;
+    const effectiveInlineLimit = toolsEnabledNow
+      ? Math.min(this.settings.maxContentChars, LARGE_TARGET_OUTLINE_THRESHOLD)
+      : this.settings.maxContentChars;
+
     if (this.activeSnapshot?.ok) {
       const snapText = String(this.activeSnapshot.content ?? '');
-      if (snapText.length <= this.settings.maxContentChars) {
+      if (snapText.length > effectiveInlineLimit) {
+        extra.contentTruncated = true;
+      } else {
         const st = this.activeSnapshot.target;
         const addFullField = (field) => {
           if (!Array.isArray(extra.fieldsShownFull)) extra.fieldsShownFull = [];
@@ -1057,11 +1092,30 @@ class RisuHelperApp {
         };
         if (st?.targetKind === 'char_field' && st.fieldKey) {
           addFullField(st.fieldKey);
+          addFullItem(buildShownItemKey('char_field', { field: st.fieldKey }));
           if (st.fieldKey === 'firstMessage') addFullGreeting(-1);
         } else if (st?.targetKind === 'chat_note') {
           addFullField(AUTHOR_NOTE_FIELD);
+          addFullItem(buildShownItemKey('authorNote', {}));
         } else if (st?.targetKind === 'char_alt_greeting' && Number.isInteger(st.greetingIndex)) {
           addFullGreeting(st.greetingIndex);
+          addFullItem(buildShownItemKey('greeting', { greetingIndex: st.greetingIndex }));
+        } else if (st?.targetKind === 'char_lorebook' && Number.isInteger(st.loreIndex)) {
+          addFullItem(buildShownItemKey('lorebook', { scope: 'character', loreIndex: st.loreIndex }));
+        } else if (st?.targetKind === 'chat_lorebook' && Number.isInteger(st.loreIndex)) {
+          addFullItem(buildShownItemKey('lorebook', { scope: 'chat', loreIndex: st.loreIndex }));
+        } else if (st?.targetKind === 'module_lorebook' && Number.isInteger(st.loreIndex)) {
+          addFullItem(buildShownItemKey('lorebook', { scope: 'module', moduleIndex: st.moduleIndex, loreIndex: st.loreIndex }));
+        } else if (st?.targetKind === 'char_lua') {
+          addFullItem(buildShownItemKey('lua', { scope: 'character' }));
+        } else if (st?.targetKind === 'module_lua') {
+          addFullItem(buildShownItemKey('lua', { scope: 'module', moduleIndex: st.moduleIndex }));
+        } else if (st?.targetKind === 'char_regex' && Number.isInteger(st.regexIndex)) {
+          addFullItem(buildShownItemKey('regex', { scope: 'character', regexIndex: st.regexIndex }));
+        } else if (st?.targetKind === 'module_regex' && Number.isInteger(st.regexIndex)) {
+          addFullItem(buildShownItemKey('regex', { scope: 'module', moduleIndex: st.moduleIndex, regexIndex: st.regexIndex }));
+        } else if (st?.targetKind === 'persona' && Number.isInteger(st.personaIndex)) {
+          addFullItem(buildShownItemKey('persona', { personaIndex: st.personaIndex }));
         }
       }
     }
@@ -1137,12 +1191,20 @@ class RisuHelperApp {
               tab: hints.tab || null,
             };
             if (probeKind === 'module_lorebook' && snap.entry && Number.isInteger(snap.target?.loreIndex)) {
+              const rawLore = String(snap.entry.content ?? '');
               om.expandedLoreIndex = snap.target.loreIndex;
               om.expandedLoreTitle = snap.entry.comment || '';
-              om.expandedLoreContent = String(snap.entry.content ?? '').slice(0, this.settings.maxContentChars);
+              om.expandedLoreContent = rawLore.slice(0, effectiveInlineLimit);
+              if (rawLore.length <= effectiveInlineLimit) {
+                addFullItem(buildShownItemKey('lorebook', { scope: 'module', moduleIndex: snap.target?.moduleIndex, loreIndex: snap.target.loreIndex }));
+              }
             } else if (probeKind === 'module_lua') {
-              om.luaCode = String(snap.content ?? '').slice(0, this.settings.maxContentChars);
+              const rawLua = String(snap.content ?? '');
+              om.luaCode = rawLua.slice(0, effectiveInlineLimit);
               om.hasOtherTriggers = Boolean(snap.hasOtherTriggers);
+              if (rawLua.length <= effectiveInlineLimit) {
+                addFullItem(buildShownItemKey('lua', { scope: 'module', moduleIndex: snap.target?.moduleIndex }));
+              }
             } else if (probeKind === 'module_regex') {
               if (Array.isArray(snap.regexList) && snap.regexList.length > 0) {
                 om.regexList = snap.regexList.map((r, i) => ({
@@ -1155,6 +1217,9 @@ class RisuHelperApp {
               if (snap.entry && Number.isInteger(snap.target?.regexIndex)) {
                 om.expandedRegexIndex = snap.target.regexIndex;
                 om.expandedRegex = snap.entry;
+                if (String(snap.entry.out ?? '').length <= effectiveInlineLimit) {
+                  addFullItem(buildShownItemKey('regex', { scope: 'module', moduleIndex: snap.target?.moduleIndex, regexIndex: snap.target.regexIndex }));
+                }
               }
             }
             extra.openModule = om;
@@ -1171,12 +1236,20 @@ class RisuHelperApp {
       try {
         const p = await this.adapter.readPersonas();
         if (!p.permissionDenied) {
-          extra.personasSummary = p.personas.map((item, i) => ({
-            index: i,
-            name: item.name,
-            note: item.note || '',
-            selected: i === p.selectedPersona,
-          }));
+          extra.personasSummary = p.personas.map((item, i) => {
+            const promptText = String(item.personaPrompt ?? '');
+            const fitInline = promptText.length <= 300;
+            if (fitInline) {
+              addFullItem(buildShownItemKey('persona', { personaIndex: i }));
+            }
+            return {
+              index: i,
+              name: item.name,
+              note: item.note || '',
+              selected: i === p.selectedPersona,
+              ...(fitInline ? { personaPrompt: promptText } : { promptChars: promptText.length, truncated: true }),
+            };
+          });
         }
       } catch {}
     }
@@ -1216,6 +1289,7 @@ class RisuHelperApp {
       userInput,
       maxHistoryTurns: this.settings.maxHistoryTurns,
       maxContentChars: this.settings.maxContentChars,
+      maxRequestChars: this.settings.maxRequestChars,
       capabilities: this.adapter.getCapabilities(),
       enableTools,
       allowFetchLog,
@@ -1249,6 +1323,8 @@ class RisuHelperApp {
     });
     assembled.greetingsShownFull = extraContext.greetingsShownFull || [];
     assembled.fieldsShownFull = extraContext.fieldsShownFull || [];
+    assembled.itemsShownFull = extraContext.itemsShownFull || [];
+    assembled.contentTruncated = Boolean(extraContext.contentTruncated);
     return assembled;
   }
 
@@ -1352,6 +1428,8 @@ class RisuHelperApp {
       const pinnedCtx = JSON.parse(JSON.stringify(ctx));
       pinnedCtx.greetingsShownFull = assembled.greetingsShownFull || [];
       pinnedCtx.fieldsShownFull = assembled.fieldsShownFull || [];
+      pinnedCtx.itemsShownFull = assembled.itemsShownFull || [];
+      pinnedCtx.contentTruncated = Boolean(assembled.contentTruncated);
 
       const loopResult = await runAgentLoop({
         api: this.api,
@@ -1363,13 +1441,37 @@ class RisuHelperApp {
         pinnedCtx,
         currentSourceExcerpt: this.activeSnapshot?.content || '',
         maxCalls,
+        maxRequestChars: this.settings.maxRequestChars,
+        pipelineLimits: { maxTotalCalls: this.settings.maxPipelineCalls },
+        confirmLargePlan: this.settings.confirmLargePlan !== false,
+        onConfirmPlan: async (overview) => {
+          if (chunkRenderTimer) {
+            clearTimeout(chunkRenderTimer);
+            chunkRenderTimer = null;
+          }
+          const targetLine = overview.targetLabel
+            ? `\n대상: ${overview.targetLabel} (${overview.targetChars.toLocaleString()}자)`
+            : '';
+          return await this.askConfirm({
+            title: overview.isReconfirm ? '다단계 작업 단계 변경 확인' : '대용량 다단계 작업 진행 확인',
+            message: `${overview.modeLabel}: "${overview.goal}"\n${overview.stageBreakdownText}${targetLine}`,
+            detail: `${overview.reason ? `${overview.reason}\n` : ''}${overview.safetyNote}`,
+            confirmLabel: `진행 (${overview.plannedTotalCalls}회 호출)`,
+            tone: 'ok',
+          });
+        },
         toolContext: {
           allowFetchLog: hadOptInFetchLog,
           attachedFetchLog: optInLogSnapshot,
         },
         onProgress: (info) => {
           assistantMsg.progressLabel = info?.label || '응답 생성 중...';
-          if (info?.stage === 'tools' || info?.stage === 'repair') {
+          const statusStages = new Set([
+            'tools', 'repair', 'confirm_plan',
+            'pipeline_step2', 'pipeline_step2_tools',
+            'pipeline_step3', 'pipeline_step3_tools',
+          ]);
+          if (statusStages.has(info?.stage)) {
             if (chunkRenderTimer) {
               clearTimeout(chunkRenderTimer);
               chunkRenderTimer = null;
@@ -1391,6 +1493,8 @@ class RisuHelperApp {
         callsUsed: loopResult.callsUsed,
         maxCalls: loopResult.maxCalls,
         totalPromptChars: loopResult.totalPromptChars,
+        budgetTrimmedNotes: loopResult.budgetTrimmedNotes || [],
+        pipeline: loopResult.pipeline || null,
         toolRuns: loopResult.toolRuns,
         repairedCount: loopResult.repairedCount,
         repairHistory: loopResult.repairHistory || [],
@@ -2361,6 +2465,57 @@ class RisuHelperApp {
                 `${n.toLocaleString()}자${n === DEFAULT_MAX_CONTENT_CHARS ? ' (기본)' : n === MAX_CONTENT_CHAR_OPTIONS[0] ? ' (컨텍스트가 작은 모델용)' : ''}`)
             )
           )
+        ),
+        h(doc, 'div', { class: 'rh-field' },
+          h(doc, 'span', {}, '어시스턴트 총 요청 예산 (RisuAI 채팅 컨텍스트와 별도)'),
+          h(doc, 'select', {
+            class: 'rh-select',
+            'data-setting': 'maxRequestChars',
+            onchange: async (e) => {
+              this.settings.maxRequestChars = Number(e.target.value);
+              this.applyContentLimit();
+              await this.saveSettings();
+              this.render();
+            },
+          },
+            ...MAX_REQUEST_CHAR_OPTIONS.map(n =>
+              h(doc, 'option', { value: String(n), selected: this.settings.maxRequestChars === n },
+                `${n.toLocaleString()}자${n === DEFAULT_MAX_REQUEST_CHARS ? ' (기본)' : ''}`)
+            )
+          )
+        ),
+        h(doc, 'div', { class: 'rh-field' },
+          h(doc, 'span', {}, '계획형 파이프라인 최대 호출 (대용량 개편 · 일괄 작업)'),
+          h(doc, 'select', {
+            class: 'rh-select',
+            'data-setting': 'maxPipelineCalls',
+            onchange: async (e) => {
+              this.settings.maxPipelineCalls = Number(e.target.value);
+              this.applyContentLimit();
+              await this.saveSettings();
+              this.render();
+            },
+          },
+            ...PIPELINE_CALL_LIMIT_OPTIONS.map(n =>
+              h(doc, 'option', { value: String(n), selected: this.settings.maxPipelineCalls === n },
+                `최대 ${n}회${n === DEFAULT_PIPELINE_LIMITS.maxTotalCalls ? ' (기본)' : ''}`)
+            )
+          )
+        )
+      ),
+      h(doc, 'div', { class: 'rh-checks', style: 'margin-bottom:8px;' },
+        h(doc, 'label', {},
+          h(doc, 'input', {
+            type: 'checkbox',
+            'data-setting': 'confirmLargePlan',
+            checked: this.settings.confirmLargePlan !== false,
+            onchange: async (e) => {
+              this.settings.confirmLargePlan = Boolean(e.target.checked);
+              await this.saveSettings();
+              this.render();
+            },
+          }),
+          '4회 이상 대용량 다단계 작업 시작 전 확인창 표시 (권장)'
         )
       ),
       h(doc, 'div', { class: 'rh-field' },
@@ -3012,12 +3167,18 @@ class RisuHelperApp {
             let metaSpan = null;
             if (msg.loopMeta) {
               const m = msg.loopMeta;
-              const metaParts = [`호출 ${m.callsUsed}/${m.maxCalls}`];
+              const metaParts = m.pipeline?.used
+                ? [
+                    `계획형 ${m.callsUsed}회 (S2:${m.pipeline.step2Executed}·S3:${m.pipeline.step3Executed})`,
+                    ...(m.pipeline.cancelled ? ['취소됨'] : m.pipeline.partial ? ['부분 완료'] : []),
+                  ]
+                : [`호출 ${m.callsUsed}/${m.maxCalls}`];
               if (Number.isFinite(m.totalPromptChars) && m.totalPromptChars > 0) {
                 metaParts.push(`${m.totalPromptChars.toLocaleString()}자`);
               }
               if (m.toolRuns?.length > 0) metaParts.push(`읽기 도구 ${m.toolRuns.length}건`);
               if (m.repairedCount > 0) metaParts.push(`자동 수정 ${m.repairedCount}회`);
+              if (m.budgetTrimmedNotes?.length > 0) metaParts.push('예산 축약');
               metaSpan = h(doc, 'span', { class: 'rh-msg-meta' }, ` · ${metaParts.join(' · ')}`);
             }
             barLeft = h(doc, 'span', { class: 'rh-msg-badge' }, baseLabel, metaSpan);

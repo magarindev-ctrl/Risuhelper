@@ -325,7 +325,7 @@ test('L0/L1/L2 built-in skill router and tool catalog adapt to capabilities and 
 test('all Read-Only tools work safely, unlock full-text flags, respect opt-in log guard, and never invoke write APIs', async () => {
   const writes = [];
   const { adapter, parseCalls } = makeRichHostFixture({ writeSpy: (fn) => writes.push(fn) });
-  assert.equal(READ_TOOL_DEFS.length, 14);
+  assert.equal(READ_TOOL_DEFS.length, 15);
 
   // 1. load_skill
   const r1 = await executeReadTool(adapter, { tool: 'load_skill', args: { skillIds: ['module_create'] } });

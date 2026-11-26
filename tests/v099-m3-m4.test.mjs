@@ -1031,15 +1031,16 @@ test('M3 fork capability gating hides fork-only skills & tools on non-matching h
   assert.equal(rnTools.result.total, 1);
   assert.equal(nest.writeCalls.length, 0);
 
-  // Upstream RisuAI: execute ALL 12 upstream Read-Only tools -> strictly 0 write API calls
+  // Upstream RisuAI: execute ALL 13 upstream Read-Only tools -> strictly 0 write API calls
   const up = makeFullHost('RisuAI');
   const upAdapter = new HostAdapter(up.api);
   await upAdapter.probeHostFlavor(null);
-  assert.equal(READ_TOOL_DEFS.length, 14);
+  assert.equal(READ_TOOL_DEFS.length, 15);
   const availUp = getAvailableReadTools(upAdapter.getCapabilities(), { allowFetchLog: true });
-  assert.equal(availUp.length, 12, 'fork-only read_bard_wiki & inspect_host_tools hidden on upstream RisuAI');
+  assert.equal(availUp.length, 13, 'fork-only read_bard_wiki & inspect_host_tools hidden on upstream RisuAI');
   for (const def of availUp) {
     const sampleArgs = def.id === 'load_skill' ? { skillIds: ['theme_hud'] }
+      : def.id === 'search_workspace' ? { query: '아리아' }
       : def.id === 'read_item' ? { kind: 'theme' }
       : def.id === 'list_items' ? { kind: 'chat' }
       : def.id === 'search_translation' ? { query: 'hello' }

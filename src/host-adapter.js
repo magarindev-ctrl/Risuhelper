@@ -259,6 +259,8 @@ function assertAllowedFieldKey(kind, fieldKey) {
   if (err) throw new Error(err);
 }
 
+const UNSHOWN_DIRECT_GUARD_CHARS = 500;
+
 function checkTruncationGuard(beforeText, actionLabel, limit = DEFAULT_MAX_CONTENT_CHARS) {
   if (typeof beforeText === 'string' && beforeText.length > limit) {
     return (
@@ -267,6 +269,39 @@ function checkTruncationGuard(beforeText, actionLabel, limit = DEFAULT_MAX_CONTE
     );
   }
   return null;
+}
+
+/**
+ * Canonical key identifying an editable entity whose full text was actually delivered to the model
+ * (or verified by the staged chunked-rewrite pipeline). Shared by host-adapter, read-tools, ui, and staged-pipeline.
+ */
+function buildShownItemKey(kind, opts = {}) {
+  const scope = opts.scope || 'character';
+  const charPart = Number.isInteger(opts.charIndex) ? String(opts.charIndex) : 'cur';
+  const chatPart = Number.isInteger(opts.chatIndex) ? String(opts.chatIndex) : 'cur';
+  const modPart = Number.isInteger(opts.moduleIndex) ? String(opts.moduleIndex) : '0';
+  switch (kind) {
+    case 'lorebook':
+      if (scope === 'module') return `lore:module:${modPart}:${opts.loreIndex}`;
+      if (scope === 'chat') return `lore:chat:${charPart}:${chatPart}:${opts.loreIndex}`;
+      return `lore:character:${charPart}:${opts.loreIndex}`;
+    case 'lua':
+      return scope === 'module' ? `lua:module:${modPart}` : `lua:character:${charPart}`;
+    case 'regex':
+      return scope === 'module'
+        ? `regex:module:${modPart}:${opts.regexIndex}`
+        : `regex:character:${charPart}:${opts.regexIndex}`;
+    case 'persona':
+      return `persona:${opts.personaIndex}`;
+    case 'char_field':
+      return `field:${charPart}:${opts.field}`;
+    case 'authorNote':
+      return `authorNote:${charPart}:${chatPart}`;
+    case 'greeting':
+      return `greeting:${charPart}:${opts.greetingIndex}`;
+    default:
+      return `${kind}:${opts.id ?? '0'}`;
+  }
 }
 
 function getCharIdentity(char) {
@@ -3274,10 +3309,11 @@ class HostAdapter {
         };
       }
       const before = snap.content;
+      const replaceKeys = this._keysForTextTarget(snap.target, snap.hostBinding);
       if (proposal.action === 'replace_text') {
-        const truncErr = this._checkTruncationGuard(before, '전체 덮어쓰기(replace_text)');
+        const truncErr = this._checkReplaceTargetGuard(before, target, '전체 덮어쓰기(replace_text)', replaceKeys);
         if (truncErr) {
-          return { ok: false, error: truncErr, before, label: snap.label, target: snap.target };
+          return { ok: false, error: truncErr, before, label: snap.label, target: this._propagateTargetGuards(snap.target, target) };
         }
       }
       try {
@@ -3293,14 +3329,14 @@ class HostAdapter {
           before,
           after,
           label: snap.label,
-          target: snap.target,
+          target: this._propagateTargetGuards(snap.target, target),
           hostBinding: snap.hostBinding || null,
           destructiveWarning,
           requiresConfirm: Boolean(destructiveWarning),
           confirmLabel: destructiveWarning ? '기존 V1/V2 트리거가 삭제되고 Lua로 대체됨을 확인했습니다' : null,
         };
       } catch (err) {
-        return { ok: false, error: err.message, before, label: snap.label, target: snap.target };
+        return { ok: false, error: err.message, before, label: snap.label, target: this._propagateTargetGuards(snap.target, target) };
       }
     }
 
@@ -3316,9 +3352,19 @@ class HostAdapter {
       if (snap.moduleUncertain) return { ok: false, error: MODULE_UNCERTAIN_ERROR, label: snap.label, target: snap.target };
       const before = snap.content;
       if (!proposal.edits) {
-        const truncErr = this._checkTruncationGuard(before, 'Lua 전체 교체');
+        const luaScope = scope === 'module_lua' ? 'module' : 'character';
+        const luaKeys = this._candidateItemKeys('lua', {
+          scope: luaScope,
+          moduleIndex: snap.target?.moduleIndex,
+          charIndex: snap.hostBinding?.charIndex,
+          crossCharacter: Boolean(snap.hostBinding?.crossCharacter),
+        });
+        const isDirectFocus = target.targetKind === scope &&
+          !snap.hostBinding?.crossCharacter &&
+          (luaScope !== 'module' || target.moduleIndex === snap.target?.moduleIndex);
+        const truncErr = this._itemOverwriteError(luaKeys, before, target, 'Lua 전체 교체', { isDirectFocus });
         if (truncErr) {
-          return { ok: false, error: truncErr, before, label: snap.label, target: snap.target };
+          return { ok: false, error: truncErr, before, label: snap.label, target: this._propagateTargetGuards(snap.target, target) };
         }
       }
       try {
@@ -3333,7 +3379,7 @@ class HostAdapter {
           before,
           after,
           label: snap.label,
-          target: snap.target,
+          target: this._propagateTargetGuards(snap.target, target),
           hostBinding: snap.hostBinding || null,
           warning: destructiveWarning,
           destructiveWarning,
@@ -3341,7 +3387,7 @@ class HostAdapter {
           confirmLabel: destructiveWarning ? '기존 V1/V2 트리거가 삭제되고 Lua로 대체됨을 확인했습니다' : null,
         };
       } catch (err) {
-        return { ok: false, error: err.message, before, label: snap.label, target: snap.target };
+        return { ok: false, error: err.message, before, label: snap.label, target: this._propagateTargetGuards(snap.target, target) };
       }
     }
 
@@ -3367,8 +3413,22 @@ class HostAdapter {
 
       const before = String(snap.entry[fieldKey] ?? '');
       if (!proposal.edits && (proposal[fieldKey] !== undefined || (fieldKey === 'content' && proposal.content !== undefined))) {
-        const truncErr = this._checkTruncationGuard(before, '로어북 본문 전체 덮어쓰기');
-        if (truncErr) return { ok: false, error: truncErr, before, label: snap.label, target: snap.target };
+        const loreKeys = this._candidateItemKeys('lorebook', {
+          scope,
+          loreIndex,
+          moduleIndex: snap.target?.moduleIndex,
+          charIndex: snap.hostBinding?.charIndex,
+          chatIndex: snap.hostBinding?.chatIndex,
+          crossCharacter: Boolean(snap.hostBinding?.crossCharacter),
+          crossChat: Boolean(snap.hostBinding?.crossChat),
+        });
+        const isDirectFocus = target.targetKind === targetKind &&
+          target.loreIndex === loreIndex &&
+          !snap.hostBinding?.crossCharacter &&
+          !snap.hostBinding?.crossChat &&
+          (scope !== 'module' || target.moduleIndex === snap.target?.moduleIndex);
+        const truncErr = this._itemOverwriteError(loreKeys, before, target, '로어북 본문 전체 덮어쓰기', { isDirectFocus });
+        if (truncErr) return { ok: false, error: truncErr, before, label: snap.label, target: this._propagateTargetGuards(snap.target, target) };
       }
 
       const loaded = await this._loadLorebookForPreview(scope, proposal, snap.target);
@@ -3398,7 +3458,7 @@ class HostAdapter {
         after,
         metaChanges,
         label: snap.label,
-        target: snap.target,
+        target: this._propagateTargetGuards(snap.target, target),
         hostBinding: snap.hostBinding || null,
       };
     }
@@ -3445,8 +3505,12 @@ class HostAdapter {
 
       const before = String(snap.entry[fieldKey] ?? '');
       if (!proposal.edits && !proposal.fieldEdits && proposal[fieldKey] !== undefined) {
-        const truncErr = this._checkTruncationGuard(before, '페르소나 전체 덮어쓰기');
-        if (truncErr) return { ok: false, error: truncErr, before, label: snap.label, target: snap.target };
+        const pIdx = snap.target?.personaIndex;
+        const personaKeys = this._candidateItemKeys('persona', { personaIndex: pIdx });
+        const isDirectFocus = target.targetKind === 'persona' &&
+          (target.personaIndex === undefined || target.personaIndex === pIdx);
+        const truncErr = this._itemOverwriteError(personaKeys, before, target, '페르소나 전체 덮어쓰기', { isDirectFocus });
+        if (truncErr) return { ok: false, error: truncErr, before, label: snap.label, target: this._propagateTargetGuards(snap.target, target) };
       }
 
       const nextEntry = clone(snap.entry);
@@ -3482,7 +3546,7 @@ class HostAdapter {
         after,
         metaChanges,
         label: snap.label,
-        target: snap.target,
+        target: this._propagateTargetGuards(snap.target, target),
         hostBinding: snap.hostBinding || null,
         warning,
       };
@@ -3503,6 +3567,27 @@ class HostAdapter {
       if (snap.moduleUncertain) return { ok: false, error: MODULE_UNCERTAIN_ERROR, label: snap.label, target: snap.target };
       const existing = idx !== null ? snap.entry : null;
       const nextEntry = normalizeRegexEntry(proposal, existing);
+
+      if (existing) {
+        const beforeOut = String(existing.out ?? '');
+        if (beforeOut.length > 0 && proposal.out !== undefined && String(nextEntry.out ?? '') !== beforeOut) {
+          const regexKeys = this._candidateItemKeys('regex', {
+            scope,
+            regexIndex: idx,
+            moduleIndex: snap.target?.moduleIndex,
+            charIndex: snap.hostBinding?.charIndex,
+            crossCharacter: Boolean(snap.hostBinding?.crossCharacter),
+          });
+          const isDirectFocus = target.targetKind === targetKind &&
+            (target.regexIndex === undefined || target.regexIndex === idx) &&
+            !snap.hostBinding?.crossCharacter &&
+            (scope !== 'module' || target.moduleIndex === snap.target?.moduleIndex);
+          const truncErr = this._itemOverwriteError(regexKeys, beforeOut, target, '정규식 출력(out) 전체 덮어쓰기', { isDirectFocus });
+          if (truncErr) {
+            return { ok: false, error: truncErr, before: beforeOut, label: snap.label, target: this._propagateTargetGuards(snap.target, target) };
+          }
+        }
+      }
 
       // Pick the newest matching (or newest non-empty) active chat message as default test sample
       let sampleText = '';
@@ -3562,7 +3647,7 @@ class HostAdapter {
         metaChanges,
         regexPreview,
         label: existing ? `${snap.label} 수정` : `${snap.label} · 새 정규식 (${nextEntry.comment})`,
-        target: snap.target,
+        target: this._propagateTargetGuards(snap.target, target),
         hostBinding: snap.hostBinding || null,
       };
     }
@@ -3629,7 +3714,7 @@ class HostAdapter {
       const snap = await this.readTargetSnapshot(fTarget);
       if (!snap.ok) return { ok: false, error: snap.reason };
       const before = String(snap.content ?? '');
-      const guardError = this._fieldOverwriteError(proposal, target, before);
+      const guardError = this._fieldOverwriteError(proposal, target, before, snap.hostBinding);
       if (guardError) return { ok: false, error: guardError, before, label: snap.label };
       try {
         const after = Array.isArray(proposal.edits) && proposal.edits.length > 0
@@ -3640,7 +3725,7 @@ class HostAdapter {
           before,
           after,
           label: snap.label,
-          target: { ...snap.target, fieldsShownFull: target.fieldsShownFull, greetingsShownFull: target.greetingsShownFull },
+          target: this._propagateTargetGuards(snap.target, target),
           hostBinding: snap.hostBinding,
           warning: proposal.field === 'firstMessage' && !snap.hostBinding?.crossCharacter ? await this._greetingScopeNotice(-1) : null,
         };
@@ -3654,7 +3739,7 @@ class HostAdapter {
       const snap = await this.readTargetSnapshot(gTarget);
       if (!snap.ok) return { ok: false, error: snap.reason };
       const before = String(snap.content ?? '');
-      const guardError = this._greetingOverwriteError(proposal, target, before);
+      const guardError = this._greetingOverwriteError(proposal, target, before, snap.hostBinding);
       if (guardError) return { ok: false, error: guardError, before, label: snap.label };
       try {
         const after = Array.isArray(proposal.edits) && proposal.edits.length > 0
@@ -3665,7 +3750,7 @@ class HostAdapter {
           before,
           after,
           label: snap.label,
-          target: { ...snap.target, greetingsShownFull: target.greetingsShownFull },
+          target: this._propagateTargetGuards(snap.target, target),
           hostBinding: snap.hostBinding,
           warning: !snap.hostBinding?.crossCharacter ? await this._greetingScopeNotice(proposal.greetingIndex) : null,
         };
@@ -4259,9 +4344,10 @@ class HostAdapter {
       }, target, options);
     }
 
+    const replaceKeys = this._keysForTextTarget(target, options.hostBinding);
     const compute = (before, label) => {
       if (proposal.action === 'replace_text') {
-        const truncErr = this._checkTruncationGuard(before, '전체 덮어쓰기(replace_text)');
+        const truncErr = this._checkReplaceTargetGuard(before, target, '전체 덮어쓰기(replace_text)', replaceKeys);
         if (truncErr) throw new Error(truncErr);
         return String(proposal.content ?? '');
       }
@@ -4434,16 +4520,34 @@ class HostAdapter {
 
   /**
    * A whole-text replacement is only safe when the model was shown the whole field
-   * (`target.fieldsShownFull`, see src/fields.js). Partial edits are exact-match and always safe.
+   * (`target.fieldsShownFull`, see src/fields.js) or the staged pipeline verified full coverage.
+   * Partial edits are exact-match and always safe.
    */
-  _fieldOverwriteError(proposal, target, before) {
+  _fieldOverwriteError(proposal, target, before, hostBinding = null) {
     const isOverwrite = !(Array.isArray(proposal.edits) && proposal.edits.length > 0);
     if (!isOverwrite || before.length === 0) return null;
+    const isAuthorNote = proposal.field === AUTHOR_NOTE_FIELD;
+    const itemKeys = isAuthorNote
+      ? this._candidateItemKeys('authorNote', {
+          charIndex: hostBinding?.charIndex ?? proposal.targetCharIndex,
+          chatIndex: hostBinding?.chatIndex ?? proposal.targetChatIndex,
+          crossCharacter: Boolean(hostBinding?.crossCharacter),
+          crossChat: Boolean(hostBinding?.crossChat),
+        })
+      : this._candidateItemKeys('char_field', {
+          field: proposal.field,
+          charIndex: hostBinding?.charIndex ?? proposal.targetCharIndex,
+          crossCharacter: Boolean(hostBinding?.crossCharacter),
+        });
+    if (this._hasVerifiedRewrite(itemKeys, target)) return null;
+    const shownItems = Array.isArray(target?.itemsShownFull) ? target.itemsShownFull : [];
     const shownFields = Array.isArray(target?.fieldsShownFull) ? target.fieldsShownFull : [];
     const shownGreetings = Array.isArray(target?.greetingsShownFull) ? target.greetingsShownFull : [];
-    const wasShown = proposal.field === 'firstMessage'
-      ? shownGreetings.includes(-1) || shownFields.includes('firstMessage')
-      : shownFields.includes(proposal.field);
+    const wasShown =
+      itemKeys.some(k => shownItems.includes(k)) ||
+      (proposal.field === 'firstMessage'
+        ? shownGreetings.includes(-1) || shownFields.includes('firstMessage')
+        : shownFields.includes(proposal.field));
     if (!wasShown) {
       return `"${fieldLabel(proposal.field)}"은(는) 전문이 모델에 전달되지 않은 상태(앞부분 미리보기만 전달)라, 뒷부분 유실을 막기 위해 전체 덮어쓰기를 차단했습니다. ` +
         '보이는 구간의 부분 편집(edits)을 쓰거나, 요청에 그 필드 이름을 넣어 다시 요청하거나, 해당 입력칸을 클릭한 뒤 요청해 주세요.';
@@ -4452,16 +4556,16 @@ class HostAdapter {
   }
 
   async _applyUpdateField(proposal, target, options = {}) {
-    const fTarget = this._fieldTarget(proposal.field, proposal);
+    const fTarget = this._propagateTargetGuards(this._fieldTarget(proposal.field, proposal), target);
     const snap = await this.readTargetSnapshot(fTarget);
     if (!snap.ok) throw new Error(snap.reason);
-    const guardError = this._fieldOverwriteError(proposal, target, String(snap.content ?? ''));
+    const guardError = this._fieldOverwriteError(proposal, target, String(snap.content ?? ''), snap.hostBinding);
     if (guardError) throw new Error(guardError);
     const hasEdits = Array.isArray(proposal.edits) && proposal.edits.length > 0;
     return await this._applyTextTarget(
       hasEdits ? { action: 'patch_text', edits: proposal.edits } : { action: 'replace_text', content: proposal.content },
       fTarget,
-      options
+      { ...options, hostBinding: options.hostBinding || snap.hostBinding }
     );
   }
 
@@ -4478,11 +4582,18 @@ class HostAdapter {
    * `target.greetingsShownFull` lists the greeting indices that were sent in full for this
    * request (src/greetings.js); partial edits are exact-match and therefore always safe.
    */
-  _greetingOverwriteError(proposal, target, before) {
+  _greetingOverwriteError(proposal, target, before, hostBinding = null) {
     const isOverwrite = !(Array.isArray(proposal.edits) && proposal.edits.length > 0);
     if (!isOverwrite || before.length === 0) return null;
+    const itemKeys = this._candidateItemKeys('greeting', {
+      greetingIndex: proposal.greetingIndex,
+      charIndex: hostBinding?.charIndex ?? proposal.targetCharIndex,
+      crossCharacter: Boolean(hostBinding?.crossCharacter),
+    });
+    if (this._hasVerifiedRewrite(itemKeys, target)) return null;
+    const shownItems = Array.isArray(target?.itemsShownFull) ? target.itemsShownFull : [];
     const shown = Array.isArray(target?.greetingsShownFull) ? target.greetingsShownFull : [];
-    if (!shown.includes(proposal.greetingIndex)) {
+    if (!shown.includes(proposal.greetingIndex) && !itemKeys.some(k => shownItems.includes(k))) {
       return '이 첫 메시지는 전문이 모델에 전달되지 않은 상태(앞부분 미리보기만 전달)라, 뒷부분 유실을 막기 위해 전체 덮어쓰기를 차단했습니다. ' +
         '보이는 구간의 부분 편집(edits)을 쓰거나, 상단 대상을 해당 첫 메시지로 고른 뒤 다시 요청해 주세요.';
     }
@@ -4490,16 +4601,16 @@ class HostAdapter {
   }
 
   async _applyUpdateGreeting(proposal, target, options = {}) {
-    const gTarget = this._greetingTarget(proposal);
+    const gTarget = this._propagateTargetGuards(this._greetingTarget(proposal), target);
     const snap = await this.readTargetSnapshot(gTarget);
     if (!snap.ok) throw new Error(snap.reason);
-    const guardError = this._greetingOverwriteError(proposal, target, String(snap.content ?? ''));
+    const guardError = this._greetingOverwriteError(proposal, target, String(snap.content ?? ''), snap.hostBinding);
     if (guardError) throw new Error(guardError);
     const hasEdits = Array.isArray(proposal.edits) && proposal.edits.length > 0;
     return await this._applyTextTarget(
       hasEdits ? { action: 'patch_text', edits: proposal.edits } : { action: 'replace_text', content: proposal.content },
       gTarget,
-      options
+      { ...options, hostBinding: options.hostBinding || snap.hostBinding }
     );
   }
 
@@ -4810,6 +4921,8 @@ class HostAdapter {
       return {
         scope: 'chat',
         name: prefix ? `${prefix}채팅` : '채팅',
+        charIndex,
+        chatIndex,
         crossCharacter,
         crossChat,
         root: next,
@@ -4826,6 +4939,7 @@ class HostAdapter {
       return {
         scope: 'module',
         name: `모듈 "${modules[modIdx].name}"`,
+        moduleIndex: modIdx,
         crossCharacter: false,
         crossChat: false,
         root: nextModules[modIdx],
@@ -4839,6 +4953,7 @@ class HostAdapter {
     return {
       scope: 'character',
       name: prefix ? `${prefix}캐릭터` : '캐릭터',
+      charIndex,
       crossCharacter,
       crossChat: false,
       root: next,
@@ -4849,6 +4964,117 @@ class HostAdapter {
 
   _checkTruncationGuard(beforeText, actionLabel) {
     return checkTruncationGuard(beforeText, actionLabel, this.maxContentChars);
+  }
+
+  _propagateTargetGuards(nextTarget, sourceTarget) {
+    const out = { ...(nextTarget || {}) };
+    if (!sourceTarget || typeof sourceTarget !== 'object') return out;
+    for (const k of ['fieldsShownFull', 'greetingsShownFull', 'itemsShownFull', 'verifiedRewriteKeys', 'contentTruncated']) {
+      if (sourceTarget[k] !== undefined) out[k] = sourceTarget[k];
+    }
+    return out;
+  }
+
+  _candidateItemKeys(kind, opts = {}) {
+    const keys = new Set();
+    keys.add(buildShownItemKey(kind, opts));
+    if (!opts.crossCharacter && opts.scope !== 'module') {
+      keys.add(buildShownItemKey(kind, { ...opts, charIndex: undefined }));
+      if (!opts.crossChat && (opts.scope === 'chat' || kind === 'authorNote')) {
+        keys.add(buildShownItemKey(kind, { ...opts, charIndex: undefined, chatIndex: undefined }));
+      }
+    }
+    return [...keys];
+  }
+
+  _hasVerifiedRewrite(itemKeys, target) {
+    const verified = Array.isArray(target?.verifiedRewriteKeys) ? target.verifiedRewriteKeys : [];
+    if (verified.length === 0) return false;
+    return itemKeys.some(k => verified.includes(k));
+  }
+
+  _checkReplaceTargetGuard(beforeText, target, actionLabel, itemKeys = []) {
+    if (this._hasVerifiedRewrite(itemKeys, target)) return null;
+    if (typeof beforeText === 'string' && beforeText.length > 0 && target?.contentTruncated) {
+      return (
+        `현재 대상 원문(${beforeText.length.toLocaleString()}자)은 대용량 자동 목차/일부 구간 모드로 전문이 전달되지 않았습니다. ` +
+        `뒷부분 유실을 막기 위해 ${actionLabel}은(는) 차단됩니다. 부분 편집(patch_text / edits)이나 대용량 계획형 파이프라인(risuhelper-plan)을 사용해 주세요.`
+      );
+    }
+    return this._checkTruncationGuard(beforeText, actionLabel);
+  }
+
+  _itemOverwriteError(itemKeys, beforeText, target, actionLabel, { isDirectFocus = false } = {}) {
+    const before = String(beforeText ?? '');
+    if (before.length === 0) return null;
+    if (this._hasVerifiedRewrite(itemKeys, target)) return null;
+
+    const hasExplicitList = Array.isArray(target?.itemsShownFull);
+    const shownInList = hasExplicitList && itemKeys.some(k => target.itemsShownFull.includes(k));
+    const focusedFull = Boolean(isDirectFocus && !target?.contentTruncated && before.length <= this.maxContentChars);
+
+    if (hasExplicitList) {
+      if (!shownInList && !focusedFull) {
+        return (
+          `"${actionLabel}" 원문(${before.length.toLocaleString()}자)의 전문이 모델에 전달되지 않은 상태(요약 또는 일부 구간만 조회)라, ` +
+          '뒷부분 유실을 막기 위해 전체 덮어쓰기를 차단했습니다. 부분 편집(edits)을 쓰거나, read_item으로 전문을 읽거나, ' +
+          '대용량 전체 개편은 계획형 파이프라인(risuhelper-plan)을 사용해 주세요.'
+        );
+      }
+    } else if (target?.contentTruncated) {
+      return (
+        `"${actionLabel}" 원문(${before.length.toLocaleString()}자)은 일부만 전달된 상태라 전체 덮어쓰기를 차단했습니다. ` +
+        '부분 편집(edits) 또는 계획형 파이프라인(risuhelper-plan)을 사용해 주세요.'
+      );
+    } else if (!focusedFull && before.length > UNSHOWN_DIRECT_GUARD_CHARS) {
+      return (
+        `"${actionLabel}" 원문(${before.length.toLocaleString()}자)의 전문 확인 기록 없이 전체 덮어쓰기를 시도해 차단했습니다. ` +
+        '부분 편집(edits)을 쓰거나, read_item으로 전문을 확인한 뒤 제안해 주세요.'
+      );
+    }
+    return this._checkTruncationGuard(before, actionLabel);
+  }
+
+  _keysForTextTarget(target, hostBinding = null) {
+    const kind = target?.targetKind;
+    const charIndex = hostBinding?.charIndex ?? target?.targetCharIndex;
+    const chatIndex = hostBinding?.chatIndex ?? target?.targetChatIndex;
+    const crossCharacter = Boolean(hostBinding?.crossCharacter);
+    const crossChat = Boolean(hostBinding?.crossChat);
+    if (kind === 'char_field' && target.fieldKey) {
+      return this._candidateItemKeys('char_field', { field: target.fieldKey, charIndex, crossCharacter });
+    }
+    if (kind === 'chat_note') {
+      return this._candidateItemKeys('authorNote', { charIndex, chatIndex, crossCharacter, crossChat });
+    }
+    if (kind === 'char_alt_greeting' && Number.isInteger(target.greetingIndex)) {
+      return this._candidateItemKeys('greeting', { greetingIndex: target.greetingIndex, charIndex, crossCharacter });
+    }
+    if (kind === 'char_lorebook' && Number.isInteger(target.loreIndex)) {
+      return this._candidateItemKeys('lorebook', { scope: 'character', loreIndex: target.loreIndex, charIndex, crossCharacter });
+    }
+    if (kind === 'chat_lorebook' && Number.isInteger(target.loreIndex)) {
+      return this._candidateItemKeys('lorebook', { scope: 'chat', loreIndex: target.loreIndex, charIndex, chatIndex, crossCharacter, crossChat });
+    }
+    if (kind === 'module_lorebook' && Number.isInteger(target.loreIndex)) {
+      return this._candidateItemKeys('lorebook', { scope: 'module', moduleIndex: target.moduleIndex, loreIndex: target.loreIndex });
+    }
+    if (kind === 'char_lua') {
+      return this._candidateItemKeys('lua', { scope: 'character', charIndex, crossCharacter });
+    }
+    if (kind === 'module_lua') {
+      return this._candidateItemKeys('lua', { scope: 'module', moduleIndex: target.moduleIndex });
+    }
+    if (kind === 'char_regex' && Number.isInteger(target.regexIndex)) {
+      return this._candidateItemKeys('regex', { scope: 'character', regexIndex: target.regexIndex, charIndex, crossCharacter });
+    }
+    if (kind === 'module_regex' && Number.isInteger(target.regexIndex)) {
+      return this._candidateItemKeys('regex', { scope: 'module', moduleIndex: target.moduleIndex, regexIndex: target.regexIndex });
+    }
+    if (kind === 'persona' && Number.isInteger(target.personaIndex)) {
+      return this._candidateItemKeys('persona', { personaIndex: target.personaIndex });
+    }
+    return [];
   }
 
   _loreScopeOf(proposal, target) {
@@ -4892,7 +5118,22 @@ class HostAdapter {
     if (!existing) throw new Error(`${opened.name} 로어북 #${loreIndex + 1}을(를) 찾을 수 없습니다.`);
 
     if (!proposal.edits && (proposal[fieldKey] !== undefined || (fieldKey === 'content' && proposal.content !== undefined))) {
-      const truncErr = this._checkTruncationGuard(String(existing[fieldKey] ?? ''), '로어북 전체 덮어쓰기');
+      const targetKind = opened.scope === 'chat' ? 'chat_lorebook' : opened.scope === 'module' ? 'module_lorebook' : 'char_lorebook';
+      const loreKeys = this._candidateItemKeys('lorebook', {
+        scope: opened.scope,
+        loreIndex,
+        moduleIndex: opened.moduleIndex,
+        charIndex: opened.charIndex,
+        chatIndex: opened.chatIndex,
+        crossCharacter: opened.crossCharacter,
+        crossChat: opened.crossChat,
+      });
+      const isDirectFocus = target.targetKind === targetKind &&
+        target.loreIndex === loreIndex &&
+        !opened.crossCharacter &&
+        !opened.crossChat &&
+        (opened.scope !== 'module' || target.moduleIndex === opened.moduleIndex);
+      const truncErr = this._itemOverwriteError(loreKeys, String(existing[fieldKey] ?? ''), target, '로어북 전체 덮어쓰기', { isDirectFocus });
       if (truncErr) throw new Error(truncErr);
     }
     const folderRes = resolveLorebookFolderProposal(list, proposal, existing);
@@ -4976,7 +5217,17 @@ class HostAdapter {
       throw new Error('기존 V1/V2 트리거 삭제 확인 체크가 필요합니다.');
     }
     if (!proposal.edits) {
-      const truncErr = this._checkTruncationGuard(luaInfo.code, `${opened.name} Lua 전체 교체`);
+      const targetKind = opened.scope === 'module' ? 'module_lua' : 'char_lua';
+      const luaKeys = this._candidateItemKeys('lua', {
+        scope: opened.scope,
+        moduleIndex: opened.moduleIndex,
+        charIndex: opened.charIndex,
+        crossCharacter: opened.crossCharacter,
+      });
+      const isDirectFocus = target.targetKind === targetKind &&
+        !opened.crossCharacter &&
+        (opened.scope !== 'module' || target.moduleIndex === opened.moduleIndex);
+      const truncErr = this._itemOverwriteError(luaKeys, luaInfo.code, target, `${opened.name} Lua 전체 교체`, { isDirectFocus });
       if (truncErr) throw new Error(truncErr);
     }
     const nextCode = proposal.edits
@@ -4996,8 +5247,30 @@ class HostAdapter {
     const list = this._scopeList(opened, 'regex');
 
     const isUpdate = idx !== null && Boolean(list[idx]);
-    if (isUpdate) list[idx] = normalizeRegexEntry(proposal, list[idx]);
-    else list.push(normalizeRegexEntry(proposal));
+    if (isUpdate) {
+      const existing = list[idx];
+      const beforeOut = String(existing.out ?? '');
+      const nextEntry = normalizeRegexEntry(proposal, existing);
+      if (beforeOut.length > 0 && proposal.out !== undefined && String(nextEntry.out ?? '') !== beforeOut) {
+        const targetKind = opened.scope === 'module' ? 'module_regex' : 'char_regex';
+        const regexKeys = this._candidateItemKeys('regex', {
+          scope: opened.scope,
+          regexIndex: idx,
+          moduleIndex: opened.moduleIndex,
+          charIndex: opened.charIndex,
+          crossCharacter: opened.crossCharacter,
+        });
+        const isDirectFocus = target.targetKind === targetKind &&
+          (target.regexIndex === undefined || target.regexIndex === idx) &&
+          !opened.crossCharacter &&
+          (opened.scope !== 'module' || target.moduleIndex === opened.moduleIndex);
+        const truncErr = this._itemOverwriteError(regexKeys, beforeOut, target, '정규식 출력(out) 전체 덮어쓰기', { isDirectFocus });
+        if (truncErr) throw new Error(truncErr);
+      }
+      list[idx] = nextEntry;
+    } else {
+      list.push(normalizeRegexEntry(proposal));
+    }
 
     const undoId = await opened.commit(`${opened.name} 정규식 저장 (${proposal.comment || 'Regex'})`);
     return { ok: true, undoId, summary: `${opened.name} 정규식 "${proposal.comment || 'New Regex'}"을(를) 저장했습니다.` };
@@ -5066,7 +5339,10 @@ class HostAdapter {
     if (!proposal.edits && !proposal.fieldEdits) {
       const checkKey = proposal.fieldKey || 'personaPrompt';
       if (proposal[checkKey] !== undefined) {
-        const truncErr = this._checkTruncationGuard(String(cur[checkKey] ?? ''), '페르소나 전체 덮어쓰기');
+        const personaKeys = this._candidateItemKeys('persona', { personaIndex: idx });
+        const isDirectFocus = target.targetKind === 'persona' &&
+          (target.personaIndex === undefined || target.personaIndex === idx);
+        const truncErr = this._itemOverwriteError(personaKeys, String(cur[checkKey] ?? ''), target, '페르소나 전체 덮어쓰기', { isDirectFocus });
         if (truncErr) throw new Error(truncErr);
       }
     }
@@ -5464,5 +5740,6 @@ export {
   normalizeLorebookEntry,
   normalizeRegexEntry,
   resolveModuleIndex,
+  buildShownItemKey,
   HostAdapter,
 };

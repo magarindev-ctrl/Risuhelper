@@ -1,6 +1,6 @@
 # RisuAI 및 5대 포크 Plugin API v3 전수 커버리지 매트릭스
 
-> 기준 버전: `1.0.0` (M0~M4 완료 · 미분류 API 0개 · 전 API 실소스 시그니처 대조 완료) · 대조 대상:
+> 기준 버전: `1.1.0` (M0~M4 + 대용량 컨텍스트·계획형 파이프라인 완료 · 미분류 API 0개 · 전 API 실소스 시그니처 대조 완료) · 대조 대상:
 > - **원본** [`kwaroran/Risuai`](https://github.com/kwaroran/Risuai) (`src/ts/plugins/apiV3/v3.svelte.ts`, `risuai.d.ts`, `plugins.svelte.ts`, `pluginmcp.ts`)
 > - **PocketRisu** [`PocketRisu/PocketRisu`](https://github.com/PocketRisu/PocketRisu) (`src/ts/plugins/apiV3/v3.svelte.ts`)
 > - **RisuBard** [`rpaddict/RisuBard`](https://github.com/rpaddict/RisuBard) (`src/ts/plugins/apiV3/v3.svelte.ts`, `risuai.d.ts`)

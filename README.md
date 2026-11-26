@@ -33,9 +33,13 @@ RisuAI 및 공개 포크(`PocketRisu`, `RisuBard`, `HaejeokRisuai`, `RisuNest`, 
   - **수동 1회성 요청 로그 진단 (`☰ › 🔍 최근 요청 로그 첨부`)**: 사용자가 직접 버튼을 눌렀을 때만 `getFetchLogs()`로 최근 LLM 요청/응답 1건을 읽어 API 키·Bearer 토큰 등 민감정보를 자동 마스킹한 뒤 다음 1회 질문에만 첨부하고 전송 즉시 자동 해제합니다(자동 전송 절대 없음).
   - 페르소나: 새 페르소나 생성, 기존 페르소나 수정, **안전 삭제(`delete_persona`, 마지막 1개 보호·선택 인덱스 자동 보정)**, **현재 채팅 바인딩(`bindedPersona`)** 1-클릭 옵션
   - 설정/컨피그: `allowedDbKeys` 범위의 설정 진단 및 안전한 수정(디스플레이 **채팅 HTML(`guiHTML`)** · **커스텀 CSS(`customCSS`)**, `temperature`, `maxContext`, `maxResponse`, `enabledModules` 등)
-- **요청당 최대 3회 LLM 에이전트 루프 & 14종 읽기 전용(Read-Only) 자동 도구 (`v1.0.0`)**
-  - 단순 요청은 **1회 호출**로 즉시 끝내고, 전문 확인·진단·스킬 로드가 필요하면 **읽기 전용 도구**(`read_item`, `list_items`, `read_chat`, `read_vars`, `test_regex_cbs`, `active_lorebook`, `audit_workspace`, `inspect_assets`, `host_info`, `search_translation`, `read_bard_wiki`, `inspect_host_tools`, `load_skill`, 수동 옵트인 `read_fetch_log`)를 자동 실행한 뒤 결과를 받아 제안합니다.
-  - 제안 검증 실패 시 오류 사유를 모델에 되돌려 **최대 3회 상한 안에서 자동 수정**하며, 모든 쓰기는 예외 없이 사용자의 승인 카드 클릭 뒤에만 실행됩니다(호출 상한은 설정에서 `1~3회` 조정 가능).
+- **요청당 기본 3회 에이전트 루프 · 15종 읽기 전용(Read-Only) 자동 도구 · 대용량 계획형 파이프라인 (`v1.1.0`)**
+  - 단순 요청은 **1회 호출**로 즉시 끝내고, 전문 확인·검색·진단·스킬 로드가 필요하면 **15종 읽기 전용 도구**(`search_workspace`, `read_item`, `list_items`, `read_chat`, `read_vars`, `test_regex_cbs`, `active_lorebook`, `audit_workspace`, `inspect_assets`, `host_info`, `search_translation`, `read_bard_wiki`, `inspect_host_tools`, `load_skill`, 수동 옵트인 `read_fetch_log`)를 자동 실행한 뒤 결과를 받아 제안합니다.
+  - **0-토큰 로컬 전문 검색 & 구간 읽기 + 줄 범위 편집 (`v1.1.0`)**: `search_workspace`가 캐릭터 필드·로어북(캐릭터/채팅/모듈)·Lua·정규식·페르소나·채팅 본문을 로컬 JS에서 밀리초 단위로 검색해 정확한 줄 번호와 앞뒤 ±360자 원문 문맥을 반환합니다. `read_item`은 `startLine`/`endLine`, `startChar`/`maxChars`, `aroundText`, `outlineOnly`를 지원하며, `edits`의 선택 `lineRange: [시작줄, 끝줄]`로 중복 문구가 많은 수만 자 파일에서도 지정 구간만 정확히 패치합니다.
+  - **전 항목 미열람·부분 열람 전체 덮어쓰기 차단 (`v1.1.0`)**: 캐릭터 필드·첫 메시지뿐 아니라 **로어북·Lua·정규식·페르소나**까지 전문이 실제로 모델에 전달되지 않았거나 배치 직렬화 한도로 잘린 경우 전체 덮어쓰기를 미리보기·적용 양쪽에서 차단합니다.
+  - **대용량 자동 목차 & 어시스턴트 전용 요청 예산 (`v1.1.0`)**: 포커스된 대상이 `12,000자`를 초과하면 매 루프마다 원문을 통째로 재전송하지 않고 구조 목차(제목·Lua 함수·줄 번호) + 앞·뒤 미리보기로 자동 압축하며, RisuAI 채팅의 `db.maxContext`와 독립된 **어시스턴트 총 요청 예산(`maxRequestChars`: `48K/80K/160K/320K`)**을 설정에서 제어할 수 있습니다.
+  - **동적 3단계 계획형 파이프라인 (`Step 1 → Step 2 (0..N) → Step 3 (0..M)`) + 진행 전 확인창 (`v1.1.0`)**: "4만 자 로어북 전체 번역", "로어북 100개 용어 통일"처럼 단일 출력·3회 호출을 초과하는 대용량 작업은 `risuhelper-plan`을 수립하고, **4회 이상 호출 예정 시 패널 내 확인창(`대용량 다단계 작업 진행 확인`)**으로 단계·예상 호출 수를 먼저 보여 준 뒤 사용자가 **진행**을 눌렀을 때만 실행합니다. 매 단계 이전 원문을 제거하고 **3,000자 고정 예산 누적 요약(`rollingSummary`)** + 직전 구간 끝부분(8줄)만 전달해 컨텍스트 폭증을 막으며, `chunked_rewrite`는 마지막에 **1개의 원자적 수정 카드(전체 Diff + 1클릭 되돌리기)**로 합치고, 중간 오류/중단 시에도 완료된 구간을 안전한 부분 편집 카드로 보존합니다.
+  - 제안 검증 실패 시 오류 사유를 모델에 되돌려 자동 수정하며, 모든 쓰기는 예외 없이 사용자의 승인 카드 클릭 뒤에만 실행됩니다(기본 호출 상한 `1~3회`, 계획형 최대 호출 `6/12/18/24회`, 확인창 표시 on/off 설정 가능).
 - **21개 내장 스킬 · L0/L1/L2 라우터 & 36종 승인형 쓰기 동작**
   - 외부 파일 없이 플러그인 안에 내장된 **21개 스킬**을 L0(결정적 자동 선택) → L1(1줄 카탈로그) → L2(`load_skill` 동적 로드)로 운용하며, 호스트 기능 탐지(`src/host-capabilities.js`)로 미지원 포크 API를 자동 은닉합니다.
   - **경계 없는(Borderless) 타 캐릭터 · 타 채팅 편집 & 새 채팅 생성/이사**: `targetCharIndex`·`targetChatIndex`로 열려 있지 않은 다른 캐릭터·채팅의 필드·로어북·변수·메시지·메모리까지 수정·되돌리기하며, 카드에 `[다른 캐릭터: …]`/`[다른 채팅: …]`을 고정 표시합니다. `create_chat`으로 새 채팅 생성 + 상태 이사 + 전환까지 한 번에 처리합니다.
@@ -108,7 +112,7 @@ RisuAI 및 공개 포크(`PocketRisu`, `RisuBard`, `HaejeokRisuai`, `RisuNest`, 
 
 ```bash
 npm run build   # src/ -> dist/risuhelper.js 단일 번들 생성 및 문법 검증
-npm test        # 295개 단위·통합·보안·회귀 테스트 실행
+npm test        # 302개 단위·통합·보안·회귀 테스트 실행
 npm run check   # build + test 일괄 실행
 npm run e2e:sim # 6개 호스트 엄격 시그니처 시뮬레이션 E2E 실행
 node tools/eval-real-model.mjs --golden # 71문항 평가 하네스 무결성 검증

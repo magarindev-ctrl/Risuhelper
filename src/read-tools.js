@@ -11,7 +11,16 @@ import {
   extractLuaFromTriggers,
   findOrphanedLorebooks,
   summarizeLoreList,
+  buildShownItemKey,
 } from './host-adapter.js';
+import {
+  computeLineStarts,
+  offsetToLineNumber,
+  buildTextOutline,
+  sliceTextByLines,
+  sliceTextByChars,
+  sliceTextAroundAnchor,
+} from './text-edits.js';
 import {
   summarizeChatVariables,
   previewRegexApplication,
@@ -20,8 +29,8 @@ import {
 import { getBardWikiApi } from './m3-actions.js';
 
 const MAX_TOOLS_PER_CALL = 6;
-const MAX_TOOL_RESULT_CHARS = 10000;
-const MAX_BATCH_RESULT_CHARS = 24000;
+const MAX_TOOL_RESULT_CHARS = 16000;
+const MAX_BATCH_RESULT_CHARS = 28000;
 const MAX_AUDIT_FINDINGS = 40;
 
 const READ_TOOL_DEFS = [
@@ -33,10 +42,17 @@ const READ_TOOL_DEFS = [
     requiresCapabilities: [],
   },
   {
+    id: 'search_workspace',
+    label: '워크스페이스 전문 검색',
+    summary: '캐릭터·로어북·Lua·정규식·페르소나·채팅 본문 로컬 키워드/정규식 검색(줄번호·문맥 포함)',
+    argsHint: 'query,scope?,useRegex?',
+    requiresCapabilities: [],
+  },
+  {
     id: 'read_item',
-    label: '항목 전문 조회',
-    summary: '필드·첫메시지·로어북·Lua·정규식·페르소나·모듈 전문(타 캐릭터·채팅 포함)',
-    argsHint: 'kind,field|loreIndex|regexIndex|charIndex',
+    label: '항목 조회(전문·구간·목차)',
+    summary: '필드·첫메시지·로어북·Lua·정규식·페르소나·모듈 조회(구간/aroundText/목차 지원)',
+    argsHint: 'kind,field|loreIndex,startLine?,aroundText?,outlineOnly?',
     requiresCapabilities: [],
   },
   {
@@ -155,13 +171,24 @@ function describeToolCall(call) {
       const ids = Array.isArray(args.skillIds) ? args.skillIds : (args.skillId ? [args.skillId] : []);
       return ids.length ? `스킬 로드(${ids.join(', ')})` : '스킬 로드';
     }
+    case 'search_workspace': {
+      const q = String(args.query || '').slice(0, 20);
+      return q ? `전문 검색("${q}")` : '워크스페이스 전문 검색';
+    }
     case 'read_item': {
-      if (args.kind === 'lorebook' && Number.isInteger(args.loreIndex)) return `로어북 #${args.loreIndex + 1} 조회`;
-      if (args.kind === 'char_field' && args.field) return `필드(${args.field}) 조회`;
-      if (args.kind === 'greeting') return `첫 메시지 조회`;
-      if (args.kind === 'lua') return 'Lua 원문 조회';
-      if (args.kind === 'regex') return '정규식 조회';
-      return `${args.kind || '항목'} 전문 조회`;
+      const suffix = args.outlineOnly
+        ? ' 목차'
+        : args.aroundText
+          ? ' 문맥'
+          : (args.startLine !== undefined || args.startChar !== undefined)
+            ? ' 구간'
+            : '';
+      if (args.kind === 'lorebook' && Number.isInteger(args.loreIndex)) return `로어북 #${args.loreIndex + 1}${suffix} 조회`;
+      if (args.kind === 'char_field' && args.field) return `필드(${args.field})${suffix} 조회`;
+      if (args.kind === 'greeting') return `첫 메시지${suffix} 조회`;
+      if (args.kind === 'lua') return `Lua${suffix} 조회`;
+      if (args.kind === 'regex') return `정규식${suffix} 조회`;
+      return `${args.kind || '항목'}${suffix || ' 전문'} 조회`;
     }
     case 'list_items': return `${args.kind || '목록'} 조회`;
     case 'read_chat': return '채팅 구간 조회';
@@ -186,6 +213,121 @@ function clipText(str, maxChars = MAX_TOOL_RESULT_CHARS) {
     text: s.slice(0, maxChars) + `\n... (총 ${s.length.toLocaleString()}자 중 앞 ${maxChars.toLocaleString()}자만 표시)`,
     truncated: true,
     totalChars: s.length,
+  };
+}
+
+/**
+ * Formats a text field according to read_item window/outline parameters:
+ *   - `outlineOnly: true` -> structural headings + line map + head/tail preview (never unlocks full overwrite)
+ *   - `aroundText: string` -> ±contextChars line-aligned window around anchor
+ *   - `startLine` / `endLine` -> 1-indexed inclusive line slice
+ *   - `startChar` / `maxChars` -> 0-indexed char slice
+ */
+function buildReadWindowPayload(rawText, args, kind, maxChars, textProp = 'content') {
+  const raw = String(rawText ?? '');
+  if (args.outlineOnly === true) {
+    const outline = buildTextOutline(raw, { kind, maxEntries: 50, headChars: 1200, tailChars: 600 });
+    return {
+      isFull: false,
+      fields: {
+        outlineOnly: true,
+        totalChars: outline.totalChars,
+        totalLines: outline.totalLines,
+        truncated: true,
+        headings: outline.headings,
+        headPreview: outline.headPreview,
+        tailPreview: outline.tailPreview,
+      },
+    };
+  }
+  if (typeof args.aroundText === 'string' && args.aroundText.trim()) {
+    const win = sliceTextAroundAnchor(raw, args.aroundText, Number(args.contextChars) || 3000);
+    if (!win.found) {
+      return {
+        isFull: false,
+        fields: {
+          found: false,
+          aroundText: args.aroundText,
+          totalChars: win.totalChars,
+          totalLines: win.totalLines,
+          truncated: true,
+          [textProp]: '',
+          note: `원문에서 "${args.aroundText}" 구간을 찾지 못했습니다.`,
+        },
+      };
+    }
+    return {
+      isFull: win.isFull,
+      fields: {
+        found: true,
+        matchLine: win.matchLine,
+        matchCount: win.matchCount,
+        startLine: win.startLine,
+        endLine: win.endLine,
+        totalLines: win.totalLines,
+        startChar: win.startChar,
+        endChar: win.endChar,
+        totalChars: win.totalChars,
+        truncated: win.truncated,
+        hasMoreBefore: win.hasMoreBefore,
+        hasMoreAfter: win.hasMoreAfter,
+        [textProp]: win.text,
+      },
+    };
+  }
+  if (args.startLine !== undefined || args.endLine !== undefined) {
+    const win = sliceTextByLines(raw, args.startLine ?? 1, args.endLine ?? null, maxChars);
+    return {
+      isFull: win.isFull,
+      fields: {
+        startLine: win.startLine,
+        endLine: win.endLine,
+        totalLines: win.totalLines,
+        startChar: win.startChar,
+        endChar: win.endChar,
+        totalChars: win.totalChars,
+        truncated: win.truncated,
+        hasMoreBefore: win.hasMoreBefore,
+        hasMoreAfter: win.hasMoreAfter,
+        nextStartLine: win.nextStartLine,
+        [textProp]: win.text,
+      },
+    };
+  }
+  if (args.startChar !== undefined) {
+    const win = sliceTextByChars(raw, args.startChar, maxChars);
+    return {
+      isFull: win.isFull,
+      fields: {
+        startLine: win.startLine,
+        endLine: win.endLine,
+        totalLines: win.totalLines,
+        startChar: win.startChar,
+        endChar: win.endChar,
+        totalChars: win.totalChars,
+        truncated: win.truncated,
+        hasMoreBefore: win.hasMoreBefore,
+        hasMoreAfter: win.hasMoreAfter,
+        nextStartChar: win.nextStartChar,
+        [textProp]: win.text,
+      },
+    };
+  }
+  const win = sliceTextByChars(raw, 0, maxChars);
+  const displayText = win.truncated
+    ? `${win.text}\n... (총 ${win.totalChars.toLocaleString()}자 / ${win.totalLines}줄 중 앞 ${win.endChar.toLocaleString()}자·1~${win.endLine}줄만 표시 — 추가 구간은 startLine: ${win.endLine + 1} 또는 aroundText/search_workspace 사용)`
+    : win.text;
+  return {
+    isFull: win.isFull,
+    fields: {
+      startLine: win.startLine,
+      endLine: win.endLine,
+      totalLines: win.totalLines,
+      totalChars: win.totalChars,
+      truncated: win.truncated,
+      ...(win.hasMoreAfter ? { nextStartLine: Math.min(win.totalLines, win.endLine + 1), nextStartChar: win.endChar } : {}),
+      [textProp]: displayText,
+    },
   };
 }
 
@@ -288,9 +430,15 @@ function optionalInt(val) {
   return Number.isInteger(val) && val >= 0 ? val : undefined;
 }
 
-async function runReadItem(adapter, args, unlocks) {
+function addPendingUnlock(pending, bucket, value) {
+  if (!pending) return;
+  if (!pending[bucket]) pending[bucket] = [];
+  if (!pending[bucket].includes(value)) pending[bucket].push(value);
+}
+
+async function runReadItem(adapter, args, pendingUnlocks) {
   const kind = String(args.kind || '').trim();
-  const maxChars = Math.max(500, Math.min(adapter.maxContentChars || 60000, Number(args.maxChars) || 24000));
+  const maxChars = Math.max(500, Math.min(adapter.maxContentChars || 60000, Number(args.maxChars) || 12000));
   const charHint = { targetCharIndex: optionalInt(args.charIndex) };
   const chatHint = {
     targetCharIndex: optionalInt(args.charIndex),
@@ -300,16 +448,20 @@ async function runReadItem(adapter, args, unlocks) {
   if (kind === 'char_field') {
     const field = String(args.field || 'desc');
     if (field === AUTHOR_NOTE_FIELD) {
-      return await runReadItem(adapter, { ...args, kind: 'authorNote' }, unlocks);
+      return await runReadItem(adapter, { ...args, kind: 'authorNote' }, pendingUnlocks);
     }
     if (!ALLOWED_CHAR_FIELDS.includes(field)) {
       return { ok: false, error: `허용되지 않는 캐릭터 필드입니다: ${field}` };
     }
     const { char, charIndex, crossCharacter } = await adapter._resolveTargetCharacter(charHint, null, '조회');
     const raw = field === 'depthPrompt' ? String(char.depth_prompt?.prompt ?? '') : String(char[field] ?? '');
-    const clipped = clipText(raw, maxChars);
-    if (!clipped.truncated && !crossCharacter) {
-      unlocks.fieldsShownFull.add(field);
+    const win = buildReadWindowPayload(raw, args, 'char_field', maxChars, 'content');
+    if (win.isFull) {
+      addPendingUnlock(pendingUnlocks, 'itemsShownFull', buildShownItemKey('char_field', { field, charIndex }));
+      if (!crossCharacter) {
+        addPendingUnlock(pendingUnlocks, 'fieldsShownFull', field);
+        addPendingUnlock(pendingUnlocks, 'itemsShownFull', buildShownItemKey('char_field', { field }));
+      }
     }
     return {
       ok: true,
@@ -317,17 +469,19 @@ async function runReadItem(adapter, args, unlocks) {
       field,
       charIndex,
       charName: char.name || '(무제)',
-      totalChars: clipped.totalChars,
-      truncated: clipped.truncated,
-      content: clipped.text,
+      ...win.fields,
     };
   }
 
   if (kind === 'authorNote' || kind === 'chat_note') {
     const { chat, char, charIndex, chatIndex, crossCharacter, crossChat } = await adapter._resolveTargetChat(chatHint, null, '조회');
-    const clipped = clipText(String(chat.note ?? ''), maxChars);
-    if (!clipped.truncated && !crossCharacter && !crossChat) {
-      unlocks.fieldsShownFull.add(AUTHOR_NOTE_FIELD);
+    const win = buildReadWindowPayload(String(chat.note ?? ''), args, 'authorNote', maxChars, 'content');
+    if (win.isFull) {
+      addPendingUnlock(pendingUnlocks, 'itemsShownFull', buildShownItemKey('authorNote', { charIndex, chatIndex }));
+      if (!crossCharacter && !crossChat) {
+        addPendingUnlock(pendingUnlocks, 'fieldsShownFull', AUTHOR_NOTE_FIELD);
+        addPendingUnlock(pendingUnlocks, 'itemsShownFull', buildShownItemKey('authorNote', {}));
+      }
     }
     return {
       ok: true,
@@ -336,9 +490,7 @@ async function runReadItem(adapter, args, unlocks) {
       chatIndex,
       charName: char.name || '(무제)',
       chatName: chatName(chat, chatIndex),
-      totalChars: clipped.totalChars,
-      truncated: clipped.truncated,
-      content: clipped.text,
+      ...win.fields,
     };
   }
 
@@ -356,9 +508,13 @@ async function runReadItem(adapter, args, unlocks) {
       }
       raw = String(list[idx] ?? '');
     }
-    const clipped = clipText(raw, maxChars);
-    if (!clipped.truncated && !crossCharacter) {
-      unlocks.greetingsShownFull.add(idx);
+    const win = buildReadWindowPayload(raw, args, 'greeting', maxChars, 'content');
+    if (win.isFull) {
+      addPendingUnlock(pendingUnlocks, 'itemsShownFull', buildShownItemKey('greeting', { greetingIndex: idx, charIndex }));
+      if (!crossCharacter) {
+        addPendingUnlock(pendingUnlocks, 'greetingsShownFull', idx);
+        addPendingUnlock(pendingUnlocks, 'itemsShownFull', buildShownItemKey('greeting', { greetingIndex: idx }));
+      }
     }
     return {
       ok: true,
@@ -366,9 +522,7 @@ async function runReadItem(adapter, args, unlocks) {
       greetingIndex: idx,
       charIndex,
       charName: char.name || '(무제)',
-      totalChars: clipped.totalChars,
-      truncated: clipped.truncated,
-      content: clipped.text,
+      ...win.fields,
     };
   }
 
@@ -380,10 +534,14 @@ async function runReadItem(adapter, args, unlocks) {
     }
     let list = [];
     let ownerLabel = '';
+    let unlockKeyOpts = { scope, loreIndex };
+    let isCurrentOwner = true;
     if (scope === 'chat') {
-      const { chat, chatIndex } = await adapter._resolveTargetChat(chatHint, null, '조회');
+      const { chat, charIndex, chatIndex, crossCharacter, crossChat } = await adapter._resolveTargetChat(chatHint, null, '조회');
       list = Array.isArray(chat.localLore) ? chat.localLore : [];
       ownerLabel = `채팅 "${chatName(chat, chatIndex)}"`;
+      unlockKeyOpts = { scope: 'chat', charIndex, chatIndex, loreIndex };
+      isCurrentOwner = !crossCharacter && !crossChat;
     } else if (scope === 'module') {
       const { modules, permissionDenied } = await adapter.readModules();
       if (permissionDenied) return { ok: false, error: 'DB 읽기 권한이 없습니다.' };
@@ -392,14 +550,23 @@ async function runReadItem(adapter, args, unlocks) {
       if (!mod) return { ok: false, error: `모듈 #${modIdx + 1}을(를) 찾을 수 없습니다.` };
       list = Array.isArray(mod.lorebook) ? mod.lorebook : [];
       ownerLabel = `모듈 "${mod.name}"`;
+      unlockKeyOpts = { scope: 'module', moduleIndex: modIdx, loreIndex };
     } else {
-      const { char } = await adapter._resolveTargetCharacter(charHint, null, '조회');
+      const { char, charIndex, crossCharacter } = await adapter._resolveTargetCharacter(charHint, null, '조회');
       list = Array.isArray(char.globalLore) ? char.globalLore : [];
       ownerLabel = `캐릭터 "${char.name || '무제'}"`;
+      unlockKeyOpts = { scope: 'character', charIndex, loreIndex };
+      isCurrentOwner = !crossCharacter;
     }
     const entry = list[loreIndex];
     if (!entry) return { ok: false, error: `${ownerLabel} 로어북 #${loreIndex + 1}을(를) 찾을 수 없습니다. (총 ${list.length}개)` };
-    const clipped = clipText(String(entry.content ?? ''), maxChars);
+    const win = buildReadWindowPayload(String(entry.content ?? ''), args, 'lorebook', maxChars, 'content');
+    if (win.isFull) {
+      addPendingUnlock(pendingUnlocks, 'itemsShownFull', buildShownItemKey('lorebook', unlockKeyOpts));
+      if (isCurrentOwner && scope !== 'module') {
+        addPendingUnlock(pendingUnlocks, 'itemsShownFull', buildShownItemKey('lorebook', { scope, loreIndex }));
+      }
+    }
     return {
       ok: true,
       kind,
@@ -415,9 +582,7 @@ async function runReadItem(adapter, args, unlocks) {
       insertorder: entry.insertorder ?? 100,
       mode: entry.mode || 'normal',
       folder: entry.folder || '',
-      totalChars: clipped.totalChars,
-      truncated: clipped.truncated,
-      content: clipped.text,
+      ...win.fields,
     };
   }
 
@@ -430,13 +595,22 @@ async function runReadItem(adapter, args, unlocks) {
       const mod = modules[modIdx];
       if (!mod) return { ok: false, error: `모듈 #${modIdx + 1}을(를) 찾을 수 없습니다.` };
       const lua = extractLuaFromTriggers(mod.trigger);
-      const clipped = clipText(lua.code, maxChars);
-      return { ok: true, kind, scope, moduleIndex: modIdx, name: mod.name, isLua: lua.isLua, hasOtherTriggers: lua.hasOtherTriggers, ...clipped };
+      const win = buildReadWindowPayload(lua.code, args, 'lua', maxChars, 'code');
+      if (win.isFull) {
+        addPendingUnlock(pendingUnlocks, 'itemsShownFull', buildShownItemKey('lua', { scope: 'module', moduleIndex: modIdx }));
+      }
+      return { ok: true, kind, scope, moduleIndex: modIdx, name: mod.name, isLua: lua.isLua, hasOtherTriggers: lua.hasOtherTriggers, ...win.fields };
     }
-    const { char, charIndex } = await adapter._resolveTargetCharacter(charHint, null, '조회');
+    const { char, charIndex, crossCharacter } = await adapter._resolveTargetCharacter(charHint, null, '조회');
     const lua = extractLuaFromTriggers(char.triggerscript);
-    const clipped = clipText(lua.code, maxChars);
-    return { ok: true, kind, scope: 'character', charIndex, charName: char.name || '(무제)', isLua: lua.isLua, hasOtherTriggers: lua.hasOtherTriggers, ...clipped };
+    const win = buildReadWindowPayload(lua.code, args, 'lua', maxChars, 'code');
+    if (win.isFull) {
+      addPendingUnlock(pendingUnlocks, 'itemsShownFull', buildShownItemKey('lua', { scope: 'character', charIndex }));
+      if (!crossCharacter) {
+        addPendingUnlock(pendingUnlocks, 'itemsShownFull', buildShownItemKey('lua', { scope: 'character' }));
+      }
+    }
+    return { ok: true, kind, scope: 'character', charIndex, charName: char.name || '(무제)', isLua: lua.isLua, hasOtherTriggers: lua.hasOtherTriggers, ...win.fields };
   }
 
   if (kind === 'regex') {
@@ -446,6 +620,8 @@ async function runReadItem(adapter, args, unlocks) {
       return { ok: false, error: 'regex 조회에는 0 이상의 정수 regexIndex가 필요합니다.' };
     }
     let list = [];
+    let unlockKeyOpts = { scope, regexIndex };
+    let isCurrentOwner = true;
     if (scope === 'module') {
       const { modules, permissionDenied } = await adapter.readModules();
       if (permissionDenied) return { ok: false, error: 'DB 읽기 권한이 없습니다.' };
@@ -453,12 +629,22 @@ async function runReadItem(adapter, args, unlocks) {
       const mod = modules[modIdx];
       if (!mod) return { ok: false, error: `모듈 #${modIdx + 1}을(를) 찾을 수 없습니다.` };
       list = Array.isArray(mod.regex) ? mod.regex : [];
+      unlockKeyOpts = { scope: 'module', moduleIndex: modIdx, regexIndex };
     } else {
-      const { char } = await adapter._resolveTargetCharacter(charHint, null, '조회');
+      const { char, charIndex, crossCharacter } = await adapter._resolveTargetCharacter(charHint, null, '조회');
       list = Array.isArray(char.customscript) ? char.customscript : [];
+      unlockKeyOpts = { scope: 'character', charIndex, regexIndex };
+      isCurrentOwner = !crossCharacter;
     }
     const entry = list[regexIndex];
     if (!entry) return { ok: false, error: `정규식 #${regexIndex + 1}을(를) 찾을 수 없습니다. (총 ${list.length}개)` };
+    const win = buildReadWindowPayload(String(entry.out ?? ''), args, 'regex', maxChars, 'out');
+    if (win.isFull) {
+      addPendingUnlock(pendingUnlocks, 'itemsShownFull', buildShownItemKey('regex', unlockKeyOpts));
+      if (isCurrentOwner && scope !== 'module') {
+        addPendingUnlock(pendingUnlocks, 'itemsShownFull', buildShownItemKey('regex', { scope: 'character', regexIndex }));
+      }
+    }
     return {
       ok: true,
       kind,
@@ -467,9 +653,9 @@ async function runReadItem(adapter, args, unlocks) {
       comment: entry.comment || '',
       type: entry.type || 'editdisplay',
       in: entry.in || '',
-      out: clipText(entry.out || '', maxChars).text,
       flag: entry.flag || '',
       ableFlag: Boolean(entry.ableFlag),
+      ...win.fields,
     };
   }
 
@@ -479,7 +665,10 @@ async function runReadItem(adapter, args, unlocks) {
     const idx = Number.isInteger(args.personaIndex) ? args.personaIndex : selectedPersona;
     const p = personas[idx];
     if (!p) return { ok: false, error: `페르소나 #${idx + 1}을(를) 찾을 수 없습니다. (총 ${personas.length}개)` };
-    const clipped = clipText(String(p.personaPrompt ?? ''), maxChars);
+    const win = buildReadWindowPayload(String(p.personaPrompt ?? ''), args, 'persona', maxChars, 'personaPrompt');
+    if (win.isFull) {
+      addPendingUnlock(pendingUnlocks, 'itemsShownFull', buildShownItemKey('persona', { personaIndex: idx }));
+    }
     return {
       ok: true,
       kind,
@@ -488,8 +677,7 @@ async function runReadItem(adapter, args, unlocks) {
       name: p.name || '',
       note: p.note || '',
       largePortrait: Boolean(p.largePortrait),
-      personaPrompt: clipped.text,
-      truncated: clipped.truncated,
+      ...win.fields,
     };
   }
 
@@ -1385,16 +1573,293 @@ async function runInspectHostTools(adapter) {
 }
 
 /**
- * Executes a single validated Read-Only tool call. Never invokes any write API.
+ * Fast, 0-token local full-text / regex search across character fields, lorebooks (char/chat/module),
+ * Lua scripts, regex scripts, personas, and active chat messages. Returns exact line numbers and
+ * generous ±contextChars verbatim excerpts so single edits can finish in 2 calls instead of 3.
  */
-async function executeReadTool(adapter, call, toolContext = {}, unlocks = null) {
+async function runSearchWorkspace(adapter, args = {}) {
+  const query = String(args.query ?? '').trim();
+  if (!query) {
+    return { ok: false, error: '검색할 query 문자열이 필요합니다.' };
+  }
+  const useRegex = Boolean(args.useRegex);
+  const caseSensitive = Boolean(args.caseSensitive);
+  const scope = String(args.scope || 'all').trim().toLowerCase();
+  const maxMatches = Math.max(1, Math.min(40, Number(args.maxMatches) || 15));
+  const contextChars = Math.max(80, Math.min(800, Number(args.contextChars) || 360));
+  const maxPerItem = Math.max(1, Math.min(5, Number(args.maxPerItem) || 3));
+  const charHint = { targetCharIndex: optionalInt(args.charIndex) };
+  const chatHint = {
+    targetCharIndex: optionalInt(args.charIndex),
+    targetChatIndex: args.chatIndex === 'current' ? undefined : optionalInt(args.chatIndex),
+  };
+
+  let regex = null;
+  if (useRegex) {
+    try {
+      regex = new RegExp(query, caseSensitive ? 'g' : 'gi');
+    } catch (err) {
+      return { ok: false, error: `정규식 문법 오류: ${err.message}` };
+    }
+  }
+  const needleLower = caseSensitive ? query : query.toLowerCase();
+
+  const matches = [];
+  let totalMatches = 0;
+  let totalMatchedItems = 0;
+  let scannedItems = 0;
+
+  const scanText = (text, meta) => {
+    const src = String(text ?? '');
+    if (!src) return;
+    scannedItems++;
+
+    const hitPositions = [];
+    if (regex) {
+      regex.lastIndex = 0;
+      let m;
+      let guard = 0;
+      while ((m = regex.exec(src)) !== null && guard++ < 500) {
+        hitPositions.push({ pos: m.index, len: Math.max(1, m[0].length) });
+        if (m[0].length === 0) regex.lastIndex++;
+      }
+    } else {
+      const hay = caseSensitive ? src : src.toLowerCase();
+      let pos = hay.indexOf(needleLower);
+      while (pos !== -1 && hitPositions.length < 500) {
+        hitPositions.push({ pos, len: query.length });
+        pos = hay.indexOf(needleLower, pos + Math.max(1, query.length));
+      }
+    }
+
+    if (hitPositions.length === 0) return;
+    totalMatchedItems++;
+    totalMatches += hitPositions.length;
+
+    if (matches.length >= maxMatches) return;
+    const lineStarts = computeLineStarts(src);
+    const totalLines = lineStarts.length;
+
+    const takeCount = Math.min(maxPerItem, hitPositions.length, maxMatches - matches.length);
+    let lastSnippetEnd = -1;
+    for (let i = 0; i < takeCount; i++) {
+      const hit = hitPositions[i];
+      if (hit.pos < lastSnippetEnd && i > 0) continue;
+      const rawStart = Math.max(0, hit.pos - contextChars);
+      const rawEnd = Math.min(src.length, hit.pos + hit.len + contextChars);
+      const snippetStartLine = offsetToLineNumber(lineStarts, rawStart);
+      const snippetEndLine = offsetToLineNumber(lineStarts, Math.max(rawStart, rawEnd - 1));
+      const startChar = lineStarts[snippetStartLine - 1];
+      const endChar = snippetEndLine >= totalLines ? src.length : lineStarts[snippetEndLine];
+      lastSnippetEnd = endChar;
+      matches.push({
+        ...meta,
+        totalChars: src.length,
+        totalLines,
+        matchLine: offsetToLineNumber(lineStarts, hit.pos),
+        matchCountInItem: hitPositions.length,
+        snippetStartLine,
+        snippetEndLine,
+        snippet: src.slice(startChar, endChar),
+      });
+    }
+  };
+
+  const want = (s) => scope === 'all' || scope === s;
+
+  // 1. Character fields, lorebooks, Lua, regex
+  if (want('fields') || want('lorebook') || want('scripts')) {
+    try {
+      const { char, charIndex } = await adapter._resolveTargetCharacter(charHint, null, '검색');
+      if (char) {
+        if (want('fields')) {
+          for (const field of ALLOWED_CHAR_FIELDS) {
+            const val = field === 'depthPrompt' ? char.depth_prompt?.prompt : char[field];
+            if (typeof val === 'string' && val) {
+              scanText(val, { kind: 'char_field', scope: 'character', charIndex, field, title: `캐릭터 필드(${field})` });
+            }
+          }
+          if (Array.isArray(char.alternateGreetings)) {
+            char.alternateGreetings.forEach((g, idx) => {
+              if (typeof g === 'string' && g) {
+                scanText(g, { kind: 'greeting', scope: 'character', charIndex, greetingIndex: idx, title: `추가 첫 메시지 #${idx + 1}` });
+              }
+            });
+          }
+        }
+        if (want('lorebook') && Array.isArray(char.globalLore)) {
+          char.globalLore.forEach((entry, idx) => {
+            if (!entry || entry.mode === 'folder') return;
+            const meta = {
+              kind: 'lorebook',
+              scope: 'character',
+              charIndex,
+              loreIndex: idx,
+              title: entry.comment || `로어북 #${idx + 1}`,
+              key: entry.key || '',
+            };
+            const content = String(entry.content ?? '');
+            const prevTotal = totalMatches;
+            scanText(content, meta);
+            // Also check title/key if content didn't match
+            if (totalMatches === prevTotal) {
+              const headerText = `${entry.comment || ''} ${entry.key || ''} ${entry.secondkey || ''}`.trim();
+              if (headerText) scanText(headerText, { ...meta, matchedIn: 'metadata' });
+            }
+          });
+        }
+        if (want('scripts')) {
+          const lua = extractLuaFromTriggers(char.triggerscript);
+          if (lua.code) {
+            scanText(lua.code, { kind: 'lua', scope: 'character', charIndex, title: '캐릭터 Lua 트리거' });
+          }
+          if (Array.isArray(char.customscript)) {
+            char.customscript.forEach((r, idx) => {
+              if (!r) return;
+              const combined = `${r.comment || ''}\nIN: ${r.in || ''}\nOUT: ${r.out || ''}`;
+              scanText(combined, { kind: 'regex', scope: 'character', charIndex, regexIndex: idx, title: r.comment || `정규식 #${idx + 1}` });
+            });
+          }
+        }
+      }
+    } catch {}
+  }
+
+  // 2. Active / target chat (author note, chat lorebook, messages)
+  if (want('chat') || want('lorebook') || want('fields')) {
+    try {
+      const { chat, charIndex, chatIndex } = await adapter._resolveTargetChat(chatHint, null, '검색');
+      if (chat && !isColdStoredChat(chat)) {
+        if ((want('fields') || want('chat')) && typeof chat.note === 'string' && chat.note) {
+          scanText(chat.note, { kind: 'authorNote', scope: 'chat', charIndex, chatIndex, title: `작가의 노트 (${chatName(chat, chatIndex)})` });
+        }
+        if ((want('lorebook') || want('chat')) && Array.isArray(chat.localLore)) {
+          chat.localLore.forEach((entry, idx) => {
+            if (!entry || entry.mode === 'folder') return;
+            scanText(entry.content || '', {
+              kind: 'lorebook',
+              scope: 'chat',
+              charIndex,
+              chatIndex,
+              loreIndex: idx,
+              title: entry.comment || `채팅 로어북 #${idx + 1}`,
+              key: entry.key || '',
+            });
+          });
+        }
+        if (want('chat') && Array.isArray(chat.message)) {
+          // Scan newest messages first for chat searches
+          for (let i = chat.message.length - 1; i >= 0; i--) {
+            const m = chat.message[i];
+            if (typeof m?.data === 'string' && m.data) {
+              scanText(m.data, {
+                kind: 'chat_message',
+                scope: 'chat',
+                charIndex,
+                chatIndex,
+                messageIndex: i,
+                role: m.role || 'unknown',
+                title: `채팅 메시지 #${i + 1} (${m.role || 'unknown'})`,
+              });
+            }
+          }
+        }
+      }
+    } catch {}
+  }
+
+  // 3. Modules (lorebook, Lua, regex, fields)
+  if (want('module') || want('lorebook') || want('scripts')) {
+    try {
+      const { modules, permissionDenied } = await adapter.readModules();
+      if (!permissionDenied && Array.isArray(modules)) {
+        const targetModIdx = optionalInt(args.moduleIndex);
+        const indices = targetModIdx !== undefined ? [targetModIdx] : modules.map((_, i) => i);
+        for (const modIdx of indices) {
+          const mod = modules[modIdx];
+          if (!mod) continue;
+          if ((want('module') || want('lorebook')) && Array.isArray(mod.lorebook)) {
+            mod.lorebook.forEach((entry, idx) => {
+              if (!entry || entry.mode === 'folder') return;
+              scanText(entry.content || '', {
+                kind: 'lorebook',
+                scope: 'module',
+                moduleIndex: modIdx,
+                moduleName: mod.name || '',
+                loreIndex: idx,
+                title: `모듈 "${mod.name || modIdx}" · ${entry.comment || `로어북 #${idx + 1}`}`,
+                key: entry.key || '',
+              });
+            });
+          }
+          if (want('module') || want('scripts')) {
+            const lua = extractLuaFromTriggers(mod.trigger);
+            if (lua.code) {
+              scanText(lua.code, { kind: 'lua', scope: 'module', moduleIndex: modIdx, moduleName: mod.name || '', title: `모듈 "${mod.name || modIdx}" Lua` });
+            }
+            if (Array.isArray(mod.regex)) {
+              mod.regex.forEach((r, idx) => {
+                if (!r) return;
+                const combined = `${r.comment || ''}\nIN: ${r.in || ''}\nOUT: ${r.out || ''}`;
+                scanText(combined, { kind: 'regex', scope: 'module', moduleIndex: modIdx, moduleName: mod.name || '', regexIndex: idx, title: `모듈 "${mod.name || modIdx}" · ${r.comment || `정규식 #${idx + 1}`}` });
+              });
+            }
+          }
+        }
+      }
+    } catch {}
+  }
+
+  // 4. Personas
+  if (want('persona')) {
+    try {
+      const { personas, permissionDenied } = await adapter.readPersonas();
+      if (!permissionDenied && Array.isArray(personas)) {
+        personas.forEach((p, idx) => {
+          if (!p) return;
+          scanText(p.personaPrompt || '', { kind: 'persona', scope: 'persona', personaIndex: idx, title: `페르소나 "${p.name || `#${idx + 1}`}"` });
+        });
+      }
+    } catch {}
+  }
+
+  return {
+    ok: true,
+    query,
+    useRegex,
+    scope,
+    scannedItems,
+    totalMatchedItems,
+    totalMatches,
+    returnedMatches: matches.length,
+    truncated: totalMatches > matches.length,
+    matches,
+  };
+}
+
+function commitPendingUnlocks(pending, unlocks) {
+  if (!pending || !unlocks) return;
+  for (const id of pending.skillIds || []) unlocks.skillIds?.add?.(id);
+  for (const f of pending.fieldsShownFull || []) unlocks.fieldsShownFull?.add?.(f);
+  for (const g of pending.greetingsShownFull || []) unlocks.greetingsShownFull?.add?.(g);
+  for (const k of pending.itemsShownFull || []) unlocks.itemsShownFull?.add?.(k);
+}
+
+/**
+ * Executes a single validated Read-Only tool call. Never invokes any write API.
+ * When `options.deferUnlocks` is true (used by executeReadToolBatch), full-text unlock flags are
+ * returned on `_pendingUnlocks` and committed ONLY after final batch serialization verifies no clipping.
+ */
+async function executeReadTool(adapter, call, toolContext = {}, unlocks = null, options = {}) {
   const tool = String(call?.tool || '').trim();
   const args = call?.args && typeof call.args === 'object' && !Array.isArray(call.args) ? call.args : {};
   const sharedUnlocks = unlocks || {
     skillIds: new Set(),
     fieldsShownFull: new Set(),
     greetingsShownFull: new Set(),
+    itemsShownFull: new Set(),
   };
+  if (!sharedUnlocks.itemsShownFull) sharedUnlocks.itemsShownFull = new Set();
 
   if (!VALID_READ_TOOL_IDS.has(tool)) {
     return { tool, ok: false, label: tool || '알 수 없는 도구', result: { ok: false, error: `허용되지 않는 읽기 도구입니다: ${tool}` } };
@@ -1409,6 +1874,13 @@ async function executeReadTool(adapter, call, toolContext = {}, unlocks = null) 
     return { tool, ok: false, label: describeToolCall(call), result: { ok: false, error: reason } };
   }
 
+  const pendingUnlocks = {
+    skillIds: [],
+    fieldsShownFull: [],
+    greetingsShownFull: [],
+    itemsShownFull: [],
+  };
+
   try {
     let result;
     switch (tool) {
@@ -1417,11 +1889,14 @@ async function executeReadTool(adapter, call, toolContext = {}, unlocks = null) 
           ? args.skillIds
           : [args.skillId ?? args.skill ?? args.id].filter(Boolean);
         result = loadSkillPack(ids, capabilities);
-        for (const id of result.loaded || []) sharedUnlocks.skillIds.add(id);
+        for (const id of result.loaded || []) pendingUnlocks.skillIds.push(id);
         break;
       }
+      case 'search_workspace':
+        result = await runSearchWorkspace(adapter, args);
+        break;
       case 'read_item':
-        result = await runReadItem(adapter, args, sharedUnlocks);
+        result = await runReadItem(adapter, args, pendingUnlocks);
         break;
       case 'list_items':
         result = await runListItems(adapter, args);
@@ -1462,11 +1937,15 @@ async function executeReadTool(adapter, call, toolContext = {}, unlocks = null) 
       default:
         result = { ok: false, error: `지원하지 않는 도구입니다: ${tool}` };
     }
+    if (!options.deferUnlocks && result?.ok) {
+      commitPendingUnlocks(pendingUnlocks, sharedUnlocks);
+    }
     return {
       tool,
       ok: Boolean(result?.ok),
       label: describeToolCall(call),
       result,
+      _pendingUnlocks: pendingUnlocks,
     };
   } catch (err) {
     return {
@@ -1474,6 +1953,7 @@ async function executeReadTool(adapter, call, toolContext = {}, unlocks = null) 
       ok: false,
       label: describeToolCall(call),
       result: { ok: false, error: err?.message || String(err) },
+      _pendingUnlocks: null,
     };
   }
 }
@@ -1481,6 +1961,8 @@ async function executeReadTool(adapter, call, toolContext = {}, unlocks = null) 
 /**
  * Executes a batch of up to MAX_TOOLS_PER_CALL Read-Only tools in parallel and caps total
  * serialized output size so follow-up calls stay fast and bounded.
+ * Full-text overwrite unlocks (fieldsShownFull/greetingsShownFull/itemsShownFull) are committed
+ * ONLY for runs whose final serialized output actually delivered to the model was NOT clipped.
  */
 async function executeReadToolBatch(adapter, calls = [], toolContext = {}) {
   const limited = (Array.isArray(calls) ? calls : []).slice(0, MAX_TOOLS_PER_CALL);
@@ -1488,10 +1970,11 @@ async function executeReadToolBatch(adapter, calls = [], toolContext = {}) {
     skillIds: new Set(),
     fieldsShownFull: new Set(),
     greetingsShownFull: new Set(),
+    itemsShownFull: new Set(),
   };
 
   const runs = await Promise.all(
-    limited.map(call => executeReadTool(adapter, call, toolContext, unlocks))
+    limited.map(call => executeReadTool(adapter, call, toolContext, unlocks, { deferUnlocks: true }))
   );
 
   // Format into size-bounded text blocks (strictly tagged as reference data, not instructions)
@@ -1509,6 +1992,15 @@ async function executeReadToolBatch(adapter, calls = [], toolContext = {}) {
     const clipped = clipText(serialized, perToolBudget);
     usedChars += clipped.text.length;
     blocks.push(`### [${i + 1}] ${run.tool} (${run.label}) — ${run.ok ? '성공' : '실패'}\n${clipped.text}`);
+
+    // Skill loads always commit; full-item unlocks ONLY commit when final delivered block was NOT clipped!
+    if (run.ok && run._pendingUnlocks) {
+      for (const id of run._pendingUnlocks.skillIds || []) unlocks.skillIds.add(id);
+      if (!clipped.truncated) {
+        commitPendingUnlocks(run._pendingUnlocks, unlocks);
+      }
+    }
+
     if (usedChars >= MAX_BATCH_RESULT_CHARS && i < runs.length - 1) {
       blocks.push(`... (나머지 ${runs.length - 1 - i}개 도구 결과는 크기 상한으로 생략됨)`);
       break;
@@ -1522,6 +2014,7 @@ async function executeReadToolBatch(adapter, calls = [], toolContext = {}) {
     loadedSkillIds: [...unlocks.skillIds],
     fieldsShownFull: [...unlocks.fieldsShownFull],
     greetingsShownFull: [...unlocks.greetingsShownFull],
+    itemsShownFull: [...unlocks.itemsShownFull],
     droppedCount: Math.max(0, (Array.isArray(calls) ? calls.length : 0) - limited.length),
   };
 }

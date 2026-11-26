@@ -5,21 +5,106 @@ function assert(ok, message) {
 }
 
 /**
- * Validates and locates non-overlapping exact ranges in `source` for `edits: [{ before, after }]`.
+ * Returns 0-indexed character start offset for every 1-indexed line in `source`.
+ */
+function computeLineStarts(source) {
+  const s = String(source ?? '');
+  const starts = [0];
+  for (let i = 0; i < s.length; i++) {
+    if (s.charCodeAt(i) === 10) starts.push(i + 1);
+  }
+  return starts;
+}
+
+/**
+ * Binary-searches 1-indexed line number for character `offset` using `computeLineStarts` output.
+ */
+function offsetToLineNumber(lineStarts, offset) {
+  let lo = 0;
+  let hi = lineStarts.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (lineStarts[mid] <= offset) lo = mid + 1;
+    else hi = mid - 1;
+  }
+  return Math.max(1, hi + 1);
+}
+
+/**
+ * Converts an optional 1-indexed inclusive `lineRange` ([startLine, endLine]) to character offsets.
+ */
+function resolveLineRangeWindow(source, lineRange, lineStarts, label) {
+  if (lineRange === undefined || lineRange === null) return null;
+  let startLine;
+  let endLine;
+  if (Array.isArray(lineRange) && lineRange.length === 2) {
+    startLine = Number(lineRange[0]);
+    endLine = Number(lineRange[1]);
+  } else if (typeof lineRange === 'object' && !Array.isArray(lineRange)) {
+    startLine = Number(lineRange.start ?? lineRange.startLine);
+    endLine = Number(lineRange.end ?? lineRange.endLine);
+  } else {
+    throw new Error(`${label}: lineRange는 [시작줄, 끝줄] 형태의 양의 정수 배열이어야 합니다.`);
+  }
+  assert(
+    Number.isInteger(startLine) && Number.isInteger(endLine) && startLine >= 1 && endLine >= startLine,
+    `${label}: lineRange는 1 이상의 정수 [시작줄, 끝줄](시작줄 <= 끝줄)이어야 합니다.`
+  );
+  const totalLines = lineStarts.length;
+  assert(
+    startLine <= totalLines,
+    `${label}: 지정한 줄 범위(${startLine}~${endLine}줄)가 원문 전체 줄 수(${totalLines}줄)를 벗어납니다.`
+  );
+  const clampedEnd = Math.min(totalLines, endLine);
+  const minOffset = lineStarts[startLine - 1];
+  const maxOffset = clampedEnd >= totalLines ? source.length : lineStarts[clampedEnd];
+  return { startLine, endLine: clampedEnd, minOffset, maxOffset, totalLines };
+}
+
+/**
+ * Validates and locates non-overlapping exact ranges in `source` for `edits: [{ before, after, lineRange? }]`.
+ * When `edit.lineRange` (`[startLine, endLine]`, 1-indexed inclusive) is given, matching is restricted
+ * strictly to that line window so identical phrases elsewhere in a large document cannot be matched by mistake.
  */
 function locateTextEdits(source, edits, label = '부분 편집') {
   assert(typeof source === 'string', `${label}: 원문 문자열이 필요합니다.`);
   assert(Array.isArray(edits) && edits.length > 0 && edits.length <= 100, `${label}: edits는 1~100개 배열이어야 합니다.`);
+
+  const needsLines = edits.some(e => e && e.lineRange !== undefined && e.lineRange !== null);
+  const lineStarts = needsLines ? computeLineStarts(source) : null;
 
   const ranges = edits.map((edit, idx) => {
     assert(edit && typeof edit === 'object' && !Array.isArray(edit), `${label} #${idx + 1}: edit 객체가 필요합니다.`);
     assert(typeof edit.before === 'string' && edit.before.length > 0, `${label} #${idx + 1}: before는 비어 있지 않은 문자열이어야 합니다.`);
     assert(typeof edit.after === 'string', `${label} #${idx + 1}: after는 문자열이어야 합니다.`);
 
+    const win = lineStarts ? resolveLineRangeWindow(source, edit.lineRange, lineStarts, `${label} #${idx + 1}`) : null;
+    if (win) {
+      const slice = source.slice(win.minOffset, win.maxOffset);
+      const relFirst = slice.indexOf(edit.before);
+      assert(
+        relFirst !== -1,
+        `${label} #${idx + 1}: 지정한 줄 범위(${win.startLine}~${win.endLine}줄)에서 before 구간을 찾을 수 없습니다.`
+      );
+      const relSecond = slice.indexOf(edit.before, relFirst + 1);
+      assert(
+        relSecond === -1,
+        `${label} #${idx + 1}: 지정한 줄 범위(${win.startLine}~${win.endLine}줄) 안에서도 before 구간이 여러 번 등장합니다. 앞뒤 문맥을 더 포함하거나 줄 범위를 좁혀 주세요.`
+      );
+      const absStart = win.minOffset + relFirst;
+      return {
+        start: absStart,
+        end: absStart + edit.before.length,
+        before: edit.before,
+        after: edit.after,
+        lineRange: [win.startLine, win.endLine],
+      };
+    }
+
     const first = source.indexOf(edit.before);
     assert(first !== -1, `${label} #${idx + 1}: 원문에서 before 구간을 찾을 수 없습니다.`);
     const second = source.indexOf(edit.before, first + 1);
-    assert(second === -1, `${label} #${idx + 1}: before 구간이 원문에 여러 번 등장합니다. 앞뒤 문맥을 더 포함해 주세요.`);
+    assert(second === -1, `${label} #${idx + 1}: before 구간이 원문에 여러 번 등장합니다. 앞뒤 문맥을 더 포함하거나 lineRange를 지정해 주세요.`);
 
     return {
       start: first,
@@ -228,4 +313,266 @@ function buildDiffPreview(beforeText, afterText, maxLines = 180) {
   };
 }
 
-export { locateTextEdits, applyTextEdits, findFuzzyCandidates, buildDiffPreview };
+/**
+ * Builds a compact structural outline (markdown headings / Lua functions / section landmarks)
+ * with 1-indexed line numbers, plus head/tail previews for large documents.
+ */
+function buildTextOutline(text, { kind = 'text', maxEntries = 50, headChars = 1600, tailChars = 900 } = {}) {
+  const src = String(text ?? '');
+  const lineStarts = computeLineStarts(src);
+  const totalLines = lineStarts.length;
+  const totalChars = src.length;
+  const isLua = kind === 'lua' || kind === 'char_lua' || kind === 'module_lua';
+  const headings = [];
+
+  for (let idx = 0; idx < totalLines && headings.length < maxEntries; idx++) {
+    const start = lineStarts[idx];
+    const end = idx + 1 < totalLines ? lineStarts[idx + 1] : totalChars;
+    const rawLine = src.slice(start, end).replace(/\r?\n$/, '');
+    const trimmed = rawLine.trim();
+    if (!trimmed) continue;
+
+    let match = false;
+    if (isLua) {
+      match = /^(?:local\s+)?function\s+[\w.:]+\s*\(/.test(trimmed) ||
+        /^--\s*(?:={3,}|-{3,}|\[[^\]]{2,40}\])/.test(trimmed);
+    } else {
+      match = /^#{1,4}\s+\S/.test(trimmed) ||
+        /^\[[^\]\n]{2,60}\]\s*$/.test(trimmed) ||
+        /^<[A-Za-z_][\w-]{1,32}>\s*$/.test(trimmed);
+    }
+    if (match) {
+      headings.push({
+        line: idx + 1,
+        charOffset: start,
+        text: trimmed.length > 90 ? `${trimmed.slice(0, 90)}…` : trimmed,
+      });
+    }
+  }
+
+  // Fallback landmarks when a large document has no explicit headings/functions
+  if (headings.length === 0 && totalChars > 2000) {
+    const stepChars = Math.max(2500, Math.ceil(totalChars / 12));
+    for (let pos = 0; pos < totalChars && headings.length < maxEntries; pos += stepChars) {
+      const lineNo = offsetToLineNumber(lineStarts, pos);
+      const lineStart = lineStarts[lineNo - 1];
+      const lineEnd = lineNo < totalLines ? lineStarts[lineNo] : totalChars;
+      const sample = src.slice(lineStart, Math.min(lineEnd, lineStart + 80)).replace(/\s+/g, ' ').trim();
+      headings.push({
+        line: lineNo,
+        charOffset: lineStart,
+        text: sample || `(L${lineNo})`,
+      });
+    }
+  }
+
+  const headPreview = headChars > 0 ? src.slice(0, headChars) : '';
+  const tailStart = tailChars > 0 && totalChars > headChars + 200 ? Math.max(headChars, totalChars - tailChars) : totalChars;
+  const tailPreview = tailStart < totalChars ? src.slice(tailStart) : '';
+  const tailStartLine = tailStart < totalChars ? offsetToLineNumber(lineStarts, tailStart) : totalLines;
+
+  return {
+    totalChars,
+    totalLines,
+    headings,
+    headPreview,
+    headEndLine: offsetToLineNumber(lineStarts, Math.min(totalChars, headPreview.length)),
+    tailPreview,
+    tailStartLine,
+  };
+}
+
+/**
+ * Slices `text` by 1-indexed inclusive line range `[startLine, endLine]`, bounded by `maxChars`.
+ */
+function sliceTextByLines(text, startLine = 1, endLine = null, maxChars = 12000) {
+  const src = String(text ?? '');
+  const lineStarts = computeLineStarts(src);
+  const totalLines = lineStarts.length;
+  const totalChars = src.length;
+
+  const sLine = Math.max(1, Math.min(totalLines, Math.floor(Number(startLine) || 1)));
+  const eLineRaw = endLine === null || endLine === undefined ? totalLines : Math.floor(Number(endLine) || totalLines);
+  const eLine = Math.max(sLine, Math.min(totalLines, eLineRaw));
+
+  const startChar = lineStarts[sLine - 1];
+  let endChar = eLine >= totalLines ? totalChars : lineStarts[eLine];
+  let clippedByBudget = false;
+  if (endChar - startChar > maxChars) {
+    endChar = startChar + maxChars;
+    clippedByBudget = true;
+  }
+  const actualEndLine = offsetToLineNumber(lineStarts, Math.max(startChar, endChar - 1));
+  const slice = src.slice(startChar, endChar);
+  const isFull = startChar === 0 && endChar === totalChars;
+
+  return {
+    text: slice,
+    startLine: sLine,
+    endLine: actualEndLine,
+    totalLines,
+    startChar,
+    endChar,
+    totalChars,
+    truncated: !isFull || clippedByBudget,
+    isFull,
+    hasMoreBefore: startChar > 0,
+    hasMoreAfter: endChar < totalChars,
+    nextStartLine: endChar < totalChars ? Math.min(totalLines, actualEndLine + 1) : null,
+  };
+}
+
+/**
+ * Slices `text` by 0-indexed character offset `[startChar, startChar + maxChars)`.
+ */
+function sliceTextByChars(text, startChar = 0, maxChars = 12000) {
+  const src = String(text ?? '');
+  const lineStarts = computeLineStarts(src);
+  const totalLines = lineStarts.length;
+  const totalChars = src.length;
+  const sChar = Math.max(0, Math.min(totalChars, Math.floor(Number(startChar) || 0)));
+  const limit = Math.max(200, Math.floor(Number(maxChars) || 12000));
+  const eChar = Math.min(totalChars, sChar + limit);
+  const startLine = offsetToLineNumber(lineStarts, sChar);
+  const endLine = offsetToLineNumber(lineStarts, Math.max(sChar, eChar - 1));
+  const isFull = sChar === 0 && eChar === totalChars;
+
+  return {
+    text: src.slice(sChar, eChar),
+    startLine,
+    endLine,
+    totalLines,
+    startChar: sChar,
+    endChar: eChar,
+    totalChars,
+    truncated: !isFull,
+    isFull,
+    hasMoreBefore: sChar > 0,
+    hasMoreAfter: eChar < totalChars,
+    nextStartChar: eChar < totalChars ? eChar : null,
+  };
+}
+
+/**
+ * Finds `anchor` inside `text` and returns a ±`contextChars` window aligned to line boundaries.
+ */
+function sliceTextAroundAnchor(text, anchor, contextChars = 3000) {
+  const src = String(text ?? '');
+  const needle = String(anchor ?? '');
+  const lineStarts = computeLineStarts(src);
+  const totalLines = lineStarts.length;
+  const totalChars = src.length;
+  if (!needle) {
+    return { found: false, matchCount: 0, totalLines, totalChars };
+  }
+
+  let matchPos = src.indexOf(needle);
+  let caseInsensitive = false;
+  if (matchPos === -1) {
+    matchPos = src.toLowerCase().indexOf(needle.toLowerCase());
+    caseInsensitive = matchPos !== -1;
+  }
+  if (matchPos === -1) {
+    return { found: false, matchCount: 0, totalLines, totalChars };
+  }
+
+  let matchCount = 0;
+  const haystack = caseInsensitive ? src.toLowerCase() : src;
+  const q = caseInsensitive ? needle.toLowerCase() : needle;
+  let scan = matchPos;
+  while (scan !== -1 && matchCount < 200) {
+    matchCount++;
+    scan = haystack.indexOf(q, scan + Math.max(1, q.length));
+  }
+
+  const radius = Math.max(200, Math.min(6000, Math.floor(Number(contextChars) || 3000)));
+  const rawStart = Math.max(0, matchPos - radius);
+  const rawEnd = Math.min(totalChars, matchPos + needle.length + radius);
+  const startLine = offsetToLineNumber(lineStarts, rawStart);
+  const endLine = offsetToLineNumber(lineStarts, Math.max(rawStart, rawEnd - 1));
+  const startChar = lineStarts[startLine - 1];
+  const endChar = endLine >= totalLines ? totalChars : lineStarts[endLine];
+  const isFull = startChar === 0 && endChar === totalChars;
+
+  return {
+    found: true,
+    matchLine: offsetToLineNumber(lineStarts, matchPos),
+    matchCharOffset: matchPos,
+    matchCount,
+    text: src.slice(startChar, endChar),
+    startLine,
+    endLine,
+    totalLines,
+    startChar,
+    endChar,
+    totalChars,
+    truncated: !isFull,
+    isFull,
+    hasMoreBefore: startChar > 0,
+    hasMoreAfter: endChar < totalChars,
+  };
+}
+
+/**
+ * Losslessly partitions `text` into chunks near `targetChunkChars`, preferring paragraph (`\n\n`)
+ * then line (`\n`) boundaries. Guarantees `chunks.map(c => c.text).join('') === text`.
+ */
+function splitTextIntoChunks(text, targetChunkChars = 8000, maxChunks = 0) {
+  const src = String(text ?? '');
+  if (!src) return [];
+  const lineStarts = computeLineStarts(src);
+  let target = Math.max(500, Math.floor(Number(targetChunkChars) || 8000));
+  if (maxChunks > 0 && Math.ceil(src.length / target) > maxChunks) {
+    target = Math.ceil(src.length / maxChunks);
+  }
+
+  const chunks = [];
+  let cursor = 0;
+  const minSplitOffset = Math.floor(target * 0.55);
+
+  while (cursor < src.length) {
+    const remaining = src.length - cursor;
+    let end = src.length;
+    if (remaining > target * 1.15 && (maxChunks <= 0 || chunks.length + 1 < maxChunks)) {
+      const hardEnd = Math.min(src.length, cursor + target);
+      const searchFloor = cursor + minSplitOffset;
+      let splitAt = src.lastIndexOf('\n\n', hardEnd);
+      if (splitAt >= searchFloor) {
+        end = splitAt + 2;
+      } else {
+        splitAt = src.lastIndexOf('\n', hardEnd);
+        if (splitAt >= searchFloor) {
+          end = splitAt + 1;
+        } else {
+          end = hardEnd;
+        }
+      }
+    }
+    const startLine = offsetToLineNumber(lineStarts, cursor);
+    const endLine = offsetToLineNumber(lineStarts, Math.max(cursor, end - 1));
+    chunks.push({
+      index: chunks.length,
+      startChar: cursor,
+      endChar: end,
+      startLine,
+      endLine,
+      text: src.slice(cursor, end),
+    });
+    cursor = end;
+  }
+  return chunks;
+}
+
+export {
+  computeLineStarts,
+  offsetToLineNumber,
+  locateTextEdits,
+  applyTextEdits,
+  findFuzzyCandidates,
+  buildDiffPreview,
+  buildTextOutline,
+  sliceTextByLines,
+  sliceTextByChars,
+  sliceTextAroundAnchor,
+  splitTextIntoChunks,
+};

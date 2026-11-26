@@ -3,9 +3,12 @@ import { CHAT_TRANSFER_ITEMS } from './chat-transfer.js';
 import { buildSkillPromptSections } from './skills.js';
 import { formatReadToolCatalog, VALID_READ_TOOL_IDS } from './read-tools.js';
 import { PORT_ITEMS } from './runtime-tools.js';
+import { buildTextOutline } from './text-edits.js';
 import {
   ALLOWED_CONFIG_KEYS,
   DEFAULT_MAX_CONTENT_CHARS,
+  LARGE_TARGET_OUTLINE_THRESHOLD,
+  DEFAULT_MAX_REQUEST_CHARS,
   ALLOWED_CHAR_FIELDS,
   ALLOWED_LORE_TEXT_FIELDS,
   ALLOWED_PERSONA_TEXT_FIELDS,
@@ -386,6 +389,166 @@ function parseToolCalls(rawText) {
   return { textWithoutTools, toolCalls, toolErrors };
 }
 
+const VALID_PLAN_MODES = new Set(['chunked_rewrite', 'batch_proposals']);
+const VALID_PLAN_TARGET_KINDS = new Set(['current', 'lorebook', 'lua', 'char_field', 'greeting', 'authorNote', 'persona']);
+
+function hasBadKeysDeep(obj, depth = 0) {
+  if (!obj || typeof obj !== 'object' || depth > 5) return false;
+  if (Array.isArray(obj)) return obj.some(item => hasBadKeysDeep(item, depth + 1));
+  for (const k of Object.keys(obj)) {
+    if (BAD_KEYS.has(k)) return true;
+    if (hasBadKeysDeep(obj[k], depth + 1)) return true;
+  }
+  return false;
+}
+
+/**
+ * Extracts fenced `risuhelper-plan` blocks (for dynamic Step 1 -> Step 2 -> Step 3 large workloads).
+ */
+function extractPlanBlocks(rawText) {
+  const normalized = String(rawText ?? '').replace(/\r\n/g, '\n');
+  const lines = normalized.split('\n');
+  const keptLines = [];
+  const blocks = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const openMatch = line.match(/^[ \t]*(`{3,})risuhelper-plan(?:[ \t]+(.*))?$/);
+    if (!openMatch) {
+      keptLines.push(line);
+      continue;
+    }
+    const fence = openMatch[1];
+    const rest = openMatch[2] ?? '';
+
+    if (rest.trim()) {
+      const endIdx = rest.lastIndexOf(fence);
+      if (endIdx !== -1 && rest.slice(endIdx + fence.length).trim() === '') {
+        blocks.push(rest.slice(0, endIdx));
+        continue;
+      }
+    }
+
+    const closeRe = new RegExp(`^[ \\t]*${fence}[ \\t]*$`);
+    let closeIdx = -1;
+    const bodyLines = [];
+    if (rest.trim()) bodyLines.push(rest);
+    for (let j = i + 1; j < lines.length; j++) {
+      if (closeRe.test(lines[j])) {
+        closeIdx = j;
+        break;
+      }
+      bodyLines.push(lines[j]);
+    }
+
+    if (closeIdx === -1) {
+      keptLines.push(line);
+      continue;
+    }
+
+    blocks.push(bodyLines.join('\n'));
+    i = closeIdx;
+  }
+
+  return { textWithoutPlan: keptLines.join('\n'), blocks };
+}
+
+function normalizePlanPayload(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return { ok: false, error: '계획(risuhelper-plan)은 JSON 객체여야 합니다.' };
+  }
+  if (hasBadKeysDeep(raw)) {
+    return { ok: false, error: '계획 블록에 허용되지 않는 키가 포함되어 있습니다.' };
+  }
+  const mode = String(raw.mode || 'chunked_rewrite').trim();
+  if (!VALID_PLAN_MODES.has(mode)) {
+    return { ok: false, error: `지원하지 않는 계획 mode입니다: ${mode} (chunked_rewrite 또는 batch_proposals만 허용)` };
+  }
+  const goal = String(raw.goal ?? raw.title ?? '').trim();
+  if (!goal) {
+    return { ok: false, error: '계획 블록에 비어 있지 않은 goal 설명이 필요합니다.' };
+  }
+  let target = null;
+  if (raw.target && typeof raw.target === 'object' && !Array.isArray(raw.target)) {
+    const kind = String(raw.target.kind || 'current').trim();
+    if (!VALID_PLAN_TARGET_KINDS.has(kind)) {
+      return { ok: false, error: `지원하지 않는 계획 target.kind입니다: ${kind}` };
+    }
+    target = { ...raw.target, kind };
+  }
+  const normalizeTasks = (list) => {
+    if (!Array.isArray(list)) return [];
+    const out = [];
+    for (const item of list) {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+      const task = {
+        label: String(item.label || item.title || '').trim(),
+        instruction: String(item.instruction || item.prompt || '').trim(),
+      };
+      if (item.tool) {
+        const norm = normalizeToolCall({ tool: item.tool, args: item.args });
+        if (norm.ok) task.readCalls = [norm.call];
+      } else if (Array.isArray(item.readCalls)) {
+        const calls = [];
+        for (const c of item.readCalls) {
+          const norm = normalizeToolCall(c);
+          if (norm.ok) calls.push(norm.call);
+        }
+        if (calls.length > 0) task.readCalls = calls;
+      }
+      if (Number.isInteger(item.startLine) && item.startLine >= 1) task.startLine = item.startLine;
+      if (Number.isInteger(item.endLine) && item.endLine >= 1) task.endLine = item.endLine;
+      if (Number.isInteger(item.startChar) && item.startChar >= 0) task.startChar = item.startChar;
+      if (Number.isInteger(item.maxChars) && item.maxChars >= 200) task.maxChars = item.maxChars;
+      if (Array.isArray(item.skillIds)) task.skillIds = item.skillIds.map(String);
+      out.push(task);
+    }
+    return out;
+  };
+
+  const chunkSizeChars = Number.isFinite(Number(raw.chunkSizeChars)) && Number(raw.chunkSizeChars) >= 1000
+    ? Math.min(16000, Math.round(Number(raw.chunkSizeChars)))
+    : null;
+  const step3Estimate = Number.isInteger(raw.step3Estimate) && raw.step3Estimate >= 0 ? raw.step3Estimate : null;
+
+  return {
+    ok: true,
+    plan: {
+      mode,
+      goal,
+      reason: String(raw.reason || '').trim(),
+      target,
+      chunkSizeChars,
+      step2Tasks: normalizeTasks(raw.step2Tasks),
+      step3Tasks: normalizeTasks(raw.step3Tasks),
+      step3Estimate,
+      initialSummary: String(raw.initialSummary || '').trim(),
+    },
+  };
+}
+
+function parsePlanBlocks(rawText) {
+  const { textWithoutPlan, blocks } = extractPlanBlocks(rawText);
+  let plan = null;
+  const planErrors = [];
+  for (const rawBlock of blocks) {
+    const trimmed = rawBlock.trim();
+    if (!trimmed) continue;
+    try {
+      const parsed = parseJsonTolerant(trimmed);
+      const norm = normalizePlanPayload(parsed);
+      if (norm.ok) {
+        if (!plan) plan = norm.plan;
+      } else {
+        planErrors.push({ raw: trimmed, error: norm.error });
+      }
+    } catch (err) {
+      planErrors.push({ raw: trimmed, error: `계획 블록 파싱 오류: ${err.message}` });
+    }
+  }
+  return { textWithoutPlan, plan, planErrors };
+}
+
 function parseProposalPayload(rawBody) {
   const normalized = String(rawBody ?? '').replace(/\r\n/g, '\n');
   const lines = normalized.split('\n');
@@ -469,14 +632,15 @@ function parseProposalPayload(rawBody) {
 }
 
 /**
- * Extracts natural prose, structured `risuhelper-proposal` blocks, and Read-Only `risuhelper-tool`
- * blocks from an LLM reply.
+ * Extracts natural prose, structured `risuhelper-proposal` blocks, Read-Only `risuhelper-tool`
+ * blocks, and staged `risuhelper-plan` blocks from an LLM reply.
  */
 function parseAssistantReply(rawText) {
   const text = String(rawText ?? '');
   const proposals = [];
   const errors = [];
-  const { textWithoutTools, toolCalls, toolErrors } = parseToolCalls(text);
+  const { textWithoutPlan, plan, planErrors } = parsePlanBlocks(text);
+  const { textWithoutTools, toolCalls, toolErrors } = parseToolCalls(textWithoutPlan);
   const { prose, blocks } = extractProposalBlocks(textWithoutTools);
 
   for (const rawBlock of blocks) {
@@ -497,7 +661,7 @@ function parseAssistantReply(rawText) {
     }
   }
 
-  return { prose, proposals, errors, toolCalls, toolErrors, rawText: text };
+  return { prose, proposals, errors, toolCalls, toolErrors, plan, planErrors, rawText: text };
 }
 
 // Properties each action understands. Anything else in a proposal is ignored by the host adapter;
@@ -617,15 +781,31 @@ function validateProposal(item) {
     const targetFieldErr = validateFieldKeyForKind(item.target.targetKind, item.target.fieldKey);
     if (targetFieldErr) return targetFieldErr;
   }
+  const validateEditList = (edits) => {
+    for (const e of edits) {
+      if (!e || typeof e !== 'object' || Array.isArray(e) || typeof e.before !== 'string' || !e.before || typeof e.after !== 'string') {
+        return 'edits 항목은 비어 있지 않은 문자열 before와 문자열 after가 필요합니다.';
+      }
+      if (e.lineRange !== undefined && e.lineRange !== null) {
+        const okArr = Array.isArray(e.lineRange) &&
+          e.lineRange.length === 2 &&
+          Number.isInteger(e.lineRange[0]) &&
+          Number.isInteger(e.lineRange[1]) &&
+          e.lineRange[0] >= 1 &&
+          e.lineRange[1] >= e.lineRange[0];
+        if (!okArr) {
+          return 'edits 항목의 lineRange는 1 이상의 정수 [시작줄, 끝줄](시작줄 <= 끝줄) 배열이어야 합니다.';
+        }
+      }
+    }
+    return null;
+  };
   if (item.action === 'patch_text') {
     if (!Array.isArray(item.edits) || item.edits.length === 0) {
       return 'patch_text에는 1개 이상의 edits 배열({ before, after })이 필요합니다.';
     }
-    for (const e of item.edits) {
-      if (!e || typeof e.before !== 'string' || !e.before || typeof e.after !== 'string') {
-        return 'edits 항목은 비어 있지 않은 문자열 before와 문자열 after가 필요합니다.';
-      }
-    }
+    const editErr = validateEditList(item.edits);
+    if (editErr) return editErr;
   }
   if (item.action === 'replace_text' && typeof item.content !== 'string') {
     return 'replace_text에는 문자열 content가 필요합니다.';
@@ -638,9 +818,15 @@ function validateProposal(item) {
       return 'create_lorebook에는 comment와 content 문자열이 필요합니다.';
     }
   }
-  if (item.action === 'update_lorebook' && item.fieldKey !== undefined) {
-    const err = validateFieldKeyForKind('char_lorebook', item.fieldKey);
-    if (err) return err;
+  if (item.action === 'update_lorebook') {
+    if (item.fieldKey !== undefined) {
+      const err = validateFieldKeyForKind('char_lorebook', item.fieldKey);
+      if (err) return err;
+    }
+    if (Array.isArray(item.edits) && item.edits.length > 0) {
+      const editErr = validateEditList(item.edits);
+      if (editErr) return editErr;
+    }
   }
   if (item.action === 'organize_lorebook') {
     if (!Array.isArray(item.loreIndices) || item.loreIndices.length === 0) {
@@ -664,6 +850,10 @@ function validateProposal(item) {
     if (!item.edits && typeof item.code !== 'string' && typeof item.content !== 'string') {
       return 'update_lua에는 edits 배열 또는 code 문자열이 필요합니다.';
     }
+    if (Array.isArray(item.edits) && item.edits.length > 0) {
+      const editErr = validateEditList(item.edits);
+      if (editErr) return editErr;
+    }
   }
   if (item.action === 'upsert_regex') {
     if (typeof item.in !== 'string' || typeof item.out !== 'string') {
@@ -675,9 +865,19 @@ function validateProposal(item) {
       return 'create_persona에는 name과 personaPrompt 문자열이 필요합니다.';
     }
   }
-  if (item.action === 'update_persona' && item.fieldKey !== undefined) {
-    const err = validateFieldKeyForKind('persona', item.fieldKey);
-    if (err) return err;
+  if (item.action === 'update_persona') {
+    if (item.fieldKey !== undefined) {
+      const err = validateFieldKeyForKind('persona', item.fieldKey);
+      if (err) return err;
+    }
+    if (Array.isArray(item.edits) && item.edits.length > 0) {
+      const editErr = validateEditList(item.edits);
+      if (editErr) return editErr;
+    }
+    if (Array.isArray(item.fieldEdits) && item.fieldEdits.length > 0) {
+      const editErr = validateEditList(item.fieldEdits);
+      if (editErr) return editErr;
+    }
   }
   if (item.action === 'update_greeting') {
     if (!Number.isInteger(item.greetingIndex) || item.greetingIndex < -1) {
@@ -685,11 +885,8 @@ function validateProposal(item) {
     }
     const hasEdits = Array.isArray(item.edits) && item.edits.length > 0;
     if (hasEdits) {
-      for (const e of item.edits) {
-        if (!e || typeof e.before !== 'string' || !e.before || typeof e.after !== 'string') {
-          return 'edits 항목은 비어 있지 않은 문자열 before와 문자열 after가 필요합니다.';
-        }
-      }
+      const editErr = validateEditList(item.edits);
+      if (editErr) return editErr;
     } else if (typeof item.content !== 'string') {
       return 'update_greeting에는 edits 배열 또는 content 문자열이 필요합니다.';
     }
@@ -700,11 +897,8 @@ function validateProposal(item) {
     }
     const hasEdits = Array.isArray(item.edits) && item.edits.length > 0;
     if (hasEdits) {
-      for (const e of item.edits) {
-        if (!e || typeof e.before !== 'string' || !e.before || typeof e.after !== 'string') {
-          return 'edits 항목은 비어 있지 않은 문자열 before와 문자열 after가 필요합니다.';
-        }
-      }
+      const editErr = validateEditList(item.edits);
+      if (editErr) return editErr;
     } else if (typeof item.content !== 'string') {
       return 'update_field에는 edits 배열 또는 content 문자열이 필요합니다.';
     }
@@ -1106,6 +1300,112 @@ function shouldIncludeGhostwriteContext(userInput = '', history = []) {
 }
 
 /**
+ * Formats a huge focused target (> outlineThreshold) as a compact structural outline + head/tail
+ * preview instead of re-sending 60K raw chars on every loop call.
+ */
+function formatLargeTargetOutline(text, kind) {
+  const outline = buildTextOutline(text, { kind, maxEntries: 35, headChars: 1600, tailChars: 800 });
+  const lines = [
+    `[대용량 원문 자동 목차 모드 — 총 ${outline.totalChars.toLocaleString()}자 / ${outline.totalLines}줄]`,
+    '(비용·컨텍스트 절감을 위해 구조 목차와 앞·뒤 미리보기만 전달됨. 필요한 부분은 `search_workspace` 또는 `read_item(startLine,endLine / aroundText)`로 읽으세요.)',
+  ];
+  if (outline.headings.length > 0) {
+    lines.push('목차 (줄번호):');
+    for (const h of outline.headings) {
+      lines.push(`- L${h.line}: ${h.text}`);
+    }
+  }
+  if (outline.headPreview) {
+    lines.push(`\n[앞부분 미리보기 (1~${outline.headEndLine}줄)]\n${outline.headPreview}`);
+  }
+  if (outline.tailPreview) {
+    lines.push(`\n[끝부분 미리보기 (${outline.tailStartLine}~${outline.totalLines}줄)]\n${outline.tailPreview}`);
+  }
+  return lines.join('\n');
+}
+
+/**
+ * Enforces the dedicated RisuHelper total request character budget (`maxRequestChars`, independent
+ * from RisuAI's chat `db.maxContext`) by compacting in strict priority order:
+ *   1. Large fenced blocks (>600 chars) in older history messages
+ *   2. Oldest history turns (FIFO, always keeping system prompt and latest user turn)
+ *   3. Large reference/active chat transcript sections inside the system prompt (tail-preserving)
+ * Never trims the `[수정·생성 제안 프로토콜]` rules or the current user request.
+ */
+function enforceRequestCharBudget(messages, maxRequestChars = DEFAULT_MAX_REQUEST_CHARS) {
+  const limit = Number.isFinite(Number(maxRequestChars)) && Number(maxRequestChars) > 0
+    ? Math.max(8000, Math.round(Number(maxRequestChars)))
+    : DEFAULT_MAX_REQUEST_CHARS;
+  const list = Array.isArray(messages) ? messages.map(m => ({ ...m, content: String(m?.content ?? '') })) : [];
+  const measure = (arr) => arr.reduce((sum, m) => sum + String(m?.content ?? '').length, 0);
+  const originalChars = measure(list);
+  if (originalChars <= limit || list.length === 0) {
+    return { messages: list, trimmed: false, originalChars, finalChars: originalChars, trimmedNotes: [] };
+  }
+
+  const notes = [];
+  const lastIdx = list.length - 1;
+  const sysIdx = list[0]?.role === 'system' ? 0 : -1;
+
+  // Step 1: Compact large fenced code/proposal blocks in older history messages
+  let compactedBlocks = 0;
+  for (let i = sysIdx + 1; i < lastIdx; i++) {
+    if (measure(list) <= limit) break;
+    const orig = list[i].content;
+    const replaced = orig.replace(/```[^\n]*\n[\s\S]*?```/g, (block) => {
+      if (block.length <= 600) return block;
+      compactedBlocks++;
+      return `[이전 코드/제안 블록 생략 (${block.length.toLocaleString()}자)]`;
+    });
+    if (replaced !== orig) list[i].content = replaced;
+  }
+  if (compactedBlocks > 0) {
+    notes.push(`이전 대화 큰 블록 ${compactedBlocks}건 축약`);
+  }
+
+  // Step 2: Drop oldest history turns (FIFO) while preserving system prompt and latest user turn
+  let droppedTurns = 0;
+  while (measure(list) > limit && list.length > (sysIdx === 0 ? 2 : 1)) {
+    const dropAt = sysIdx === 0 ? 1 : 0;
+    list.splice(dropAt, 1);
+    droppedTurns++;
+  }
+  if (droppedTurns > 0) {
+    notes.push(`오래된 대화 ${droppedTurns}건 제외`);
+  }
+
+  // Step 3: If still over budget, trim large transcript/extra sections inside the system prompt
+  // while strictly preserving the `[수정·생성 제안 프로토콜]` footer!
+  if (measure(list) > limit && sysIdx === 0) {
+    const nonSysChars = measure(list.slice(1));
+    const sysBudget = Math.max(4000, limit - nonSysChars);
+    let sys = list[0].content;
+    if (sys.length > sysBudget) {
+      const protoMarker = '\n[수정·생성 제안 프로토콜]';
+      const protoAt = sys.indexOf(protoMarker);
+      const head = protoAt !== -1 ? sys.slice(0, protoAt) : sys;
+      const tail = protoAt !== -1 ? sys.slice(protoAt) : '';
+      const headBudget = Math.max(1500, sysBudget - tail.length);
+      if (head.length > headBudget) {
+        const trimmedHead = head.slice(0, headBudget) +
+          `\n... (어시스턴트 요청 한도 ${limit.toLocaleString()}자 초과로 중간 참고 문맥 ${(head.length - headBudget).toLocaleString()}자 생략)\n`;
+        list[0].content = trimmedHead + tail;
+        notes.push(`참고 문맥 ${(head.length - headBudget).toLocaleString()}자 자동 축약`);
+      }
+    }
+  }
+
+  const finalChars = measure(list);
+  return {
+    messages: list,
+    trimmed: notes.length > 0,
+    originalChars,
+    finalChars,
+    trimmedNotes: notes,
+  };
+}
+
+/**
  * Builds the system prompt + message list sent to Risuai.runLLMModel().
  */
 function buildConversationMessages({
@@ -1116,12 +1416,17 @@ function buildConversationMessages({
   userInput,
   maxHistoryTurns = 12,
   maxContentChars = DEFAULT_MAX_CONTENT_CHARS,
+  maxRequestChars = DEFAULT_MAX_REQUEST_CHARS,
+  outlineThreshold = LARGE_TARGET_OUTLINE_THRESHOLD,
   extraSkillIds = [],
   capabilities = null,
   enableTools = false,
   allowFetchLog = false,
 }) {
   const contentLimit = Number.isFinite(Number(maxContentChars)) && Number(maxContentChars) > 0 ? Number(maxContentChars) : DEFAULT_MAX_CONTENT_CHARS;
+  const effectiveOutlineThreshold = Number.isFinite(Number(outlineThreshold)) && Number(outlineThreshold) > 0
+    ? Number(outlineThreshold)
+    : LARGE_TARGET_OUTLINE_THRESHOLD;
   const skillPack = buildSkillPromptSections({
     context,
     snapshot,
@@ -1133,11 +1438,15 @@ function buildConversationMessages({
   });
   const knowledge = skillPack.knowledgeText;
   const targetLabel = snapshot?.label || context?.labelText || '일반 화면';
+  const activeKind = snapshot?.target?.targetKind || context?.targetKind || 'general';
   const currentText = snapshot?.content ?? '';
-  const isTruncated = currentText.length > contentLimit;
-  const clippedContent = isTruncated
-    ? currentText.slice(0, contentLimit) + `\n... (총 ${currentText.length}자 중 앞 ${contentLimit.toLocaleString()}자만 표시)`
-    : currentText;
+  const isAutoOutlined = Boolean(enableTools && currentText.length > effectiveOutlineThreshold);
+  const isTruncated = !isAutoOutlined && currentText.length > contentLimit;
+  const clippedContent = isAutoOutlined
+    ? formatLargeTargetOutline(currentText, activeKind)
+    : isTruncated
+      ? currentText.slice(0, contentLimit) + `\n... (총 ${currentText.length}자 중 앞 ${contentLimit.toLocaleString()}자만 표시)`
+      : currentText;
 
   const extraBlocks = [];
   if (extraContext?.charSummary) {
@@ -1254,13 +1563,14 @@ function buildConversationMessages({
     extraBlocks.push(formatAttachedFetchLog(extraContext.attachedFetchLog));
   }
 
-  const truncationRule = isTruncated
-    ? `\n⚠️ [원문 잘림 경고] 현재 원문(${currentText.length.toLocaleString()}자)은 앞 ${contentLimit.toLocaleString()}자만 제공되었습니다. 뒷부분 유실을 막기 위해 replace_text 및 전체 code 덮어쓰기는 차단됩니다. 반드시 patch_text 또는 edits로 보이는 구간만 부분 편집하세요.`
-    : '';
+  const truncationRule = isAutoOutlined
+    ? `\n⚠️ [대용량 원문 자동 목차] 원문(${currentText.length.toLocaleString()}자)은 일부만 전달되어 전체 덮어쓰기가 차단됩니다. 부분 수정은 \`search_workspace\`/\`read_item\` 후 \`edits\`(+선택 \`lineRange\`)를, 전체 번역·전면 개편은 \`risuhelper-plan\`을 사용하세요.`
+    : isTruncated
+      ? `\n⚠️ [원문 잘림 경고] 현재 원문(${currentText.length.toLocaleString()}자)은 앞 ${contentLimit.toLocaleString()}자만 제공되었습니다. 뒷부분 유실을 막기 위해 replace_text 및 전체 code 덮어쓰기는 차단됩니다. 반드시 patch_text 또는 edits로 보이는 구간만 부분 편집하세요.`
+      : '';
 
   // Free talk: no input is selected, so nothing is "the current target". The model works through
   // explicit actions; what the screen looks like is passed on as a hint only.
-  const activeKind = snapshot?.target?.targetKind || context?.targetKind || 'general';
   const isFreeTalk = Boolean(context?.freeTalk) || activeKind === 'general';
   const isChatInput = activeKind === 'chat_input';
   const screenHintText = context?.screenHint || (context?.screen === 'chat' ? '채팅 화면' : '');
@@ -1304,9 +1614,9 @@ function buildConversationMessages({
     const l1Text = (skillPack.l1Catalog || []).length > 0
       ? skillPack.l1Catalog.map(s => `\`${s.id}\`(${s.label})`).join(', ')
       : '(없음)';
-    readToolsBlock = `\n\n[읽기·진단 도구 및 L1 내장 스킬 (Read-Only · 최대 3회)]
-정보·스키마가 충분하면 바로 답하거나 \`\`\`risuhelper-proposal 출력(1회 완료 권장).
-부족할 때만 \`\`\`risuhelper-tool 배열(최대 6개, 예: \`[{"tool":"load_skill","args":{"skillIds":["scripts"]}}]\`)로 조회(쓰기 불가).
+    readToolsBlock = `\n\n[읽기·진단 도구 및 L1 내장 스킬 (Read-Only · 기본 3회)]
+충분하면 1회 바로 답/\`\`\`risuhelper-proposal 출력. 부족할 때만 \`\`\`risuhelper-tool 배열(최대 6개, 쓰기 불가).
+대용량 전면 개편·대량 일괄 작업은 \`\`\`risuhelper-plan JSON(확인 후 실행).
 - 도구: ${toolCatalogText}
 - L1 스킬(\`load_skill\`): ${l1Text}`;
   }
@@ -1343,11 +1653,13 @@ ${extraBlocks.join('\n\n')}
     content: msg.rawText || msg.content,
   }));
 
-  return [
+  const rawMessages = [
     { role: 'system', content: systemPrompt },
     ...recentHistory,
     { role: 'user', content: String(userInput ?? '') },
   ];
+
+  return enforceRequestCharBudget(rawMessages, maxRequestChars).messages;
 }
 
 /**
@@ -1440,10 +1752,14 @@ export {
   parseJsonTolerant,
   extractProposalBlocks,
   extractToolBlocks,
+  extractPlanBlocks,
   parseToolCalls,
+  parsePlanBlocks,
   parseProposalPayload,
   parseAssistantReply,
   validateProposal,
+  formatLargeTargetOutline,
+  enforceRequestCharBudget,
   buildConversationMessages,
   buildToolResultsFollowUpMessage,
   buildAutoRepairFollowUpMessage,

@@ -1,4 +1,4 @@
-const VERSION = '1.0.0';
+const VERSION = '1.1.0';
 const PLUGIN_NAME = 'risuhelper';
 const STORAGE_KEY = 'risuhelper_state_v1';
 const PRESET_STORAGE_KEY = 'risuhelper_preset_v1';
@@ -88,6 +88,20 @@ const DEFAULT_MAX_CONTENT_CHARS = 60000;
 const DEFAULT_GHOSTWRITE_CHAT_CHARS = 10000;
 const DEFAULT_GHOSTWRITE_MAX_MESSAGES = 12;
 const MAX_CONTENT_CHAR_OPTIONS = [24000, 60000, 120000, 300000];
+// When Read-Only tools are enabled and the focused target exceeds this size, send a compact
+// outline + head/tail preview instead of re-sending 60K raw chars on every loop call.
+const LARGE_TARGET_OUTLINE_THRESHOLD = 12000;
+// Dedicated RisuHelper total request character budget (independent from RisuAI chat db.maxContext).
+const DEFAULT_MAX_REQUEST_CHARS = 80000;
+const MAX_REQUEST_CHAR_OPTIONS = [48000, 80000, 160000, 320000];
+// Hard safety ceilings for the dynamic 3-stage planned pipeline (Step 1 -> Step 2 0..N -> Step 3 0..M).
+const DEFAULT_PIPELINE_LIMITS = {
+  maxStep2Calls: 6,
+  maxStep3Calls: 8,
+  maxTotalCalls: 12,
+  confirmThresholdCalls: 4,
+};
+const PIPELINE_CALL_LIMIT_OPTIONS = [6, 12, 18, 24];
 const ALLOWED_CHAR_FIELDS = Object.keys(CHAR_FIELD_META);
 const ALLOWED_MODULE_FIELDS = Object.keys(MODULE_FIELD_META);
 const ALLOWED_LORE_TEXT_FIELDS = ['comment', 'key', 'secondkey', 'content', 'insertorder'];
@@ -115,6 +129,11 @@ export {
   DEFAULT_GHOSTWRITE_CHAT_CHARS,
   DEFAULT_GHOSTWRITE_MAX_MESSAGES,
   MAX_CONTENT_CHAR_OPTIONS,
+  LARGE_TARGET_OUTLINE_THRESHOLD,
+  DEFAULT_MAX_REQUEST_CHARS,
+  MAX_REQUEST_CHAR_OPTIONS,
+  DEFAULT_PIPELINE_LIMITS,
+  PIPELINE_CALL_LIMIT_OPTIONS,
   ALLOWED_CONFIG_KEYS,
   CONFIG_KEY_TYPES,
   CHAR_FIELD_META,
