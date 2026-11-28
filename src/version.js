@@ -1,9 +1,10 @@
-const VERSION = '1.1.0';
+const VERSION = '1.1.1';
 const PLUGIN_NAME = 'risuhelper';
 const STORAGE_KEY = 'risuhelper_state_v1';
 const PRESET_STORAGE_KEY = 'risuhelper_preset_v1';
 const UNDO_STORAGE_KEY = 'risuhelper_undo_v1';
 const EXTENSIONS_STORAGE_KEY = 'risuhelper_extensions_v1';
+const CONVERSATIONS_STORAGE_KEY = 'risuhelper_conversations_v1';
 
 /**
  * Editable configuration keys present in RisuAI's allowedDbKeys
@@ -102,6 +103,12 @@ const DEFAULT_PIPELINE_LIMITS = {
   confirmThresholdCalls: 4,
 };
 const PIPELINE_CALL_LIMIT_OPTIONS = [6, 12, 18, 24];
+// Saved conversation history & Antigravity-style long-chat compaction defaults.
+const DEFAULT_AUTO_COMPACT = true;
+const DEFAULT_COMPACT_THRESHOLD_CHARS = 16000;
+const COMPACT_THRESHOLD_CHAR_OPTIONS = [12000, 16000, 24000, 36000];
+const DEFAULT_COMPACT_THRESHOLD_MESSAGES = 16;
+const DEFAULT_COMPACT_KEEP_RECENT = 4;
 const ALLOWED_CHAR_FIELDS = Object.keys(CHAR_FIELD_META);
 const ALLOWED_MODULE_FIELDS = Object.keys(MODULE_FIELD_META);
 const ALLOWED_LORE_TEXT_FIELDS = ['comment', 'key', 'secondkey', 'content', 'insertorder'];
@@ -125,6 +132,7 @@ export {
   PRESET_STORAGE_KEY,
   UNDO_STORAGE_KEY,
   EXTENSIONS_STORAGE_KEY,
+  CONVERSATIONS_STORAGE_KEY,
   DEFAULT_MAX_CONTENT_CHARS,
   DEFAULT_GHOSTWRITE_CHAT_CHARS,
   DEFAULT_GHOSTWRITE_MAX_MESSAGES,
@@ -134,6 +142,11 @@ export {
   MAX_REQUEST_CHAR_OPTIONS,
   DEFAULT_PIPELINE_LIMITS,
   PIPELINE_CALL_LIMIT_OPTIONS,
+  DEFAULT_AUTO_COMPACT,
+  DEFAULT_COMPACT_THRESHOLD_CHARS,
+  COMPACT_THRESHOLD_CHAR_OPTIONS,
+  DEFAULT_COMPACT_THRESHOLD_MESSAGES,
+  DEFAULT_COMPACT_KEEP_RECENT,
   ALLOWED_CONFIG_KEYS,
   CONFIG_KEY_TYPES,
   CHAR_FIELD_META,

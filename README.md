@@ -19,6 +19,10 @@ RisuAI 및 공개 포크(`PocketRisu`, `RisuBard`, `HaejeokRisuai`, `RisuNest`, 
 - **에디터형 마크다운 대화창 & 구문 강조 코드 카드 (XSS 안전)**
   - LLM 응답의 마크다운(제목 `H1`~`H6`, 굵게/기울임/취소선, 인라인 코드 배지, RisuAI `{{...}}` CBS 매크로 배지, 중첩 목록·체크리스트, 인용구 및 `[!NOTE]`/`[!TIP]`/`[!IMPORTANT]`/`[!WARNING]`/`[!CAUTION]` 콜아웃 박스, 정렬 지원 표, 안전한 `http(s)` 링크)을 `innerHTML` 없이 순수 DOM 노드로 렌더링합니다.
   - 코드 블록은 언어 컬러 배지·파일명·줄 수·고정 줄 번호 거터·원클릭 복사 버튼이 포함된 에디터 카드로 표시되며, Lua(RisuAI API 포함)·JSON·JS/TS·HTML/Svelte·CSS·Regex·Diff·스트리밍 미완성 코드 블록의 구문 강조와 메시지별 **원문 보기 / 서식 보기** 전환을 지원합니다.
+- **대화 자동 저장 · 목록 불러오기 · 대화 제목 설정 · 긴 대화 자동/수동 요약 (`v1.1.1`)**
+  - 대화를 주고받으면 `pluginStorage`에 자동 저장되며, 플러그인을 다시 열거나 새로고침해도 마지막 활성 대화가 그대로 복원됩니다(최대 40개 · 1.5MB 용량 자동 정리, 상단 고정·활성 대화 우선 보호).
+  - 상단 대화 바에서 **클릭 한 번으로 대화 제목을 직접 설정·수정(`✏️`)**하거나 **`+ 새 대화`**를 시작할 수 있으며, **`📚 대화 (N)`** 드로어에서 제목·본문·요약·캐릭터 검색, 불러오기, 상단 고정(`📌`), 인라인 이름 변경, 마크다운(`.md`) 내보내기(`📤`), 확인 팝업 후 삭제(`🗑️`)를 지원합니다.
+  - **Antigravity 방식 긴 대화 압축(Compaction)**: 대화가 설정된 기준(`12K/16K(기본)/24K/36K자` 또는 미요약 16건)을 넘으면 다음 요청 직전 이전 대화를 구조화된 한국어 요약으로 자동 압축하고 최신 4건만 원문으로 유지합니다(상단 **`🗜️ 요약`** 버튼으로 수동 요약도 가능, 모델 오류 시 결정적 로컬 자동 정리 폴백). 채팅 중간의 **접이식 요약 구분 카드**에서 누적 요약을 열람·직접 편집·추가 요약·해제할 수 있으며, 직접 보내기·프리셋 적용 모드 양쪽에 자동 반영됩니다.
 - **대화 + 검토 후 적용 + 필드 단위 안전 되돌리기(Undo)**
   - 일반 대화나 사용법·설정 질문만 할 때는 데이터를 절대 수정하지 않습니다.
   - LLM이 제안한 변경사항은 `risuhelper-proposal` 스키마(표준 JSON 및 Lua/정규식/HTML용 이스케이프 불필요 원문 구분자 `<<<CODE>>>`·`<<<BEFORE>>>`/`<<<AFTER>>>`·`<<<IN>>>`/`<<<OUT>>>`·`<<<CONTENT>>>` 지원)로 검증한 뒤 **고정된 적용 대상 · 메타데이터 전/후 변경 목록 · 줄 단위 본문 Diff 카드**로 보여 줍니다.
@@ -112,7 +116,7 @@ RisuAI 및 공개 포크(`PocketRisu`, `RisuBard`, `HaejeokRisuai`, `RisuNest`, 
 
 ```bash
 npm run build   # src/ -> dist/risuhelper.js 단일 번들 생성 및 문법 검증
-npm test        # 302개 단위·통합·보안·회귀 테스트 실행
+npm test        # 313개 단위·통합·보안·회귀 테스트 실행
 npm run check   # build + test 일괄 실행
 npm run e2e:sim # 6개 호스트 엄격 시그니처 시뮬레이션 E2E 실행
 node tools/eval-real-model.mjs --golden # 71문항 평가 하네스 무결성 검증
@@ -141,8 +145,9 @@ src/
   host-capabilities.js  # 6대 호스트 런타임 기능 탐지 매트릭스
   knowledge.js          # RisuAI/포크 내장 지식 베이스 (21개 스킬 연동)
   skills.js             # 21개 내장 스킬 레지스트리 및 L0/L1/L2 라우터
-  read-tools.js         # 14종 엄격 읽기 전용(Read-Only) 자동 도구
-  agent-loop.js         # 요청당 최대 3회 LLM 루프 및 자동 수정 오케스트레이터
+  read-tools.js         # 15종 엄격 읽기 전용(Read-Only) 자동 도구
+  agent-loop.js         # 요청당 최대 3회 LLM 루프, 대용량 계획형 파이프라인 및 자동 수정 오케스트레이터
+  conversations.js      # 저장된 대화 목록(제목·고정·검색·내보내기) 및 Antigravity 방식 긴 대화 압축 엔진
   extensions-runtime.js # 선언형 상주 확장 런타임 (ReDoS/허용목록/서킷브레이커/안전모드)
   m3-actions.js         # 테마/HUD/에셋/수리/메시지/메모리/폴더/그룹/온보딩/포크 API 쓰기·Undo
   runtime-tools.js      # 채팅 변수, 정규식 미리보기, 로그 마스킹, 캐릭터 생성/포팅
@@ -162,7 +167,7 @@ src/
   preset-modules.js     # 설치 모듈 스냅샷·런타임 분류·선택 관리
   preset-engine.js      # 직접 보내기 / 프리셋 적용 조립 엔진 및 CBS 평가기
   preset-ui.js          # 프리셋 블록·토글·모듈·전송 미리보기 패널 UI
-  ui.js                 # 반응형 드로어/도킹/상주확장/건강검진 UI 컨트롤러
+  ui.js                 # 반응형 드로어/도킹/대화저장·요약/상주확장/건강검진 UI 컨트롤러
   style.js              # 다크/라이트 대응 CSS
 tools/
   build.mjs                  # 무의존성 ESM -> IIFE 단일 플러그인 번들러
@@ -172,7 +177,7 @@ tools/
   check-version-bump.mjs     # 번들 변경 시 버전 상승 여부 검사 (CI)
   capture-host-fixtures.cjs  # 실제 호스트 DOM 스냅샷 기록 (관리용, Playwright 필요)
 tests/
-  *.test.mjs        # 295개 자동 테스트 스위트
+  *.test.mjs        # 313개 자동 테스트 스위트
   data/             # 336개 한국어 스킬 라우팅 코퍼스
   fixtures/host-dom # 실제 RisuAI / PocketRisu 화면 DOM 스냅샷
   helpers/          # 샌드박스 부팅 및 DOM 스냅샷 테스트 헬퍼

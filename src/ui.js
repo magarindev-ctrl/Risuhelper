@@ -3,6 +3,7 @@ import {
   STORAGE_KEY,
   PRESET_STORAGE_KEY,
   UNDO_STORAGE_KEY,
+  CONVERSATIONS_STORAGE_KEY,
   DEFAULT_MAX_CONTENT_CHARS,
   MAX_CONTENT_CHAR_OPTIONS,
   LARGE_TARGET_OUTLINE_THRESHOLD,
@@ -10,6 +11,11 @@ import {
   MAX_REQUEST_CHAR_OPTIONS,
   DEFAULT_PIPELINE_LIMITS,
   PIPELINE_CALL_LIMIT_OPTIONS,
+  DEFAULT_AUTO_COMPACT,
+  DEFAULT_COMPACT_THRESHOLD_CHARS,
+  COMPACT_THRESHOLD_CHAR_OPTIONS,
+  DEFAULT_COMPACT_THRESHOLD_MESSAGES,
+  DEFAULT_COMPACT_KEEP_RECENT,
   CHAR_FIELD_META,
   MODULE_FIELD_META,
   CONFIG_FIELD_META,
@@ -32,6 +38,26 @@ import { planFieldContext, mentionedFields, AUTHOR_NOTE_FIELD } from './fields.j
 import { summarizeChatList, mentionedChatIndex, isColdStoredChat } from './chat-transfer.js';
 import { summarizeChatVariables, previewRegexApplication, hasCbsSyntax } from './runtime-tools.js';
 import { collectRoutingText } from './skills.js';
+import {
+  createEmptyStore,
+  normalizeConversationStore,
+  createConversation,
+  upsertConversation,
+  renameConversation,
+  togglePinConversation,
+  deleteConversation,
+  exportConversationStore,
+  filterAndSortConversations,
+  deserializeMessageFromStorage,
+  deriveConversationTitle,
+  normalizeTitle,
+  clampSummaryText,
+  formatRelativeTime,
+  formatConversationAsMarkdown,
+  measureUncompactedMessages,
+  shouldAutoCompact,
+  compactConversationMessages,
+} from './conversations.js';
 
 const DEFAULT_SETTINGS = {
   modelMode: 'model',
@@ -42,6 +68,8 @@ const DEFAULT_SETTINGS = {
   maxRequestChars: DEFAULT_MAX_REQUEST_CHARS,
   maxPipelineCalls: DEFAULT_PIPELINE_LIMITS.maxTotalCalls,
   confirmLargePlan: true,
+  autoCompactChat: DEFAULT_AUTO_COMPACT,
+  compactThresholdChars: DEFAULT_COMPACT_THRESHOLD_CHARS,
   showFloatingChip: true,
   showDetectDiagnostics: false,
   autoFillModuleEditor: false,
@@ -157,6 +185,21 @@ class RisuHelperApp {
     this.manualTarget = null;
     this.activeSnapshot = null;
     this.messages = [];
+    // Persistent saved conversations & Antigravity-style long-chat compaction state
+    this.conversationStore = createEmptyStore();
+    this.activeConversationId = null;
+    this.conversationTitle = '';
+    this.conversationCustomTitle = false;
+    this.conversationSummary = '';
+    this.conversationCompactedCount = 0;
+    this.conversationCompactedAt = null;
+    this.conversationsPanelOpen = false;
+    this.conversationSearchQuery = '';
+    this.editingTitle = false;
+    this.editingListTitleId = null;
+    this.editingSummary = false;
+    this._convSaveTimer = null;
+    this._activeCharName = '';
     this.toastTimer = null;
     this._undoSaveTimer = null;
     this.toastText = '';
@@ -217,6 +260,7 @@ class RisuHelperApp {
     this.applyContentLimit();
     await this.loadPresetState();
     await this.loadUndoState();
+    await this.loadConversations();
     this.adapter.onUndoChange = (info) => {
       this.scheduleSaveUndoState();
       if (info?.evictedIds?.length) {
@@ -388,6 +432,11 @@ class RisuHelperApp {
     const pipeN = Number(this.settings.maxPipelineCalls);
     this.settings.maxPipelineCalls = PIPELINE_CALL_LIMIT_OPTIONS.includes(pipeN) ? pipeN : DEFAULT_PIPELINE_LIMITS.maxTotalCalls;
     this.settings.confirmLargePlan = this.settings.confirmLargePlan !== false;
+    this.settings.autoCompactChat = this.settings.autoCompactChat !== false;
+    const compactN = Number(this.settings.compactThresholdChars);
+    this.settings.compactThresholdChars = COMPACT_THRESHOLD_CHAR_OPTIONS.includes(compactN)
+      ? compactN
+      : DEFAULT_COMPACT_THRESHOLD_CHARS;
     this.adapter.maxContentChars = this.settings.maxContentChars;
   }
 
@@ -418,6 +467,349 @@ class RisuHelperApp {
       this._undoSaveTimer = null;
       this.flushUndoState();
     }, 120);
+  }
+
+  // --- Saved Conversations & Antigravity-Style Compaction (pluginStorage only) ---
+
+  _reconcileLoadedUndoIds() {
+    const liveIds = new Set((this.adapter.undoStack || []).map(r => r.id));
+    for (const msg of this.messages) {
+      for (const item of msg.proposals || []) {
+        if (item.applied && item.undoId && !liveIds.has(item.undoId)) {
+          item.undoId = null;
+        }
+      }
+      if (msg.groupId && !(this.adapter.undoStack || []).some(r => r.groupId === msg.groupId)) {
+        msg.groupId = null;
+      }
+    }
+  }
+
+  _hydrateConversationRecord(record) {
+    if (!record) return;
+    this.activeConversationId = record.id;
+    this.conversationTitle = record.title || deriveConversationTitle(record.messages, '새 대화');
+    this.conversationCustomTitle = Boolean(record.customTitle);
+    this.conversationSummary = record.summary || '';
+    this.conversationCompactedCount = record.summary ? Math.max(0, Number(record.compactedCount) || 0) : 0;
+    this.conversationCompactedAt = record.compactedAt || null;
+    this.messages = (record.messages || [])
+      .map(m => deserializeMessageFromStorage(m, () => `card-${++this._cardSeq}`))
+      .filter(Boolean);
+    this._reconcileLoadedUndoIds();
+  }
+
+  async loadConversations() {
+    if (!this.api.pluginStorage?.getItem) return;
+    try {
+      const raw = await this.api.pluginStorage.getItem(CONVERSATIONS_STORAGE_KEY);
+      if (!raw) return;
+      const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+      this.conversationStore = normalizeConversationStore(parsed);
+      if (this.conversationStore.activeId) {
+        const active = this.conversationStore.conversations.find(c => c.id === this.conversationStore.activeId);
+        if (active) {
+          this._hydrateConversationRecord(active);
+        }
+      }
+    } catch {
+      this.conversationStore = createEmptyStore();
+    }
+  }
+
+  async flushConversations() {
+    if (this._convSaveTimer) {
+      clearTimeout(this._convSaveTimer);
+      this._convSaveTimer = null;
+    }
+    if (!this.api.pluginStorage?.setItem) return;
+    try {
+      await this.api.pluginStorage.setItem(CONVERSATIONS_STORAGE_KEY, exportConversationStore(this.conversationStore));
+    } catch {}
+  }
+
+  scheduleSaveConversations() {
+    if (!this.api.pluginStorage?.setItem) return;
+    clearTimeout(this._convSaveTimer);
+    this._convSaveTimer = setTimeout(() => {
+      this._convSaveTimer = null;
+      this.flushConversations();
+    }, 150);
+  }
+
+  async syncActiveConversationToStore({ touchTimestamp = true, persistNow = false } = {}) {
+    const hasContent = this.messages.length > 0 || Boolean(this.conversationSummary) || Boolean(this.conversationCustomTitle);
+    if (!hasContent && !this.activeConversationId) return;
+
+    const existing = this.activeConversationId
+      ? this.conversationStore.conversations.find(c => c.id === this.activeConversationId)
+      : null;
+
+    const derived = deriveConversationTitle(this.messages, '새 대화');
+    const title = this.conversationCustomTitle && this.conversationTitle.trim()
+      ? normalizeTitle(this.conversationTitle)
+      : normalizeTitle(derived);
+    this.conversationTitle = title;
+
+    const charHint = this._activeCharName || this.activeSnapshot?.charName || existing?.charHint || '';
+    const now = Date.now();
+    const record = createConversation({
+      id: this.activeConversationId,
+      title,
+      customTitle: this.conversationCustomTitle,
+      pinned: Boolean(existing?.pinned),
+      charHint,
+      messages: this.messages,
+      summary: this.conversationSummary,
+      compactedCount: this.conversationCompactedCount,
+      compactedAt: this.conversationCompactedAt,
+      createdAt: existing?.createdAt || now,
+      updatedAt: touchTimestamp ? now : (existing?.updatedAt || now),
+    });
+
+    this.activeConversationId = record.id;
+    this.conversationStore = upsertConversation(this.conversationStore, record);
+    if (persistNow) {
+      await this.flushConversations();
+    } else {
+      this.scheduleSaveConversations();
+    }
+  }
+
+  async startNewConversation({ saveCurrent = true, toast = '' } = {}) {
+    if (this.busy) {
+      this.showToast('응답 생성 중에는 새 대화를 시작할 수 없습니다.');
+      return;
+    }
+    if (saveCurrent && (this.messages.length > 0 || this.conversationSummary || this.conversationCustomTitle)) {
+      await this.syncActiveConversationToStore({ touchTimestamp: false, persistNow: true });
+    }
+    this.activeConversationId = null;
+    this.messages = [];
+    this.conversationTitle = '';
+    this.conversationCustomTitle = false;
+    this.conversationSummary = '';
+    this.conversationCompactedCount = 0;
+    this.conversationCompactedAt = null;
+    this.editingTitle = false;
+    this.editingListTitleId = null;
+    this.editingSummary = false;
+    this.conversationsPanelOpen = false;
+    this.conversationStore = { ...this.conversationStore, activeId: null };
+    this.scheduleSaveConversations();
+    if (toast) {
+      this.showToast(toast);
+    } else {
+      this.render();
+    }
+  }
+
+  async loadConversationById(id) {
+    if (this.busy) {
+      this.showToast('응답 생성 중에는 다른 대화를 불러올 수 없습니다.');
+      return;
+    }
+    if (!id) return;
+    if (this.activeConversationId !== id && (this.messages.length > 0 || this.conversationSummary || this.conversationCustomTitle)) {
+      await this.syncActiveConversationToStore({ touchTimestamp: false, persistNow: false });
+    }
+    const target = this.conversationStore.conversations.find(c => c.id === id);
+    if (!target) {
+      this.showToast('저장된 대화를 찾을 수 없습니다.');
+      return;
+    }
+    this._hydrateConversationRecord(target);
+    this.conversationStore = { ...this.conversationStore, activeId: target.id };
+    this.conversationsPanelOpen = false;
+    this.editingTitle = false;
+    this.editingListTitleId = null;
+    this.editingSummary = false;
+    await this.flushConversations();
+    this.showToast(`불러옴: ${target.title}`);
+    this.scrollChatToBottom();
+  }
+
+  async setCurrentConversationTitle(rawTitle) {
+    const trimmed = String(rawTitle ?? '').trim();
+    if (trimmed) {
+      this.conversationTitle = normalizeTitle(trimmed);
+      this.conversationCustomTitle = true;
+    } else {
+      this.conversationCustomTitle = false;
+      this.conversationTitle = deriveConversationTitle(this.messages, '새 대화');
+    }
+    this.editingTitle = false;
+    await this.syncActiveConversationToStore({ touchTimestamp: false, persistNow: true });
+    this.showToast(`대화 제목 저장: ${this.conversationTitle}`);
+  }
+
+  async renameSavedConversation(id, rawTitle) {
+    this.conversationStore = renameConversation(this.conversationStore, id, rawTitle);
+    this.editingListTitleId = null;
+    if (this.activeConversationId === id) {
+      const updated = this.conversationStore.conversations.find(c => c.id === id);
+      if (updated) {
+        this.conversationTitle = updated.title;
+        this.conversationCustomTitle = Boolean(updated.customTitle);
+      }
+    }
+    await this.flushConversations();
+    this.render();
+  }
+
+  async togglePinSavedConversation(id) {
+    this.conversationStore = togglePinConversation(this.conversationStore, id);
+    await this.flushConversations();
+    this.render();
+  }
+
+  async deleteSavedConversation(id) {
+    const target = this.conversationStore.conversations.find(c => c.id === id);
+    if (!target) return;
+    const confirmed = await this.askConfirm({
+      title: '저장된 대화를 삭제할까요?',
+      message: `${this._quoteLabel(target.title)} 대화를 목록에서 삭제합니다.`,
+      detail: '대화 기록과 누적 요약만 삭제되며, 이미 RisuAI에 적용한 변경 사항은 그대로 유지됩니다.',
+      confirmLabel: '예, 삭제합니다',
+      tone: 'danger',
+    });
+    if (!confirmed) return;
+    this.conversationStore = deleteConversation(this.conversationStore, id);
+    if (this.activeConversationId === id) {
+      this.activeConversationId = null;
+      this.messages = [];
+      this.conversationTitle = '';
+      this.conversationCustomTitle = false;
+      this.conversationSummary = '';
+      this.conversationCompactedCount = 0;
+      this.conversationCompactedAt = null;
+      this.editingTitle = false;
+      this.editingSummary = false;
+    }
+    await this.flushConversations();
+    this.showToast(`삭제됨: ${target.title}`);
+  }
+
+  async exportSavedConversation(id = null) {
+    const target = id
+      ? this.conversationStore.conversations.find(c => c.id === id)
+      : createConversation({
+          id: this.activeConversationId,
+          title: this.conversationTitle || deriveConversationTitle(this.messages, '새 대화'),
+          customTitle: this.conversationCustomTitle,
+          charHint: this._activeCharName || '',
+          messages: this.messages,
+          summary: this.conversationSummary,
+          compactedCount: this.conversationCompactedCount,
+          compactedAt: this.conversationCompactedAt,
+        });
+    if (!target) return;
+    const md = formatConversationAsMarkdown(target);
+    const safeName = String(target.title || 'conversation')
+      .replace(/[\\/:*?"<>|\s]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 40) || 'conversation';
+    const fileName = `risuhelper-chat-${safeName}.md`;
+    try {
+      const bytes = new TextEncoder().encode(md);
+      const isProxyApi = Boolean(this.adapter?.detectHostFlavor?.()?.isProxy);
+      if (!isProxyApi && typeof this.api?.save === 'function') {
+        await this.api.save(fileName, bytes);
+        this.showToast(`대화를 저장했습니다 (${fileName})`);
+        return;
+      }
+      if (typeof Blob !== 'undefined' && typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function' && this.doc?.body) {
+        const blob = new Blob([bytes], { type: 'text/markdown;charset=utf-8' });
+        const href = URL.createObjectURL(blob);
+        const a = this.doc.createElement('a');
+        a.href = href;
+        a.download = fileName;
+        a.style.display = 'none';
+        this.doc.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => { try { URL.revokeObjectURL(href); } catch {} }, 1000);
+        this.showToast(`대화를 저장했습니다 (${fileName})`);
+        return;
+      }
+      await this.copyText(md);
+      this.showToast('마크다운 대화를 클립보드에 복사했습니다.');
+    } catch {
+      await this.copyText(md);
+    }
+  }
+
+  async compactCurrentConversation({ manual = true, keepRecent = DEFAULT_COMPACT_KEEP_RECENT, silent = false } = {}) {
+    if (manual && this.busy) return { ok: false, error: '응답 생성 중에는 요약할 수 없습니다.' };
+    const stats = measureUncompactedMessages(this.messages, this.conversationCompactedCount);
+    const effectiveKeep = manual
+      ? Math.min(keepRecent, Math.max(2, stats.count - 2))
+      : keepRecent;
+    if (stats.count < 4 || (this.messages.length - effectiveKeep) <= this.conversationCompactedCount) {
+      if (!silent) this.showToast('요약할 이전 대화가 아직 충분하지 않습니다. (미요약 4건 이상 필요)');
+      return { ok: false, error: '요약할 이전 대화가 충분하지 않습니다.' };
+    }
+
+    let prevBusy = this.busy;
+    if (manual) {
+      this.busy = true;
+      this.showToast('🗜️ 이전 대화를 요약하는 중...');
+    }
+    try {
+      const res = await compactConversationMessages({
+        api: this.api,
+        callModel: callRisuModel,
+        modelOptions: { mode: this.settings.modelMode, timeoutSeconds: this.settings.timeoutSeconds },
+        job: {},
+        messages: this.messages,
+        compactedCount: this.conversationCompactedCount,
+        existingSummary: this.conversationSummary,
+        keepRecent: effectiveKeep,
+        title: this.conversationTitle || deriveConversationTitle(this.messages),
+      });
+      if (res.ok) {
+        this.conversationSummary = res.summary;
+        this.conversationCompactedCount = res.compactedCount;
+        this.conversationCompactedAt = Date.now();
+        await this.syncActiveConversationToStore({ touchTimestamp: false, persistNow: true });
+        if (!silent) {
+          const kept = Math.max(0, this.messages.length - res.compactedCount);
+          this.showToast(res.usedFallback
+            ? `🗜️ 이전 대화 ${res.newlyCompactedCount}건을 로컬 정리로 요약했습니다. (최근 ${kept}건 원문 유지)`
+            : `🗜️ 이전 대화 ${res.newlyCompactedCount}건을 요약했습니다. (최근 ${kept}건 원문 유지)`);
+        }
+      } else if (!silent) {
+        this.showToast(res.error || '대화를 요약하지 못했습니다.');
+      }
+      return res;
+    } finally {
+      if (manual) {
+        this.busy = prevBusy;
+        this.render();
+      }
+    }
+  }
+
+  async updateCurrentConversationSummary(rawText) {
+    const cleaned = clampSummaryText(rawText);
+    if (!cleaned) {
+      await this.clearCurrentConversationSummary();
+      return;
+    }
+    this.conversationSummary = cleaned;
+    this.conversationCompactedAt = Date.now();
+    this.editingSummary = false;
+    await this.syncActiveConversationToStore({ touchTimestamp: false, persistNow: true });
+    this.showToast('누적 요약을 수정했습니다.');
+  }
+
+  async clearCurrentConversationSummary() {
+    this.conversationSummary = '';
+    this.conversationCompactedCount = 0;
+    this.conversationCompactedAt = null;
+    this.editingSummary = false;
+    await this.syncActiveConversationToStore({ touchTimestamp: false, persistNow: true });
+    this.showToast('누적 요약을 해제했습니다. (다음 요청부터 전체 대화 기록 기준)');
   }
 
   /** Marks cards whose undo records were evicted so they stay applied without a dead Undo button. */
@@ -476,6 +868,7 @@ class RisuHelperApp {
     if (!res.clearedIds.length) return;
     this.markCommittedCards(res.clearedIds);
     await this.flushUndoState();
+    this.syncActiveConversationToStore({ touchTimestamp: false });
     const toast = undoId
       ? '✓ 변경을 확정했습니다. (되돌리기 기록에서 제거됨)'
       : groupId
@@ -640,6 +1033,7 @@ class RisuHelperApp {
       const res = await this.adapter.undo();
       this.syncAppliedCards();
       await this.refreshContextSnapshot();
+      this.syncActiveConversationToStore({ touchTimestamp: false });
       this.showToast(this.describeUndoResult(res));
     } catch (err) {
       this.syncAppliedCards({ conflict: err?.code === 'UNDO_CONFLICT' });
@@ -667,6 +1061,7 @@ class RisuHelperApp {
       const res = await this.adapter.undoGroup(msg.groupId);
       this.syncAppliedCards();
       await this.refreshContextSnapshot();
+      this.syncActiveConversationToStore({ touchTimestamp: false });
       this.showToast(this.describeUndoResult(res));
     } catch (err) {
       this.syncAppliedCards({ conflict: err?.code === 'UNDO_CONFLICT' });
@@ -777,6 +1172,10 @@ class RisuHelperApp {
     this._closeConfirm(false, { render: false });
     this.attachedFetchLog = null;
     this.menuOpen = false;
+    this.conversationsPanelOpen = false;
+    this.editingTitle = false;
+    this.editingListTitleId = null;
+    this.editingSummary = false;
     this.isOpen = false;
     this.tracker.onPanelClose();
     if (this.isDocked) {
@@ -994,6 +1393,7 @@ class RisuHelperApp {
       try {
         const { char } = await this.adapter.readActiveCharacter();
         if (char) {
+          if (char.name) this._activeCharName = String(char.name).slice(0, 48);
           let cachedChat;
           const getActiveChat = async () => {
             if (cachedChat === undefined) {
@@ -1273,11 +1673,21 @@ class RisuHelperApp {
     if (this.attachedFetchLog) {
       extra.attachedFetchLog = this.attachedFetchLog;
     }
+    if (this.conversationSummary) {
+      extra.conversationSummary = {
+        text: this.conversationSummary,
+        compactedCount: this.conversationCompactedCount,
+      };
+    }
     return extra;
   }
 
   async assembleRequestPayload(ctx, historyMessages, userInput, opts = {}) {
-    const extraContext = await this.gatherExtraContext(ctx, userInput, historyMessages);
+    const compactedOffset = this.conversationSummary && this.conversationCompactedCount > 0
+      ? Math.min((historyMessages || []).length, this.conversationCompactedCount)
+      : 0;
+    const effectiveHistory = compactedOffset > 0 ? historyMessages.slice(compactedOffset) : historyMessages;
+    const extraContext = await this.gatherExtraContext(ctx, userInput, effectiveHistory);
     const maxCalls = normalizeMaxCalls(this.settings.maxLlmCalls);
     const enableTools = opts.enableTools !== undefined ? Boolean(opts.enableTools) : maxCalls > 1;
     const allowFetchLog = Boolean(opts.allowFetchLog ?? this.attachedFetchLog);
@@ -1285,7 +1695,7 @@ class RisuHelperApp {
       context: ctx,
       snapshot: this.activeSnapshot,
       extraContext,
-      history: historyMessages,
+      history: effectiveHistory,
       userInput,
       maxHistoryTurns: this.settings.maxHistoryTurns,
       maxContentChars: this.settings.maxContentChars,
@@ -1318,7 +1728,7 @@ class RisuHelperApp {
       activeChar,
       activePersona,
       loreEntries,
-      history: historyMessages,
+      history: effectiveHistory,
       maxHistoryTurns: this.settings.maxHistoryTurns,
     });
     assembled.greetingsShownFull = extraContext.greetingsShownFull || [];
@@ -1410,8 +1820,53 @@ class RisuHelperApp {
     try {
       const hadOptInFetchLog = Boolean(this.attachedFetchLog);
       const optInLogSnapshot = this.attachedFetchLog ? { ...this.attachedFetchLog } : null;
+      const priorMessages = this.messages.slice(0, -2);
 
-      const assembled = await this.assembleRequestPayload(ctx, this.messages.slice(0, -2), trimmed, {
+      // Antigravity-style automatic compaction: when uncompacted conversation grows past threshold,
+      // fold older turns into a rolling summary while keeping the newest turns verbatim.
+      const compactCheck = shouldAutoCompact({
+        messages: priorMessages,
+        compactedCount: this.conversationCompactedCount,
+        enabled: this.settings.autoCompactChat !== false,
+        thresholdChars: this.settings.compactThresholdChars,
+        thresholdMessages: DEFAULT_COMPACT_THRESHOLD_MESSAGES,
+        keepRecent: DEFAULT_COMPACT_KEEP_RECENT,
+      });
+      if (compactCheck.shouldCompact && !job.cancelled) {
+        assistantMsg.progressLabel = '🗜️ 대화가 길어져 이전 대화를 자동 요약하는 중...';
+        assistantMsg.content = assistantMsg.progressLabel;
+        this.render();
+        this.scrollChatToBottom();
+        const compactJob = {
+          get cancelled() { return job.cancelled; },
+          set _activeStop(fn) { job._activeStop = fn; },
+        };
+        const compactRes = await compactConversationMessages({
+          api: this.api,
+          callModel: callRisuModel,
+          modelOptions: { mode: this.settings.modelMode, timeoutSeconds: this.settings.timeoutSeconds },
+          job: compactJob,
+          messages: priorMessages,
+          compactedCount: this.conversationCompactedCount,
+          existingSummary: this.conversationSummary,
+          keepRecent: DEFAULT_COMPACT_KEEP_RECENT,
+          title: this.conversationTitle || deriveConversationTitle(priorMessages),
+        });
+        if (job.cancelled) {
+          throw new Error(job.cancelReason || '사용자가 요청을 중단했습니다.');
+        }
+        if (compactRes.ok) {
+          this.conversationSummary = compactRes.summary;
+          this.conversationCompactedCount = compactRes.compactedCount;
+          this.conversationCompactedAt = Date.now();
+          await this.syncActiveConversationToStore({ touchTimestamp: false, persistNow: false });
+        }
+        assistantMsg.progressLabel = maxCalls > 1 ? `1/${maxCalls} · 요청 분석 및 응답 생성 중...` : '응답 생성 중...';
+        assistantMsg.content = '생각 중...';
+        this.render();
+      }
+
+      const assembled = await this.assembleRequestPayload(ctx, priorMessages, trimmed, {
         enableTools: maxCalls > 1,
         allowFetchLog: hadOptInFetchLog,
       });
@@ -1530,6 +1985,7 @@ class RisuHelperApp {
       if (chunkRenderTimer) clearTimeout(chunkRenderTimer);
       this.busy = false;
       this.currentJob = null;
+      await this.syncActiveConversationToStore({ touchTimestamp: true, persistNow: true });
       this.render();
       this.scrollChatToBottom();
     }
@@ -1688,7 +2144,9 @@ class RisuHelperApp {
       if (isModuleEdit) {
         item.moduleDbSaved = true;
         item.moduleDomSynced = false;
-        const savedText = item.preview?.after ?? this._moduleSyncText(this.activeSnapshot);
+        const savedText = (!item.preview?.previewDeferred && item.preview?.after !== undefined)
+          ? item.preview.after
+          : this._moduleSyncText(this.activeSnapshot);
         const canFillDom = this.tracker?.enabled && this._isModuleDomFillable(pinnedTarget, item.proposal);
         if (this.settings.autoFillModuleEditor && canFillDom) {
           const syncRes = await this.syncOpenModuleEditor(pinnedTarget, savedText, {
@@ -1709,6 +2167,7 @@ class RisuHelperApp {
       } else {
         this.showToast(res.summary);
       }
+      this.syncActiveConversationToStore({ touchTimestamp: false });
     } catch (err) {
       item.statusMessage = `적용 실패: ${err.message}`;
       this.showToast(`적용 실패: ${err.message}`);
@@ -1739,7 +2198,9 @@ class RisuHelperApp {
         const pinnedTarget = item.pinnedTarget || item.preview?.target;
         const hostBinding = item.hostBinding || item.preview?.hostBinding || null;
         if (this.settings.autoFillModuleEditor && this.tracker?.enabled && this._isModuleDomFillable(pinnedTarget, item.proposal)) {
-          const restoredText = item.preview?.before ?? this._moduleSyncText(this.activeSnapshot);
+          const restoredText = (!item.preview?.previewDeferred && item.preview?.before !== undefined)
+            ? item.preview.before
+            : this._moduleSyncText(this.activeSnapshot);
           const syncRes = await this.syncOpenModuleEditor(pinnedTarget, restoredText, {
             moduleId: hostBinding?.moduleId || this.activeSnapshot?.hostBinding?.moduleId || null,
           });
@@ -1750,6 +2211,7 @@ class RisuHelperApp {
           item.moduleSyncNotice = '⚠️ DB에서 되돌렸습니다. 열려 있는 "모듈 수정" 화면에 이전 내용이 남아 있으면 하단 "모듈 수정"을 누르지 말고 다른 설정 탭을 다녀오세요.';
         }
       }
+      this.syncActiveConversationToStore({ touchTimestamp: false });
       this.showToast(this.describeUndoResult(res));
     } catch (err) {
       this.syncAppliedCards({ conflict: err?.code === 'UNDO_CONFLICT' });
@@ -1777,6 +2239,7 @@ class RisuHelperApp {
       item.sent = true;
       item.statusMessage = res.summary;
       await this.refreshContextSnapshot({ forceChatList: true });
+      this.syncActiveConversationToStore({ touchTimestamp: false });
       this.showToast(res.summary);
     } catch (err) {
       item.statusMessage = `전송 실패: ${err.message}`;
@@ -1988,6 +2451,28 @@ class RisuHelperApp {
                 h(doc, 'span', { class: 'rh-meta-new' }, mc.after)
               )
             )
+          )
+        );
+      }
+
+      if (preview.previewDeferred) {
+        bodyChildren.push(
+          h(doc, 'div', { class: 'rh-banner', style: 'display:flex;align-items:center;justify-content:space-between;gap:8px;' },
+            h(doc, 'span', {}, '💾 저장 용량 절약을 위해 대용량 미리보기 일부만 보관되었습니다. 적용 시 현재 데이터에 정확히 반영됩니다.'),
+            !item.applied && h(doc, 'button', {
+              class: 'rh-btn',
+              onclick: async () => {
+                try {
+                  const fresh = await this.adapter.previewProposal(item.proposal, item.pinnedTarget);
+                  item.preview = fresh;
+                  if (fresh.target) item.pinnedTarget = JSON.parse(JSON.stringify(fresh.target));
+                  if (fresh.hostBinding) item.hostBinding = JSON.parse(JSON.stringify(fresh.hostBinding));
+                  this.render();
+                } catch (err) {
+                  this.showToast(`미리보기 새로고침 실패: ${err.message}`);
+                }
+              },
+            }, '🔄 미리보기 다시 계산')
           )
         );
       }
@@ -2501,6 +2986,24 @@ class RisuHelperApp {
                 `최대 ${n}회${n === DEFAULT_PIPELINE_LIMITS.maxTotalCalls ? ' (기본)' : ''}`)
             )
           )
+        ),
+        h(doc, 'div', { class: 'rh-field' },
+          h(doc, 'span', {}, '긴 대화 자동 요약 기준 (초과 시 이전 턴 자동 압축)'),
+          h(doc, 'select', {
+            class: 'rh-select',
+            'data-setting': 'compactThresholdChars',
+            onchange: async (e) => {
+              this.settings.compactThresholdChars = Number(e.target.value);
+              this.applyContentLimit();
+              await this.saveSettings();
+              this.render();
+            },
+          },
+            ...COMPACT_THRESHOLD_CHAR_OPTIONS.map(n =>
+              h(doc, 'option', { value: String(n), selected: this.settings.compactThresholdChars === n },
+                `${n.toLocaleString()}자${n === DEFAULT_COMPACT_THRESHOLD_CHARS ? ' (기본)' : ''}`)
+            )
+          )
         )
       ),
       h(doc, 'div', { class: 'rh-checks', style: 'margin-bottom:8px;' },
@@ -2516,6 +3019,19 @@ class RisuHelperApp {
             },
           }),
           '4회 이상 대용량 다단계 작업 시작 전 확인창 표시 (권장)'
+        ),
+        h(doc, 'label', {},
+          h(doc, 'input', {
+            type: 'checkbox',
+            'data-setting': 'autoCompactChat',
+            checked: this.settings.autoCompactChat !== false,
+            onchange: async (e) => {
+              this.settings.autoCompactChat = Boolean(e.target.checked);
+              await this.saveSettings();
+              this.render();
+            },
+          }),
+          '대화가 길어지면 이전 대화 자동 요약 (최근 4건 원문 유지)'
         )
       ),
       h(doc, 'div', { class: 'rh-field' },
@@ -2683,12 +3199,27 @@ class RisuHelperApp {
       ),
       h(doc, 'div', { class: 'rh-actions' },
         h(doc, 'button', {
+          class: `rh-btn${this.conversationsPanelOpen ? ' primary' : ''}`,
+          onclick: () => {
+            this.conversationsPanelOpen = !this.conversationsPanelOpen;
+            if (this.conversationsPanelOpen) {
+              this.menuOpen = false;
+              this.settingsOpen = false;
+              this.presetPanelOpen = false;
+              this.extensionsPanelOpen = false;
+            }
+            this.render();
+          },
+        }, `📚 저장된 대화 (${this.conversationStore.conversations.length})`),
+        h(doc, 'button', {
           class: `rh-btn${this.presetPanelOpen ? ' primary' : ''}`,
           onclick: async () => {
             this.presetPanelOpen = !this.presetPanelOpen;
             if (this.presetPanelOpen) {
               this.menuOpen = false;
               this.settingsOpen = false;
+              this.conversationsPanelOpen = false;
+              this.extensionsPanelOpen = false;
               if (this.presetState.pane === 'preview') await this.refreshPresetPreview();
             }
             this.render();
@@ -2737,6 +3268,7 @@ class RisuHelperApp {
               this.menuOpen = false;
               this.presetPanelOpen = false;
               this.settingsOpen = false;
+              this.conversationsPanelOpen = false;
             }
             this.render();
           },
@@ -2880,6 +3412,305 @@ class RisuHelperApp {
     return h(doc, 'div', { class: 'rh-menu-panel' }, ...children);
   }
 
+  renderConversationBar() {
+    const doc = this.doc;
+    const savedCount = this.conversationStore.conversations.length;
+    const displayTitle = this.conversationTitle || deriveConversationTitle(this.messages, '새 대화');
+    const uncompacted = measureUncompactedMessages(this.messages, this.conversationCompactedCount);
+    const canCompact = uncompacted.count >= 4;
+
+    let titleArea;
+    if (this.editingTitle) {
+      const titleInput = h(doc, 'input', {
+        class: 'rh-conv-title-input',
+        type: 'text',
+        placeholder: '대화 제목 입력 (비우면 자동 제목)',
+        value: this.conversationCustomTitle ? this.conversationTitle : displayTitle,
+        onkeydown: (e) => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            this.setCurrentConversationTitle(titleInput.value);
+          } else if (e.key === 'Escape') {
+            e.preventDefault();
+            this.editingTitle = false;
+            this.render();
+          }
+        },
+      });
+      titleArea = h(doc, 'div', { class: 'rh-conv-title-area' },
+        titleInput,
+        h(doc, 'button', {
+          class: 'rh-btn primary',
+          onclick: () => this.setCurrentConversationTitle(titleInput.value),
+        }, '저장'),
+        h(doc, 'button', {
+          class: 'rh-btn ghost',
+          onclick: () => {
+            this.editingTitle = false;
+            this.render();
+          },
+        }, '취소')
+      );
+    } else {
+      titleArea = h(doc, 'div', { class: 'rh-conv-title-area' },
+        h(doc, 'button', {
+          class: 'rh-conv-title-btn',
+          title: '클릭하여 대화 제목 설정·변경',
+          onclick: () => {
+            this.editingTitle = true;
+            this.render();
+            const inp = this.doc.querySelector('.rh-conv-title-input');
+            inp?.focus?.();
+            inp?.select?.();
+          },
+        }, `${displayTitle} ✏️`)
+      );
+    }
+
+    return h(doc, 'div', { class: 'rh-conv-bar' },
+      h(doc, 'button', {
+        class: `rh-btn rh-conv-list-btn${this.conversationsPanelOpen ? ' primary' : ' ghost'}`,
+        title: '저장된 대화 목록 열기 / 불러오기',
+        onclick: () => {
+          this.conversationsPanelOpen = !this.conversationsPanelOpen;
+          if (this.conversationsPanelOpen) {
+            this.menuOpen = false;
+            this.settingsOpen = false;
+            this.presetPanelOpen = false;
+            this.extensionsPanelOpen = false;
+          }
+          this.render();
+        },
+      }, `📚 대화 (${savedCount})`),
+      titleArea,
+      canCompact && h(doc, 'button', {
+        class: 'rh-btn ghost rh-compact-btn',
+        disabled: this.busy,
+        title: `이전 대화를 요약하고 최신 턴만 원문 유지 (현재 미요약 ${uncompacted.count}건 · ${uncompacted.chars.toLocaleString()}자)`,
+        onclick: () => this.compactCurrentConversation({ manual: true }),
+      }, '🗜️ 요약'),
+      h(doc, 'button', {
+        class: 'rh-btn ghost rh-new-conv-btn',
+        disabled: this.busy,
+        title: '현재 대화를 저장하고 새 대화를 시작합니다',
+        onclick: () => this.startNewConversation({ saveCurrent: true, toast: '새 대화를 시작했습니다.' }),
+      }, '+ 새 대화')
+    );
+  }
+
+  renderConversationsPanel() {
+    const doc = this.doc;
+    const total = this.conversationStore.conversations.length;
+    const listEl = h(doc, 'div', { class: 'rh-conv-list' });
+
+    const populateList = () => {
+      listEl.textContent = '';
+      const filtered = filterAndSortConversations(this.conversationStore, this.conversationSearchQuery);
+      if (filtered.length === 0) {
+        listEl.appendChild(
+          h(doc, 'div', { style: 'font-size:12px;color:var(--rh-muted);padding:10px 4px;text-align:center;' },
+            total === 0
+              ? '저장된 대화가 아직 없습니다. 메시지를 보내면 자동으로 저장됩니다.'
+              : '검색 결과와 일치하는 대화가 없습니다.'
+          )
+        );
+        return;
+      }
+
+      for (const conv of filtered) {
+        const isActive = conv.id === this.activeConversationId;
+        if (this.editingListTitleId === conv.id) {
+          const inp = h(doc, 'input', {
+            class: 'rh-conv-title-input',
+            type: 'text',
+            value: conv.title,
+            placeholder: '대화 제목 입력',
+            onclick: (e) => e.stopPropagation(),
+            onkeydown: (e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault();
+                this.renameSavedConversation(conv.id, inp.value);
+              } else if (e.key === 'Escape') {
+                e.preventDefault();
+                this.editingListTitleId = null;
+                this.render();
+              }
+            },
+          });
+          listEl.appendChild(
+            h(doc, 'div', { class: `rh-conv-item${isActive ? ' active' : ''}`, 'data-conv-id': conv.id },
+              inp,
+              h(doc, 'button', {
+                class: 'rh-btn primary',
+                onclick: (e) => { e.stopPropagation(); this.renameSavedConversation(conv.id, inp.value); },
+              }, '저장'),
+              h(doc, 'button', {
+                class: 'rh-btn ghost',
+                onclick: (e) => { e.stopPropagation(); this.editingListTitleId = null; this.render(); },
+              }, '취소')
+            )
+          );
+          continue;
+        }
+
+        const metaParts = [`메시지 ${(conv.messages || []).length}개`];
+        if (conv.compactedCount > 0 && conv.summary) metaParts.push(`🗜️ 요약(${conv.compactedCount})`);
+        if (conv.charHint) metaParts.push(conv.charHint);
+        const rel = formatRelativeTime(conv.updatedAt);
+        if (rel) metaParts.push(rel);
+
+        listEl.appendChild(
+          h(doc, 'div', {
+            class: `rh-conv-item${isActive ? ' active' : ''}`,
+            'data-conv-id': conv.id,
+            onclick: () => this.loadConversationById(conv.id),
+          },
+            h(doc, 'div', { class: 'rh-conv-item-main' },
+              h(doc, 'div', { class: 'rh-conv-item-title' }, `${conv.pinned ? '📌 ' : ''}${conv.title}`),
+              h(doc, 'div', { class: 'rh-conv-item-meta' }, metaParts.join(' · '))
+            ),
+            h(doc, 'div', { class: 'rh-conv-item-actions' },
+              h(doc, 'button', {
+                class: 'rh-conv-icon-btn',
+                'data-conv-action': 'pin',
+                title: conv.pinned ? '상단 고정 해제' : '상단 고정',
+                onclick: (e) => { e.stopPropagation(); this.togglePinSavedConversation(conv.id); },
+              }, conv.pinned ? '📌' : '📍'),
+              h(doc, 'button', {
+                class: 'rh-conv-icon-btn',
+                'data-conv-action': 'rename',
+                title: '제목 변경',
+                onclick: (e) => {
+                  e.stopPropagation();
+                  this.editingListTitleId = conv.id;
+                  this.render();
+                },
+              }, '✏️'),
+              h(doc, 'button', {
+                class: 'rh-conv-icon-btn',
+                'data-conv-action': 'export',
+                title: '마크다운(.md)으로 내보내기',
+                onclick: (e) => { e.stopPropagation(); this.exportSavedConversation(conv.id); },
+              }, '📤'),
+              h(doc, 'button', {
+                class: 'rh-conv-icon-btn danger',
+                'data-conv-action': 'delete',
+                title: '대화 삭제',
+                onclick: (e) => { e.stopPropagation(); this.deleteSavedConversation(conv.id); },
+              }, '🗑️')
+            )
+          )
+        );
+      }
+    };
+
+    populateList();
+
+    return h(doc, 'div', { class: 'rh-conv-panel' },
+      h(doc, 'div', { class: 'rh-conv-panel-head' },
+        h(doc, 'strong', { style: 'font-size:12.5px;' }, `📚 저장된 대화 (${total}개)`),
+        h(doc, 'div', { class: 'rh-row', style: 'gap:6px;' },
+          h(doc, 'button', {
+            class: 'rh-btn primary',
+            disabled: this.busy,
+            onclick: () => this.startNewConversation({ saveCurrent: true, toast: '새 대화를 시작했습니다.' }),
+          }, '+ 새 대화'),
+          h(doc, 'button', {
+            class: 'rh-btn ghost',
+            onclick: () => {
+              this.conversationsPanelOpen = false;
+              this.editingListTitleId = null;
+              this.render();
+            },
+          }, '닫기')
+        )
+      ),
+      h(doc, 'input', {
+        class: 'rh-conv-search',
+        type: 'search',
+        placeholder: '대화 제목 · 내용 · 요약 · 캐릭터 검색...',
+        value: this.conversationSearchQuery,
+        oninput: (e) => {
+          this.conversationSearchQuery = e.target.value;
+          populateList();
+        },
+      }),
+      listEl
+    );
+  }
+
+  renderCompactionCard() {
+    const doc = this.doc;
+    const uncompacted = measureUncompactedMessages(this.messages, this.conversationCompactedCount);
+    const body = h(doc, 'div', { class: 'rh-compaction-body' });
+
+    if (this.editingSummary) {
+      const ta = h(doc, 'textarea', {
+        class: 'rh-compaction-textarea',
+        value: this.conversationSummary,
+      });
+      body.appendChild(ta);
+      body.appendChild(
+        h(doc, 'div', { class: 'rh-row', style: 'gap:6px;justify-content:flex-end;' },
+          h(doc, 'button', {
+            class: 'rh-btn ghost',
+            onclick: () => {
+              this.editingSummary = false;
+              this.render();
+            },
+          }, '취소'),
+          h(doc, 'button', {
+            class: 'rh-btn primary',
+            onclick: () => this.updateCurrentConversationSummary(ta.value),
+          }, '요약 저장')
+        )
+      );
+    } else {
+      const summaryBox = h(doc, 'div', { class: 'rh-msg-body' });
+      renderMarkdown(doc, summaryBox, this.conversationSummary, {
+        onCopy: (codeText) => this.copyText(codeText),
+      });
+      body.appendChild(summaryBox);
+      body.appendChild(
+        h(doc, 'div', { class: 'rh-row', style: 'gap:6px;flex-wrap:wrap;' },
+          h(doc, 'button', {
+            class: 'rh-btn',
+            onclick: () => {
+              this.editingSummary = true;
+              this.render();
+            },
+          }, '✏️ 요약 편집'),
+          uncompacted.count >= 4 && h(doc, 'button', {
+            class: 'rh-btn',
+            disabled: this.busy,
+            onclick: () => this.compactCurrentConversation({ manual: true }),
+          }, '↻ 추가 요약'),
+          h(doc, 'button', {
+            class: 'rh-btn ghost',
+            onclick: () => this.copyText(this.conversationSummary),
+          }, '복사'),
+          h(doc, 'button', {
+            class: 'rh-btn danger',
+            onclick: () => this.clearCurrentConversationSummary(),
+          }, '✕ 요약 해제')
+        )
+      );
+    }
+
+    const timeText = this.conversationCompactedAt ? formatRelativeTime(this.conversationCompactedAt) : '';
+    return h(doc, 'details', {
+      class: 'rh-compaction-card',
+      'data-rh-details-key': 'compaction-summary',
+      open: this.editingSummary ? true : undefined,
+    },
+      h(doc, 'summary', {},
+        h(doc, 'span', {}, `🗜️ 이전 대화 ${this.conversationCompactedCount}건 요약됨 · 후속 요청은 이 요약 + 최근 원문 사용`),
+        timeText && h(doc, 'span', { style: 'font-size:10.5px;color:var(--rh-muted);font-weight:400;' }, timeText)
+      ),
+      body
+    );
+  }
+
   render() {
     const doc = this.doc;
     this._streamingBody = null;
@@ -2918,6 +3749,8 @@ class RisuHelperApp {
               if (this.menuOpen) {
                 this.settingsOpen = false;
                 this.presetPanelOpen = false;
+                this.conversationsPanelOpen = false;
+                this.extensionsPanelOpen = false;
               }
               this.render();
             },
@@ -2936,15 +3769,17 @@ class RisuHelperApp {
               if (this.settingsOpen) {
                 this.menuOpen = false;
                 this.presetPanelOpen = false;
+                this.conversationsPanelOpen = false;
+                this.extensionsPanelOpen = false;
               }
               this.render();
             },
           }, '설정'),
           h(doc, 'button', {
             class: 'rh-btn ghost',
+            title: '현재 화면을 비우고 새 대화를 시작합니다 (저장된 대화 목록은 유지됩니다)',
             onclick: () => {
-              this.messages = [];
-              this.render();
+              this.startNewConversation({ saveCurrent: false });
             },
           }, '대화 비우기'),
           h(doc, 'button', {
@@ -3136,6 +3971,9 @@ class RisuHelperApp {
 
     const chatEl = h(doc, 'div', { class: 'rh-chat' });
     if (this.messages.length === 0) {
+      if (this.conversationSummary) {
+        chatEl.appendChild(this.renderCompactionCard());
+      }
       chatEl.appendChild(
         h(doc, 'div', { class: 'rh-empty' },
           h(doc, 'div', { style: 'font-size:15px;font-weight:700;color:var(--rh-text);' }, `현재 대상: ${this.activeSnapshot?.label || ctx.labelText}`),
@@ -3151,10 +3989,24 @@ class RisuHelperApp {
         )
       );
     } else {
-      for (const msg of this.messages) {
-        const msgWrap = h(doc, 'div', { class: `rh-msg ${msg.role}` });
+      const hasCompaction = Boolean(this.conversationSummary && this.conversationCompactedCount > 0);
+      const compactSplit = hasCompaction
+        ? Math.min(this.messages.length, this.conversationCompactedCount)
+        : -1;
+      for (let msgIdx = 0; msgIdx < this.messages.length; msgIdx++) {
+        if (hasCompaction && msgIdx === compactSplit) {
+          chatEl.appendChild(this.renderCompactionCard());
+        }
+        const msg = this.messages[msgIdx];
+        const isCompacted = hasCompaction && msgIdx < compactSplit;
+        const msgWrap = h(doc, 'div', { class: `rh-msg ${msg.role}${isCompacted ? ' compacted' : ''}` });
         if (msg.role === 'user') {
-          msgWrap.appendChild(h(doc, 'div', { class: 'rh-bubble' }, msg.content));
+          msgWrap.appendChild(
+            h(doc, 'div', { class: 'rh-bubble' },
+              msg.content,
+              isCompacted && h(doc, 'span', { class: 'rh-compacted-tag' }, '요약됨')
+            )
+          );
         } else {
           const bubble = h(doc, 'div', { class: 'rh-bubble' });
           let barLeft;
@@ -3181,7 +4033,11 @@ class RisuHelperApp {
               if (m.budgetTrimmedNotes?.length > 0) metaParts.push('예산 축약');
               metaSpan = h(doc, 'span', { class: 'rh-msg-meta' }, ` · ${metaParts.join(' · ')}`);
             }
-            barLeft = h(doc, 'span', { class: 'rh-msg-badge' }, baseLabel, metaSpan);
+            barLeft = h(doc, 'span', { class: 'rh-msg-badge' },
+              baseLabel,
+              metaSpan,
+              isCompacted && h(doc, 'span', { class: 'rh-compacted-tag' }, '요약됨')
+            );
           }
           const barActions = (!msg.error && !msg.streaming && msg.content)
             ? h(doc, 'div', { class: 'rh-msg-actions' },
@@ -3282,6 +4138,9 @@ class RisuHelperApp {
         }
         chatEl.appendChild(msgWrap);
       }
+      if (hasCompaction && compactSplit >= this.messages.length) {
+        chatEl.appendChild(this.renderCompactionCard());
+      }
     }
 
     const textarea = h(doc, 'textarea', {
@@ -3321,6 +4180,8 @@ class RisuHelperApp {
       onclick: (e) => e.stopPropagation(),
     },
       header,
+      this.renderConversationBar(),
+      this.conversationsPanelOpen && this.renderConversationsPanel(),
       h(doc, 'div', { class: 'rh-context-bar' }, ...contextBarChildren),
       this.menuOpen && this.renderMenuPanel(ctx, flavor),
       this.presetPanelOpen && renderPresetPanel(this),
@@ -3346,7 +4207,9 @@ class RisuHelperApp {
     if (prevDetailsOpen.size > 0 && typeof doc.querySelectorAll === 'function') {
       for (const el of doc.querySelectorAll('details[data-rh-details-key]')) {
         const key = el.getAttribute('data-rh-details-key');
-        if (key && prevDetailsOpen.has(key)) {
+        if (key === 'compaction-summary' && this.editingSummary) {
+          el.open = true;
+        } else if (key && prevDetailsOpen.has(key)) {
           el.open = prevDetailsOpen.get(key);
         }
       }
@@ -3390,6 +4253,7 @@ class RisuHelperApp {
         });
         this.showToast(`건강검진 완료: 오류 ${r.errorCount || 0} · 경고 ${r.warnCount || 0}`);
       }
+      await this.syncActiveConversationToStore({ touchTimestamp: true, persistNow: true });
       this.render();
     } catch (err) {
       this.showToast(err?.message || '건강검진 중 오류 발생');
@@ -3535,6 +4399,9 @@ class RisuHelperApp {
     clearTimeout(this.toastTimer);
     if (this._undoSaveTimer) {
       await this.flushUndoState();
+    }
+    if (this._convSaveTimer) {
+      await this.flushConversations();
     }
     this.currentJob?.stop?.('플러그인이 언로드되었습니다.');
     try { await this.adapter.extensionRuntime?.dispose?.(); } catch {}
