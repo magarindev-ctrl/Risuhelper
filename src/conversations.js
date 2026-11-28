@@ -41,13 +41,21 @@ function normalizeTitle(raw, fallback = '새 대화') {
 function deriveConversationTitle(messages, fallback = '새 대화') {
   for (const m of messages || []) {
     if (m?.role !== 'user') continue;
-    const raw = String(m.content || m.rawText || '')
+    const raw = String(m.content || '')
       .replace(/```[\s\S]*?```/g, ' ')
       .replace(/[#>*_`]/g, ' ')
       .replace(/\s+/g, ' ')
       .trim();
-    if (!raw) continue;
-    return raw.length > 36 ? `${raw.slice(0, 35)}…` : raw;
+    if (raw) {
+      return raw.length > 36 ? `${raw.slice(0, 35)}…` : raw;
+    }
+    if (Array.isArray(m.attachments) && m.attachments.length > 0) {
+      const first = m.attachments[0];
+      const prefix = first?.kind === 'image' ? '🖼️ ' : '📎 ';
+      const extra = m.attachments.length > 1 ? ` 외 ${m.attachments.length - 1}건` : '';
+      const label = `${prefix}${first?.name || '첨부파일'}${extra}`;
+      return label.length > 36 ? `${label.slice(0, 35)}…` : label;
+    }
   }
   return fallback;
 }
@@ -66,6 +74,47 @@ function clipForStorage(str, maxChars = MAX_PERSISTED_MSG_CHARS) {
   const s = String(str ?? '');
   if (s.length <= maxChars) return s;
   return s.slice(0, maxChars) + `\n... (저장 크기 제한으로 뒤 ${(s.length - maxChars).toLocaleString()}자 생략)`;
+}
+
+function serializeAttachmentForStorage(att) {
+  if (!att || typeof att !== 'object') return null;
+  if (att.kind === 'image') {
+    const out = {
+      id: String(att.id || ''),
+      kind: 'image',
+      name: String(att.name || 'image.png').slice(0, 120),
+      ext: String(att.ext || 'png'),
+      mimeType: String(att.mimeType || 'image/png'),
+      sizeBytes: Number(att.sizeBytes) || 0,
+      width: Number.isInteger(att.width) ? att.width : null,
+      height: Number.isInteger(att.height) ? att.height : null,
+      source: String(att.source || 'file'),
+      imageOmittedFromStorage: true,
+    };
+    if (typeof att.thumbDataUrl === 'string' && att.thumbDataUrl.startsWith('data:image/') && att.thumbDataUrl.length <= 28000) {
+      out.thumbDataUrl = att.thumbDataUrl;
+    }
+    return out;
+  }
+  if (att.kind === 'text') {
+    const rawContent = String(att.content ?? '');
+    return {
+      id: String(att.id || ''),
+      kind: 'text',
+      name: String(att.name || 'file.txt').slice(0, 120),
+      ext: String(att.ext || 'txt'),
+      lang: String(att.lang || 'text'),
+      mimeType: String(att.mimeType || 'text/plain'),
+      sizeBytes: Number(att.sizeBytes) || 0,
+      chars: Number(att.chars) || 0,
+      originalChars: Number(att.originalChars) || Number(att.chars) || 0,
+      lines: Number(att.lines) || 0,
+      truncated: Boolean(att.truncated) || rawContent.length > 8000,
+      content: clipForStorage(rawContent, 8000),
+      source: String(att.source || 'file'),
+    };
+  }
+  return null;
 }
 
 function serializeProposalForStorage(item) {
@@ -137,6 +186,10 @@ function serializeMessageForStorage(msg) {
   };
   if (msg.error) out.error = String(msg.error);
   if (msg.groupId) out.groupId = String(msg.groupId);
+  if (Array.isArray(msg.attachments) && msg.attachments.length > 0) {
+    const storedAtts = msg.attachments.slice(0, 6).map(serializeAttachmentForStorage).filter(Boolean);
+    if (storedAtts.length > 0) out.attachments = storedAtts;
+  }
   if (Array.isArray(msg.parseErrors) && msg.parseErrors.length > 0) {
     out.parseErrors = msg.parseErrors.slice(0, 10).map(e => ({ error: String(e?.error || e) }));
   }
@@ -149,6 +202,7 @@ function serializeMessageForStorage(msg) {
       toolRuns: Array.isArray(msg.loopMeta.toolRuns) ? msg.loopMeta.toolRuns.slice(0, 20) : [],
       repairHistory: Array.isArray(msg.loopMeta.repairHistory) ? msg.loopMeta.repairHistory.slice(0, 6) : [],
       budgetTrimmedNotes: Array.isArray(msg.loopMeta.budgetTrimmedNotes) ? msg.loopMeta.budgetTrimmedNotes.slice(0, 5) : [],
+      loadedSkillIds: Array.isArray(msg.loopMeta.loadedSkillIds) ? msg.loopMeta.loadedSkillIds.slice(0, 10) : [],
       pipeline: msg.loopMeta.pipeline ? { ...msg.loopMeta.pipeline } : null,
     };
   }
@@ -173,6 +227,9 @@ function deserializeMessageFromStorage(raw, nextCardKey) {
     parseErrors: Array.isArray(raw.parseErrors) ? raw.parseErrors : [],
     loopMeta: raw.loopMeta && typeof raw.loopMeta === 'object' ? JSON.parse(JSON.stringify(raw.loopMeta)) : null,
   };
+  if (Array.isArray(raw.attachments) && raw.attachments.length > 0) {
+    msg.attachments = raw.attachments.map(a => ({ ...a }));
+  }
   if (raw.error) msg.error = String(raw.error);
   if (raw.groupId) msg.groupId = String(raw.groupId);
   return msg;
@@ -416,7 +473,18 @@ function formatConversationAsMarkdown(conv) {
     const m = conv.messages[i];
     const who = m.role === 'assistant' ? 'RisuHelper' : '사용자';
     const compactedTag = i < (conv.compactedCount || 0) ? ' _(요약됨)_' : '';
-    lines.push(`### ${i + 1}. ${who}${compactedTag}`, '', m.error ? `> 오류: ${m.error}` : (m.content || ''), '');
+    lines.push(`### ${i + 1}. ${who}${compactedTag}`, '');
+    if (Array.isArray(m.attachments) && m.attachments.length > 0) {
+      for (const att of m.attachments) {
+        const icon = att.kind === 'image' ? '🖼️' : '📎';
+        const meta = att.kind === 'image'
+          ? (att.width && att.height ? `${att.width}×${att.height}` : att.mimeType || 'image')
+          : `${att.lines || 0}줄 · ${(att.chars || 0).toLocaleString()}자`;
+        lines.push(`- ${icon} \`${att.name || '첨부'}\` (${meta})`);
+      }
+      lines.push('');
+    }
+    lines.push(m.error ? `> 오류: ${m.error}` : (m.content || ''), '');
     if (Array.isArray(m.proposals) && m.proposals.length > 0) {
       for (const p of m.proposals) {
         const status = p.applied ? '적용됨' : '미적용';

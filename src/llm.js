@@ -5,6 +5,12 @@ import { formatReadToolCatalog, VALID_READ_TOOL_IDS } from './read-tools.js';
 import { PORT_ITEMS } from './runtime-tools.js';
 import { buildTextOutline } from './text-edits.js';
 import {
+  buildDefaultUserPromptForAttachments,
+  formatAttachmentsForPrompt,
+  buildMultimodalsFromAttachments,
+  extractAttachmentRoutingHints,
+} from './attachments.js';
+import {
   ALLOWED_CONFIG_KEYS,
   DEFAULT_MAX_CONTENT_CHARS,
   LARGE_TARGET_OUTLINE_THRESHOLD,
@@ -1417,6 +1423,7 @@ function buildConversationMessages({
   extraContext,
   history,
   userInput,
+  userAttachments = [],
   maxHistoryTurns = 12,
   maxContentChars = DEFAULT_MAX_CONTENT_CHARS,
   maxRequestChars = DEFAULT_MAX_REQUEST_CHARS,
@@ -1430,10 +1437,13 @@ function buildConversationMessages({
   const effectiveOutlineThreshold = Number.isFinite(Number(outlineThreshold)) && Number(outlineThreshold) > 0
     ? Number(outlineThreshold)
     : LARGE_TARGET_OUTLINE_THRESHOLD;
+  const activeAttachments = Array.isArray(userAttachments) ? userAttachments.filter(Boolean) : [];
+  const attachHints = activeAttachments.length > 0 ? extractAttachmentRoutingHints(activeAttachments) : '';
+  const routingInput = attachHints ? `${String(userInput ?? '')}\n${attachHints}`.trim() : userInput;
   const skillPack = buildSkillPromptSections({
     context,
     snapshot,
-    userInput,
+    userInput: routingInput,
     history,
     extraContext,
     extraSkillIds,
@@ -1659,15 +1669,55 @@ ${extraBlocks.join('\n\n')}
 2. 사용자가 편집·수정·덮어쓰기·새로 생성·삭제·설정 변경을 요청할 때는 설명과 함께 \`\`\`risuhelper-proposal 블록을 포함하세요. 사용자가 UI에서 Diff를 검토하고 "적용" 버튼을 눌러야 실제 반영됩니다.
 3. 삭제(\`delete_*\`) 제안은 사용자가 명시적으로 삭제·제거를 요청했을 때만 사용하고, 대상 인덱스를 목록에서 정확히 확인하세요. JSON 헤더 안에는 주석이나 trailing comma를 넣지 말고 유효한 JSON만 출력하세요.${dynamicRulesBlock}${dynamicSchemasBlock}${rawDelimiterBlock}${readToolsBlock}`;
 
-  const recentHistory = (history || []).slice(-(maxHistoryTurns * 2)).map(msg => ({
-    role: msg.role === 'assistant' ? 'assistant' : 'user',
-    content: msg.rawText || msg.content,
-  }));
+  const currentMultimodals = activeAttachments.length > 0
+    ? buildMultimodalsFromAttachments(activeAttachments)
+    : [];
+  const rawSlice = (history || []).slice(-(maxHistoryTurns * 2));
+  // If the current turn has no new images, allow the most recent live user image turn (within last 2 msgs)
+  // to stay visible as multimodals so follow-ups ("방금 올린 스샷에서...") still see the image.
+  let recentImageHistoryIdx = -1;
+  if (currentMultimodals.length === 0) {
+    for (let i = rawSlice.length - 1; i >= Math.max(0, rawSlice.length - 2); i--) {
+      const m = rawSlice[i];
+      if (m?.role === 'user' && Array.isArray(m.attachments) && buildMultimodalsFromAttachments(m.attachments).length > 0) {
+        recentImageHistoryIdx = i;
+        break;
+      }
+    }
+  }
+  const recentHistory = rawSlice.map((msg, idx) => {
+    const out = {
+      role: msg.role === 'assistant' ? 'assistant' : 'user',
+      content: msg.rawText || msg.content,
+    };
+    if (idx === recentImageHistoryIdx) {
+      const histModals = buildMultimodalsFromAttachments(msg.attachments);
+      if (histModals.length > 0) out.multimodals = histModals;
+    }
+    return out;
+  });
+
+  const baseUserText = String(userInput ?? '');
+  let finalUserContent = baseUserText;
+  if (activeAttachments.length > 0) {
+    const promptHead = baseUserText.trim() || buildDefaultUserPromptForAttachments(activeAttachments);
+    const attachText = formatAttachmentsForPrompt(activeAttachments, {
+      maxPerFileChars: Math.min(contentLimit, 24000),
+      maxTotalChars: Math.min(maxRequestChars, 60000),
+    });
+    finalUserContent = attachText ? `${promptHead}\n\n${attachText}` : promptHead;
+  }
+
+  const finalUserMessage = {
+    role: 'user',
+    content: finalUserContent,
+    ...(currentMultimodals.length > 0 ? { multimodals: currentMultimodals } : {}),
+  };
 
   const rawMessages = [
     { role: 'system', content: systemPrompt },
     ...recentHistory,
-    { role: 'user', content: String(userInput ?? '') },
+    finalUserMessage,
   ];
 
   return enforceRequestCharBudget(rawMessages, maxRequestChars).messages;

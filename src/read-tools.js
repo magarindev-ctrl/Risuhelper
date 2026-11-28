@@ -192,6 +192,10 @@ function describeToolCall(call) {
       if (args.kind === 'greeting') return `첫 메시지${suffix} 조회`;
       if (args.kind === 'lua') return `Lua${suffix} 조회`;
       if (args.kind === 'regex') return `정규식${suffix} 조회`;
+      if (args.kind === 'attachment' || args.kind === 'file') {
+        const fname = String(args.fileName ?? args.name ?? '').slice(0, 24);
+        return fname ? `첨부 파일(${fname})${suffix} 조회` : `첨부 파일${suffix} 조회`;
+      }
       return `${args.kind || '항목'}${suffix || ' 전문'} 조회`;
     }
     case 'list_items': return `${args.kind || '목록'} 조회`;
@@ -458,6 +462,10 @@ const READ_ITEM_KIND_ALIASES = {
   theme: 'theme',
   extension: 'extensions',
   extensions: 'extensions',
+  attachment: 'attachment',
+  attachments: 'attachment',
+  file: 'attachment',
+  files: 'attachment',
 };
 
 const LIST_ITEM_KIND_ALIASES = {
@@ -501,7 +509,7 @@ function addPendingUnlock(pending, bucket, value) {
   if (!pending[bucket].includes(value)) pending[bucket].push(value);
 }
 
-async function runReadItem(adapter, args, pendingUnlocks) {
+async function runReadItem(adapter, args, pendingUnlocks, toolContext = {}) {
   const rawKind = String(args.kind || '').trim();
   const kind = READ_ITEM_KIND_ALIASES[rawKind.toLowerCase()] || rawKind;
   const maxChars = Math.max(500, Math.min(adapter.maxContentChars || 60000, Number(args.maxChars) || 12000));
@@ -879,9 +887,49 @@ async function runReadItem(adapter, args, pendingUnlocks) {
     };
   }
 
+  if (kind === 'attachment') {
+    const files = Array.isArray(toolContext?.attachedFiles) ? toolContext.attachedFiles.filter(f => f && f.kind === 'text') : [];
+    if (files.length === 0) {
+      return { ok: false, error: '현재 대화에 첨부된 텍스트 파일이 없습니다.' };
+    }
+    let target = null;
+    let targetIdx = -1;
+    const reqName = String(args.fileName ?? args.name ?? '').trim().toLowerCase();
+    const reqIdx = optionalInt(args.attachmentIndex ?? args.index);
+    if (reqIdx !== undefined && files[reqIdx]) {
+      target = files[reqIdx];
+      targetIdx = reqIdx;
+    } else if (reqName) {
+      targetIdx = files.findIndex(f => String(f.name || '').toLowerCase() === reqName);
+      if (targetIdx === -1) {
+        targetIdx = files.findIndex(f => String(f.name || '').toLowerCase().includes(reqName));
+      }
+      if (targetIdx !== -1) target = files[targetIdx];
+    } else if (files.length === 1) {
+      target = files[0];
+      targetIdx = 0;
+    }
+    if (!target) {
+      return {
+        ok: false,
+        error: `첨부 파일을 찾을 수 없습니다. 사용 가능: ${files.map((f, i) => `#${i} ${f.name}`).join(', ')}`,
+      };
+    }
+    const win = buildReadWindowPayload(String(target.content ?? ''), args, target.lang || 'text', maxChars, 'content');
+    return {
+      ok: true,
+      kind: 'attachment',
+      attachmentIndex: targetIdx,
+      fileName: target.name,
+      lang: target.lang || 'text',
+      sizeBytes: target.sizeBytes || 0,
+      ...win.fields,
+    };
+  }
+
   return {
     ok: false,
-    error: `알 수 없는 read_item kind입니다: ${rawKind || '(비어 있음)'} (허용: char_field, authorNote, greeting, lorebook, lua, regex, persona, module, config, memory, onboarding, group, chat_folders, theme, extensions)`,
+    error: `알 수 없는 read_item kind입니다: ${rawKind || '(비어 있음)'} (허용: char_field, authorNote, greeting, lorebook, lua, regex, persona, module, config, memory, onboarding, group, chat_folders, theme, extensions, attachment)`,
   };
 }
 
@@ -1658,7 +1706,7 @@ async function runInspectHostTools(adapter) {
  * Lua scripts, regex scripts, personas, and active chat messages. Returns exact line numbers and
  * generous ±contextChars verbatim excerpts so single edits can finish in 2 calls instead of 3.
  */
-async function runSearchWorkspace(adapter, args = {}) {
+async function runSearchWorkspace(adapter, args = {}, toolContext = {}) {
   const query = String(args.query ?? '').trim();
   if (!query) {
     return { ok: false, error: '검색할 query 문자열이 필요합니다.' };
@@ -1904,6 +1952,21 @@ async function runSearchWorkspace(adapter, args = {}) {
     } catch {}
   }
 
+  // 5. Attached text/code files in current conversation
+  if (want('attachment') || want('attachments') || want('file') || want('files')) {
+    const files = Array.isArray(toolContext?.attachedFiles) ? toolContext.attachedFiles : [];
+    files.forEach((f, idx) => {
+      if (!f || f.kind !== 'text' || !f.content) return;
+      scanText(f.content, {
+        kind: 'attachment',
+        scope: 'attachment',
+        attachmentIndex: idx,
+        fileName: f.name || `attachment-${idx + 1}`,
+        title: `첨부 파일 "${f.name || `#${idx + 1}`}"`,
+      });
+    });
+  }
+
   return {
     ok: true,
     query,
@@ -1976,10 +2039,10 @@ async function executeReadTool(adapter, call, toolContext = {}, unlocks = null, 
         break;
       }
       case 'search_workspace':
-        result = await runSearchWorkspace(adapter, args);
+        result = await runSearchWorkspace(adapter, args, toolContext);
         break;
       case 'read_item':
-        result = await runReadItem(adapter, args, pendingUnlocks);
+        result = await runReadItem(adapter, args, pendingUnlocks, toolContext);
         break;
       case 'list_items':
         result = await runListItems(adapter, args);

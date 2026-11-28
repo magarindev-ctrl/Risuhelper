@@ -481,18 +481,31 @@ function assembleRisuHelperMessages({
     .join('\n\n');
 
   const systemGuide = directMessages[0]?.role === 'system' ? directMessages[0].content : '';
-  const userPrompt = directMessages[directMessages.length - 1]?.content ?? '';
+  const latestDirectUser = directMessages[directMessages.length - 1];
+  const userPrompt = latestDirectUser?.content ?? '';
   const currentUser = {
     role: 'user',
     content: systemGuide ? `[RisuHelper 작업 지침]\n${systemGuide}\n\n[사용자 요청]\n${userPrompt}` : userPrompt,
+    ...(Array.isArray(latestDirectUser?.multimodals) && latestDirectUser.multimodals.length > 0
+      ? { multimodals: latestDirectUser.multimodals }
+      : {}),
   };
 
+  const directHistSlice = directMessages.length > 2 ? directMessages.slice(1, -1) : [];
   const validHistory = (history || [])
     .filter(m => !m.error && (m.role === 'user' || m.role === 'assistant'))
     .map(m => ({ role: m.role, content: m.rawText || m.content }));
   const keepCount = Math.max(1, Number(maxHistoryTurns) || 12) * 2;
   const omittedHistory = Math.max(0, validHistory.length - keepCount);
   const keptHistory = omittedHistory ? validHistory.slice(-keepCount) : validHistory;
+  if (directHistSlice.length === keptHistory.length) {
+    for (let i = 0; i < keptHistory.length; i++) {
+      const dm = directHistSlice[i];
+      if (dm?.role === 'user' && Array.isArray(dm.multimodals) && dm.multimodals.length > 0) {
+        keptHistory[i] = { ...keptHistory[i], multimodals: dm.multimodals };
+      }
+    }
+  }
   const chats = [...keptHistory, currentUser];
 
   const lastAssistant = [...keptHistory].reverse().find(m => m.role === 'assistant')?.content ?? '';
@@ -600,13 +613,18 @@ function assembleRisuHelperMessages({
   }
 
   let totalSize = 0;
-  const pushMsg = (r, content, current = false) => {
+  const pushMsg = (r, content, current = false, multimodals = null) => {
     const mapped = normalizeRole(r);
     assert(mapped, '지원하지 않는 메시지 역할: ' + r);
+    const hasModals = mapped === 'user' && Array.isArray(multimodals) && multimodals.length > 0;
     totalSize += byteLength(content);
     assert(totalSize <= PRESET_LIMIT, '조립된 프롬프트가 32MiB 상한을 초과했습니다.');
     if (current) userCount++;
-    if (content) messages.push({ role: mapped, content });
+    if (content || hasModals) {
+      const msg = { role: mapped, content: content || '' };
+      if (hasModals) msg.multimodals = multimodals;
+      messages.push(msg);
+    }
     assert(messages.length <= 3000, '전송 메시지가 3,000개를 초과했습니다.');
   };
 
@@ -625,7 +643,7 @@ function assembleRisuHelperMessages({
       } else if (b.type === 'chat') {
         const [start, end] = resolveRange(b, chats.length);
         for (const m of chats.slice(start, Math.max(start, end))) {
-          pushMsg(m.role, m.content, m === currentUser);
+          pushMsg(m.role, m.content, m === currentUser, m.multimodals || null);
         }
       } else if (['description', 'persona', 'lorebook', 'authornote', 'memory', 'postEverything'].includes(b.type)) {
         const values = {

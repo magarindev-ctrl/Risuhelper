@@ -58,6 +58,21 @@ import {
   shouldAutoCompact,
   compactConversationMessages,
 } from './conversations.js';
+import {
+  MAX_ATTACHMENTS_PER_MESSAGE,
+  MAX_IMAGES_PER_MESSAGE,
+  FILE_ACCEPT_ATTR,
+  formatFileSize,
+  attachmentIcon,
+  processFileLike,
+  extractFilesFromClipboardEvent,
+  readClipboardImagesFromApi,
+  captureScreenImage,
+  pickLocalFiles,
+  buildDefaultUserPromptForAttachments,
+  formatAttachmentsForPrompt,
+  extractAttachmentRoutingHints,
+} from './attachments.js';
 
 const DEFAULT_SETTINGS = {
   modelMode: 'model',
@@ -145,6 +160,20 @@ function h(doc, tag, props = {}, ...children) {
   return el;
 }
 
+function toggleElementClass(el, cls, on) {
+  if (!el) return;
+  if (el.classList && typeof el.classList.add === 'function' && typeof el.classList.remove === 'function') {
+    if (on) el.classList.add(cls);
+    else el.classList.remove(cls);
+    return;
+  }
+  const parts = String(el.className || '').split(/\s+/).filter(Boolean);
+  const idx = parts.indexOf(cls);
+  if (on && idx === -1) parts.push(cls);
+  if (!on && idx !== -1) parts.splice(idx, 1);
+  el.className = parts.join(' ');
+}
+
 class RisuHelperApp {
   constructor(api, doc) {
     this.api = api;
@@ -185,6 +214,10 @@ class RisuHelperApp {
     this.manualTarget = null;
     this.activeSnapshot = null;
     this.messages = [];
+    // Pending file/image attachments for the next composer message
+    this.pendingAttachments = [];
+    this.lightboxImage = null;
+    this._dragDepth = 0;
     // Persistent saved conversations & Antigravity-style long-chat compaction state
     this.conversationStore = createEmptyStore();
     this.activeConversationId = null;
@@ -586,6 +619,8 @@ class RisuHelperApp {
     }
     this.activeConversationId = null;
     this.messages = [];
+    this.pendingAttachments = [];
+    this.closeImageLightbox({ render: false });
     this.conversationTitle = '';
     this.conversationCustomTitle = false;
     this.conversationSummary = '';
@@ -619,6 +654,8 @@ class RisuHelperApp {
       return;
     }
     this._hydrateConversationRecord(target);
+    this.pendingAttachments = [];
+    this.closeImageLightbox({ render: false });
     this.conversationStore = { ...this.conversationStore, activeId: target.id };
     this.conversationsPanelOpen = false;
     this.editingTitle = false;
@@ -1170,6 +1207,7 @@ class RisuHelperApp {
 
   async close() {
     this._closeConfirm(false, { render: false });
+    this.closeImageLightbox({ render: false });
     this.attachedFetchLog = null;
     this.menuOpen = false;
     this.conversationsPanelOpen = false;
@@ -1354,9 +1392,213 @@ class RisuHelperApp {
     }, 2800);
   }
 
-  async gatherExtraContext(ctx, userInput = '', historyMessages = []) {
+  openImageLightbox(att) {
+    const src = att?.base64 || att?.thumbDataUrl || '';
+    if (!src) return;
+    this.closeImageLightbox({ render: false });
+    let onKeyDown = null;
+    if (typeof this.doc.addEventListener === 'function') {
+      onKeyDown = (e) => {
+        if (e?.key === 'Escape') {
+          e.preventDefault?.();
+          e.stopPropagation?.();
+          this.closeImageLightbox();
+        }
+      };
+      this.doc.addEventListener('keydown', onKeyDown);
+    }
+    this.lightboxImage = {
+      src,
+      name: att.name || 'image',
+      width: att.width || 0,
+      height: att.height || 0,
+      sizeBytes: att.sizeBytes || 0,
+      isThumbOnly: !att.base64 && Boolean(att.thumbDataUrl),
+      onKeyDown,
+    };
+    this.render();
+  }
+
+  closeImageLightbox({ render = true } = {}) {
+    const lb = this.lightboxImage;
+    if (!lb) return;
+    this.lightboxImage = null;
+    if (lb.onKeyDown && typeof this.doc.removeEventListener === 'function') {
+      this.doc.removeEventListener('keydown', lb.onKeyDown);
+    }
+    if (render) this.render();
+  }
+
+  _appendPendingAttachment(att) {
+    if (!att) return { ok: false, error: '유효하지 않은 첨부 항목입니다.' };
+    if (this.pendingAttachments.length >= MAX_ATTACHMENTS_PER_MESSAGE) {
+      return { ok: false, error: `메시지당 최대 ${MAX_ATTACHMENTS_PER_MESSAGE}개까지만 첨부할 수 있습니다.` };
+    }
+    if (att.kind === 'image') {
+      const currentImages = this.pendingAttachments.filter(a => a.kind === 'image').length;
+      if (currentImages >= MAX_IMAGES_PER_MESSAGE) {
+        return { ok: false, error: `이미지는 메시지당 최대 ${MAX_IMAGES_PER_MESSAGE}장까지만 첨부할 수 있습니다.` };
+      }
+    }
+    this.pendingAttachments.push(att);
+    return { ok: true };
+  }
+
+  async addAttachmentsFromFiles(fileList, source = 'file') {
+    const files = Array.from(fileList || []).filter(Boolean);
+    if (files.length === 0) return { added: 0, errors: [] };
+    let added = 0;
+    const errors = [];
+    const notes = [];
+    for (const f of files) {
+      if (this.pendingAttachments.length >= MAX_ATTACHMENTS_PER_MESSAGE) {
+        errors.push(`메시지당 최대 ${MAX_ATTACHMENTS_PER_MESSAGE}개까지 첨부 가능해 나머지 파일은 건너뛰었습니다.`);
+        break;
+      }
+      const res = await processFileLike(f, { doc: this.doc, source });
+      if (!res.ok) {
+        errors.push(res.error || '파일 첨부에 실패했습니다.');
+        continue;
+      }
+      const pushRes = this._appendPendingAttachment(res.attachment);
+      if (!pushRes.ok) {
+        errors.push(pushRes.error);
+        continue;
+      }
+      added++;
+      if (res.attachment.truncated) {
+        notes.push(`${res.attachment.name} 앞부분만 로드됨`);
+      } else if (res.attachment.resized) {
+        notes.push(`${res.attachment.name} 자동 리사이즈(${res.attachment.width}×${res.attachment.height})`);
+      }
+    }
+    if (added > 0 && errors.length === 0) {
+      const noteText = notes.length > 0 ? ` (${notes[0]})` : '';
+      this.showToast(`첨부됨: ${added}건${noteText}`);
+    } else if (added > 0 && errors.length > 0) {
+      this.showToast(`${added}건 첨부됨 · 일부 실패: ${errors[0]}`);
+    } else if (errors.length > 0) {
+      this.showToast(errors[0]);
+    } else {
+      this.render();
+    }
+    return { added, errors };
+  }
+
+  removePendingAttachment(id) {
+    this.pendingAttachments = this.pendingAttachments.filter(a => a.id !== id);
+    this.render();
+  }
+
+  clearPendingAttachments() {
+    this.pendingAttachments = [];
+    this.render();
+  }
+
+  async pickAttachmentsUi() {
+    if (this.busy) return;
+    const files = await pickLocalFiles(this.doc, FILE_ACCEPT_ATTR, true);
+    if (files.length > 0) {
+      await this.addAttachmentsFromFiles(files, 'file');
+    }
+  }
+
+  async pasteClipboardImageUi() {
+    if (this.busy) return;
+    const res = await readClipboardImagesFromApi(this.doc);
+    if (!res.ok) {
+      this.showToast(res.error || '클립보드 이미지를 읽지 못했습니다. 입력창에 Ctrl+V로 직접 붙여넣어 주세요.');
+      return;
+    }
+    let added = 0;
+    let firstErr = '';
+    for (const att of res.attachments || []) {
+      const pushRes = this._appendPendingAttachment(att);
+      if (pushRes.ok) added++;
+      else if (!firstErr) firstErr = pushRes.error;
+    }
+    if (added > 0) {
+      this.showToast(`클립보드 이미지 ${added}장 첨부됨`);
+    } else {
+      this.showToast(firstErr || '클립보드 이미지를 첨부하지 못했습니다.');
+    }
+  }
+
+  async captureScreenUi() {
+    if (this.busy) return;
+    const res = await captureScreenImage(this.doc);
+    if (res.ok && res.attachment) {
+      const pushRes = this._appendPendingAttachment(res.attachment);
+      if (pushRes.ok) {
+        const dims = res.attachment.width && res.attachment.height
+          ? ` (${res.attachment.width}×${res.attachment.height})`
+          : '';
+        this.showToast(`화면 캡처 첨부됨${dims}`);
+      } else {
+        this.showToast(pushRes.error);
+      }
+      return;
+    }
+    if (res.cancelled) {
+      this.showToast('화면 캡처를 취소했습니다.');
+      return;
+    }
+    if (res.blocked) {
+      this.showToast('플러그인 iframe 정책으로 화면 직접 캡처가 차단되어 있습니다. 스크린샷 복사(Win+Shift+S / Cmd+Shift+4) 후 입력창에 Ctrl+V로 붙여넣거나 📋 버튼을 눌러 주세요.');
+      return;
+    }
+    this.showToast(res.error || '화면 캡처에 실패했습니다. 스크린샷 복사 후 Ctrl+V로 붙여넣어 주세요.');
+  }
+
+  async handleComposerPaste(event) {
+    if (this.busy) return;
+    const { files, hasAttachments } = extractFilesFromClipboardEvent(event);
+    if (!hasAttachments) return;
+    event.preventDefault?.();
+    await this.addAttachmentsFromFiles(files, 'paste');
+  }
+
+  async handleDropFiles(event) {
+    event.preventDefault?.();
+    event.stopPropagation?.();
+    if (this.busy) return;
+    const rawFiles = event?.dataTransfer?.files;
+    if (rawFiles && rawFiles.length > 0) {
+      await this.addAttachmentsFromFiles(Array.from(rawFiles), 'drop');
+    }
+  }
+
+  collectRecentAttachedTextFiles(historyMessages = [], currentAttachments = []) {
+    const out = [];
+    const seen = new Set();
+    const pushIfText = (att) => {
+      if (!att || att.kind !== 'text' || !att.content) return;
+      const key = att.id || `${att.name}:${att.sizeBytes || 0}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      out.push(att);
+    };
+    for (const att of Array.isArray(currentAttachments) ? currentAttachments : []) {
+      pushIfText(att);
+    }
+    const hist = Array.isArray(historyMessages) ? historyMessages : [];
+    for (let i = hist.length - 1; i >= 0 && out.length < 12; i--) {
+      const m = hist[i];
+      if (!Array.isArray(m?.attachments)) continue;
+      for (let j = m.attachments.length - 1; j >= 0 && out.length < 12; j--) {
+        pushIfText(m.attachments[j]);
+      }
+    }
+    return out;
+  }
+
+  async gatherExtraContext(ctx, userInput = '', historyMessages = [], userAttachments = []) {
     const extra = {};
-    const routingText = collectRoutingText(userInput, historyMessages);
+    const attachHints = Array.isArray(userAttachments) && userAttachments.length > 0
+      ? extractAttachmentRoutingHints(userAttachments)
+      : '';
+    const routingInput = attachHints ? `${String(userInput ?? '')}\n${attachHints}`.trim() : userInput;
+    const routingText = collectRoutingText(routingInput, historyMessages);
     // Chat migration: the list of this character's chats (short), and the attached reference
     // chat's state and transcript (as much as the content limit allows, newest first).
     if (this.chatList.length > 1) {
@@ -1697,7 +1939,8 @@ class RisuHelperApp {
       ? Math.min((historyMessages || []).length, this.conversationCompactedCount)
       : 0;
     const effectiveHistory = compactedOffset > 0 ? historyMessages.slice(compactedOffset) : historyMessages;
-    const extraContext = await this.gatherExtraContext(ctx, userInput, effectiveHistory);
+    const userAttachments = Array.isArray(opts.userAttachments) ? opts.userAttachments : [];
+    const extraContext = await this.gatherExtraContext(ctx, userInput, effectiveHistory, userAttachments);
     const maxCalls = normalizeMaxCalls(this.settings.maxLlmCalls);
     const enableTools = opts.enableTools !== undefined ? Boolean(opts.enableTools) : maxCalls > 1;
     const allowFetchLog = Boolean(opts.allowFetchLog ?? this.attachedFetchLog);
@@ -1707,6 +1950,7 @@ class RisuHelperApp {
       extraContext,
       history: effectiveHistory,
       userInput,
+      userAttachments,
       maxHistoryTurns: this.settings.maxHistoryTurns,
       maxContentChars: this.settings.maxContentChars,
       maxRequestChars: this.settings.maxRequestChars,
@@ -1751,9 +1995,12 @@ class RisuHelperApp {
   async refreshPresetPreview() {
     await this.refreshContextSnapshot();
     const ctx = this.getEffectiveContext();
-    const draftInput = this.doc.querySelector('.rh-composer-input')?.value?.trim() || '(미리보기용 샘플 요청)';
+    const draftInput = this.doc.querySelector('.rh-composer-input')?.value?.trim()
+      || (this.pendingAttachments.length > 0 ? '' : '(미리보기용 샘플 요청)');
     try {
-      this.lastPresetPreview = await this.assembleRequestPayload(ctx, this.messages, draftInput);
+      this.lastPresetPreview = await this.assembleRequestPayload(ctx, this.messages, draftInput, {
+        userAttachments: this.pendingAttachments,
+      });
     } catch (err) {
       this.lastPresetPreview = {
         mode: this.presetState.mode,
@@ -1764,18 +2011,34 @@ class RisuHelperApp {
     }
   }
 
-  async sendMessage(text) {
+  async sendMessage(text, opts = {}) {
     const trimmed = String(text || '').trim();
-    if (!trimmed || this.busy) return;
+    const turnAttachments = Array.isArray(opts.attachments)
+      ? opts.attachments.filter(Boolean)
+      : [...this.pendingAttachments];
+    if ((!trimmed && turnAttachments.length === 0) || this.busy) return;
+    if (!opts.attachments) this.pendingAttachments = [];
 
     await this.refreshContextSnapshot({ forceChatList: true });
     // A chat named in the request ("2번 채팅", its exact name) becomes the reference chat and
     // stays attached for follow-ups until the picker is cleared.
-    const namedChat = mentionedChatIndex(trimmed, this.chatList);
+    const namedChat = trimmed ? mentionedChatIndex(trimmed, this.chatList) : null;
     if (namedChat !== null && namedChat !== this.referenceChat?.index) this.setReferenceChat(namedChat);
     const ctx = this.getEffectiveContext();
     const maxCalls = normalizeMaxCalls(this.settings.maxLlmCalls);
-    const userMsg = { role: 'user', content: trimmed, rawText: trimmed };
+    const promptHead = trimmed || buildDefaultUserPromptForAttachments(turnAttachments);
+    const historyAttachText = turnAttachments.length > 0
+      ? formatAttachmentsForPrompt(turnAttachments, {
+          maxPerFileChars: Math.min(this.settings.maxContentChars || 12000, 12000),
+          maxTotalChars: 24000,
+        })
+      : '';
+    const userMsg = {
+      role: 'user',
+      content: trimmed,
+      rawText: historyAttachText ? `${promptHead}\n\n${historyAttachText}` : promptHead,
+      ...(turnAttachments.length > 0 ? { attachments: turnAttachments } : {}),
+    };
     const assistantMsg = {
       role: 'assistant',
       content: '생각 중...',
@@ -1879,6 +2142,7 @@ class RisuHelperApp {
       const assembled = await this.assembleRequestPayload(ctx, priorMessages, trimmed, {
         enableTools: maxCalls > 1,
         allowFetchLog: hadOptInFetchLog,
+        userAttachments: turnAttachments,
       });
       this.lastPresetPreview = assembled;
       if (assembled.issues && assembled.issues.length > 0) {
@@ -1895,6 +2159,7 @@ class RisuHelperApp {
       pinnedCtx.fieldsShownFull = assembled.fieldsShownFull || [];
       pinnedCtx.itemsShownFull = assembled.itemsShownFull || [];
       pinnedCtx.contentTruncated = Boolean(assembled.contentTruncated);
+      const attachedTextFiles = this.collectRecentAttachedTextFiles(priorMessages, turnAttachments);
 
       const loopResult = await runAgentLoop({
         api: this.api,
@@ -1928,6 +2193,7 @@ class RisuHelperApp {
         toolContext: {
           allowFetchLog: hadOptInFetchLog,
           attachedFetchLog: optInLogSnapshot,
+          attachedFiles: attachedTextFiles,
         },
         onProgress: (info) => {
           assistantMsg.progressLabel = info?.label || '응답 생성 중...';
@@ -1990,7 +2256,14 @@ class RisuHelperApp {
       assistantMsg.streaming = false;
       assistantMsg.progressLabel = '';
       assistantMsg.content = '';
-      assistantMsg.error = err.message || String(err);
+      const rawErr = err.message || String(err);
+      const hasImages = turnAttachments.some(a => a.kind === 'image');
+      if (hasImages && !job.cancelled && !/중단|취소|프리셋 요청 점검/.test(rawErr)) {
+        const modelLabel = this.settings.modelMode === 'submodel' ? '보조 모델' : '메인 모델';
+        assistantMsg.error = `${rawErr}\n(이미지 첨부 요청 실패: 현재 RisuAI에서 선택된 ${modelLabel}이 이미지/Vision 입력을 지원하는지 확인해 주세요.)`;
+      } else {
+        assistantMsg.error = rawErr;
+      }
     } finally {
       if (chunkRenderTimer) clearTimeout(chunkRenderTimer);
       this.busy = false;
@@ -3721,6 +3994,166 @@ class RisuHelperApp {
     );
   }
 
+  renderUserMessageAttachments(attachments) {
+    const list = Array.isArray(attachments) ? attachments.filter(Boolean) : [];
+    if (list.length === 0) return null;
+    const doc = this.doc;
+    const images = list.filter(a => a.kind === 'image');
+    const files = list.filter(a => a.kind !== 'image');
+
+    const children = [];
+    if (images.length > 0) {
+      children.push(
+        h(doc, 'div', { class: 'rh-msg-img-grid' },
+          ...images.map(img => {
+            const src = img.base64 || img.thumbDataUrl || '';
+            const dims = img.width && img.height ? `${img.width}×${img.height}` : '';
+            const metaText = [dims, img.sizeBytes ? formatFileSize(img.sizeBytes) : '', (!img.base64 && img.imageOmittedFromStorage) ? '저장 썸네일' : '']
+              .filter(Boolean)
+              .join(' · ');
+            if (src) {
+              return h(doc, 'button', {
+                type: 'button',
+                class: 'rh-msg-img-card',
+                title: `${img.name || 'image'}${metaText ? ` (${metaText})` : ''} — 클릭해 크게 보기`,
+                onclick: (e) => {
+                  e.stopPropagation();
+                  this.openImageLightbox(img);
+                },
+              },
+                h(doc, 'img', { class: 'rh-msg-img', src, alt: img.name || 'attached image' }),
+                h(doc, 'span', { class: 'rh-msg-img-cap' }, img.name || 'image')
+              );
+            }
+            return h(doc, 'div', { class: 'rh-msg-file-chip' },
+              h(doc, 'span', {}, '🖼️'),
+              h(doc, 'span', { class: 'rh-msg-file-name' }, img.name || 'image'),
+              h(doc, 'span', { class: 'rh-msg-file-meta' }, metaText || '이전 세션 이미지')
+            );
+          })
+        )
+      );
+    }
+
+    if (files.length > 0) {
+      children.push(
+        h(doc, 'div', { class: 'rh-msg-file-list' },
+          ...files.map(file => {
+            const meta = [
+              file.lines ? `${file.lines.toLocaleString()}줄` : '',
+              file.sizeBytes ? formatFileSize(file.sizeBytes) : '',
+              file.truncated ? '일부' : '',
+            ].filter(Boolean).join(' · ');
+            if (file.content) {
+              const previewText = file.content.length > 4000
+                ? `${file.content.slice(0, 4000)}\n... (총 ${file.content.length.toLocaleString()}자 중 앞 4,000자 미리보기)`
+                : file.content;
+              return h(doc, 'details', {
+                class: 'rh-msg-file-details',
+                'data-rh-details-key': `att-${file.id || file.name}`,
+              },
+                h(doc, 'summary', { class: 'rh-msg-file-chip' },
+                  h(doc, 'span', {}, attachmentIcon(file)),
+                  h(doc, 'span', { class: 'rh-msg-file-name' }, file.name || 'file'),
+                  meta && h(doc, 'span', { class: 'rh-msg-file-meta' }, meta)
+                ),
+                h(doc, 'pre', { class: 'rh-msg-file-pre' }, previewText)
+              );
+            }
+            return h(doc, 'div', { class: 'rh-msg-file-chip' },
+              h(doc, 'span', {}, attachmentIcon(file)),
+              h(doc, 'span', { class: 'rh-msg-file-name' }, file.name || 'file'),
+              meta && h(doc, 'span', { class: 'rh-msg-file-meta' }, meta)
+            );
+          })
+        )
+      );
+    }
+
+    return h(doc, 'div', { class: 'rh-msg-attachments' }, ...children);
+  }
+
+  renderPendingAttachmentsTray() {
+    if (!this.pendingAttachments || this.pendingAttachments.length === 0) return null;
+    const doc = this.doc;
+    return h(doc, 'div', { class: 'rh-attach-tray' },
+      ...this.pendingAttachments.map(att => {
+        const isImg = att.kind === 'image';
+        const thumbSrc = isImg ? (att.thumbDataUrl || att.base64 || '') : '';
+        const meta = isImg
+          ? [att.width && att.height ? `${att.width}×${att.height}` : '', att.sizeBytes ? formatFileSize(att.sizeBytes) : ''].filter(Boolean).join(' · ')
+          : [att.lines ? `${att.lines.toLocaleString()}줄` : '', att.sizeBytes ? formatFileSize(att.sizeBytes) : ''].filter(Boolean).join(' · ');
+        return h(doc, 'div', {
+          class: `rh-attach-chip${isImg ? ' is-image' : ''}`,
+          title: `${att.name || '첨부'}${meta ? ` (${meta})` : ''}`,
+        },
+          isImg && thumbSrc
+            ? h(doc, 'button', {
+                type: 'button',
+                class: 'rh-attach-thumb-btn',
+                title: '클릭해 이미지 미리보기',
+                onclick: () => this.openImageLightbox(att),
+              }, h(doc, 'img', { class: 'rh-attach-thumb', src: thumbSrc, alt: att.name || 'image' }))
+            : h(doc, 'span', { class: 'rh-attach-icon' }, attachmentIcon(att)),
+          h(doc, 'div', { class: 'rh-attach-info' },
+            h(doc, 'span', { class: 'rh-attach-name' }, att.name || '첨부 파일'),
+            meta && h(doc, 'span', { class: 'rh-attach-meta' }, meta)
+          ),
+          h(doc, 'button', {
+            type: 'button',
+            class: 'rh-attach-remove',
+            title: '첨부 제거',
+            disabled: this.busy,
+            onclick: () => this.removePendingAttachment(att.id),
+          }, '×')
+        );
+      }),
+      this.pendingAttachments.length >= 2 && h(doc, 'button', {
+        type: 'button',
+        class: 'rh-attach-clear',
+        disabled: this.busy,
+        onclick: () => this.clearPendingAttachments(),
+      }, '모두 비우기')
+    );
+  }
+
+  renderImageLightbox() {
+    const lb = this.lightboxImage;
+    if (!lb) return null;
+    const doc = this.doc;
+    const metaParts = [];
+    if (lb.width && lb.height) metaParts.push(`${lb.width}×${lb.height}`);
+    if (lb.sizeBytes) metaParts.push(formatFileSize(lb.sizeBytes));
+    if (lb.isThumbOnly) metaParts.push('저장 썸네일');
+    return h(doc, 'div', {
+      class: 'rh-lightbox-backdrop',
+      onclick: (e) => {
+        e.stopPropagation();
+        this.closeImageLightbox();
+      },
+    },
+      h(doc, 'div', {
+        class: 'rh-lightbox',
+        onclick: (e) => e.stopPropagation(),
+      },
+        h(doc, 'div', { class: 'rh-lightbox-bar' },
+          h(doc, 'span', { class: 'rh-lightbox-title' },
+            lb.name,
+            metaParts.length > 0 && h(doc, 'span', { class: 'rh-lightbox-meta' }, ` · ${metaParts.join(' · ')}`)
+          ),
+          h(doc, 'button', {
+            type: 'button',
+            class: 'rh-btn ghost',
+            onclick: () => this.closeImageLightbox(),
+          }, '✕ 닫기')
+        ),
+        h(doc, 'div', { class: 'rh-lightbox-body' },
+          h(doc, 'img', { class: 'rh-lightbox-img', src: lb.src, alt: lb.name || 'image' })
+        )
+      )
+    );
+  }
+
   render() {
     const doc = this.doc;
     this._streamingBody = null;
@@ -4011,9 +4444,11 @@ class RisuHelperApp {
         const isCompacted = hasCompaction && msgIdx < compactSplit;
         const msgWrap = h(doc, 'div', { class: `rh-msg ${msg.role}${isCompacted ? ' compacted' : ''}` });
         if (msg.role === 'user') {
+          const attEl = this.renderUserMessageAttachments(msg.attachments);
           msgWrap.appendChild(
-            h(doc, 'div', { class: 'rh-bubble' },
-              msg.content,
+            h(doc, 'div', { class: `rh-bubble${attEl ? ' has-attachments' : ''}` },
+              attEl,
+              msg.content && h(doc, 'div', { class: 'rh-user-text' }, msg.content),
               isCompacted && h(doc, 'span', { class: 'rh-compacted-tag' }, '요약됨')
             )
           );
@@ -4153,16 +4588,24 @@ class RisuHelperApp {
       }
     }
 
+    const triggerSend = () => {
+      const val = textarea.value;
+      if (!String(val || '').trim() && this.pendingAttachments.length === 0) return;
+      textarea.value = '';
+      this.sendMessage(val);
+    };
+
     const textarea = h(doc, 'textarea', {
       class: 'rh-textarea rh-composer-input',
-      placeholder: '질문하거나 편집·덮어쓰기·새로 생성을 요청하세요 (Ctrl+Enter 또는 전송)',
+      placeholder: '질문·편집 요청 · 파일 드래그 · Ctrl+V 이미지 붙여넣기 (Ctrl+Enter 전송)',
       value: prevInput,
+      onpaste: (e) => {
+        this.handleComposerPaste(e);
+      },
       onkeydown: (e) => {
         if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
           e.preventDefault();
-          const val = textarea.value;
-          textarea.value = '';
-          this.sendMessage(val);
+          triggerSend();
         }
       },
     });
@@ -4174,20 +4617,80 @@ class RisuHelperApp {
         }, '중단')
       : h(doc, 'button', {
           class: 'rh-btn primary',
-          onclick: () => {
-            const val = textarea.value;
-            textarea.value = '';
-            this.sendMessage(val);
-          },
+          onclick: triggerSend,
         }, '전송');
 
+    const composerTools = h(doc, 'div', { class: 'rh-composer-tools' },
+      h(doc, 'button', {
+        type: 'button',
+        class: 'rh-attach-btn rh-btn-attach-file',
+        title: '.js, .lua, .txt, .log, .json, .md, .css, .html, .svg 및 이미지 파일 첨부',
+        disabled: this.busy,
+        onclick: () => this.pickAttachmentsUi(),
+      }, '📎 파일·이미지'),
+      h(doc, 'button', {
+        type: 'button',
+        class: 'rh-attach-btn rh-btn-attach-clipboard',
+        title: '클립보드 이미지를 바로 첨부합니다 (입력창에서 Ctrl+V도 가능)',
+        disabled: this.busy,
+        onclick: () => this.pasteClipboardImageUi(),
+      }, '📋 클립보드'),
+      h(doc, 'button', {
+        type: 'button',
+        class: 'rh-attach-btn rh-btn-attach-screen',
+        title: '화면·창을 한 프레임 캡처해 첨부합니다',
+        disabled: this.busy,
+        onclick: () => this.captureScreenUi(),
+      }, '📷 화면 캡처'),
+      h(doc, 'span', { class: 'rh-attach-hint rh-hide-mobile' }, 'Ctrl+V 붙여넣기 · 드래그 첨부')
+    );
+
+    const pendingTray = this.renderPendingAttachmentsTray();
+
     const composer = h(doc, 'div', { class: 'rh-composer' },
+      pendingTray,
+      composerTools,
       h(doc, 'div', { class: 'rh-composer-row' }, textarea, sendBtn)
     );
+
+    const dropOverlay = h(doc, 'div', { class: 'rh-drop-overlay' },
+      h(doc, 'div', { class: 'rh-drop-box' },
+        h(doc, 'div', { style: 'font-size:24px;' }, '📎'),
+        h(doc, 'div', { style: 'font-weight:700;font-size:14px;' }, '파일 또는 이미지를 여기에 놓으세요'),
+        h(doc, 'div', { style: 'font-size:12px;color:var(--rh-muted);' }, '.js, .lua, .txt, .log, .json, .md, .css, .html, .svg · PNG/JPG/WebP/GIF')
+      )
+    );
+
+    const hasDragFiles = (e) => {
+      const types = e?.dataTransfer?.types;
+      if (!types) return Boolean(e?.dataTransfer?.files?.length);
+      return Array.from(types).includes('Files');
+    };
 
     const drawer = h(doc, 'section', {
       class: `rh-drawer${this.isDocked ? ' docked' : (this.settings.wideMode ? ' wide' : '')}`,
       onclick: (e) => e.stopPropagation(),
+      ondragenter: (e) => {
+        if (!hasDragFiles(e)) return;
+        e.preventDefault?.();
+        this._dragDepth = (this._dragDepth || 0) + 1;
+        toggleElementClass(drawer, 'rh-drag-over', true);
+      },
+      ondragover: (e) => {
+        if (!hasDragFiles(e)) return;
+        e.preventDefault?.();
+        try { if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy'; } catch {}
+        toggleElementClass(drawer, 'rh-drag-over', true);
+      },
+      ondragleave: () => {
+        this._dragDepth = Math.max(0, (this._dragDepth || 1) - 1);
+        if (this._dragDepth === 0) toggleElementClass(drawer, 'rh-drag-over', false);
+      },
+      ondrop: (e) => {
+        this._dragDepth = 0;
+        toggleElementClass(drawer, 'rh-drag-over', false);
+        this.handleDropFiles(e);
+      },
     },
       header,
       this.renderConversationBar(),
@@ -4199,7 +4702,9 @@ class RisuHelperApp {
       this.settingsOpen && this.renderSettingsPanel(),
       chatEl,
       composer,
-      this.confirmDialog && this.renderConfirmDialog()
+      dropOverlay,
+      this.confirmDialog && this.renderConfirmDialog(),
+      this.lightboxImage && this.renderImageLightbox()
     );
 
     const shell = h(doc, 'div', {
