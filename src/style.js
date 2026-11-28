@@ -1191,12 +1191,25 @@ html, body {
 .rh-composer-row {
   display: flex;
   gap: 8px;
-  align-items: flex-end;
+  align-items: stretch;
+}
+
+.rh-composer-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  flex-shrink: 0;
+}
+
+.rh-composer-actions .rh-btn {
+  justify-content: center;
+  min-width: 54px;
+  flex: 1;
 }
 
 .rh-textarea {
   flex: 1;
-  min-height: 44px;
+  min-height: 62px;
   max-height: 140px;
   resize: none;
   background: var(--rh-surface);
@@ -1616,45 +1629,6 @@ html, body {
 }
 
 /* File & image attachments (v1.1.3) */
-.rh-composer-tools {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  flex-wrap: wrap;
-}
-
-.rh-attach-btn {
-  appearance: none;
-  border: 1px solid var(--rh-border);
-  background: var(--rh-surface);
-  color: var(--rh-text);
-  border-radius: 7px;
-  padding: 3px 8px;
-  font-size: 11.5px;
-  font-weight: 600;
-  cursor: pointer;
-  line-height: 1.35;
-  transition: border-color 120ms ease, background 120ms ease, color 120ms ease;
-}
-
-.rh-attach-btn:hover:not(:disabled) {
-  border-color: var(--rh-accent);
-  color: var(--rh-accent);
-  background: var(--rh-surface-2);
-}
-
-.rh-attach-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.rh-attach-hint {
-  margin-left: auto;
-  font-size: 10.5px;
-  color: var(--rh-muted);
-  white-space: nowrap;
-}
-
 .rh-attach-tray {
   display: flex;
   flex-wrap: wrap;

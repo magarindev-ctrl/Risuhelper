@@ -499,7 +499,7 @@ test('bundled UI E2E: Ctrl+V paste PNG image -> image-only send delivers multimo
   assert.equal(booted.doc.querySelector('.rh-lightbox'), null, 'Escape closed lightbox');
 });
 
-test('bundled UI E2E: clipboard button, screen capture fallback toast, and vision error hint', async () => {
+test('bundled UI E2E: compact [첨부] button stacked above [전송], no clipboard/screen buttons, and vision error hint', async () => {
   const state = { character: freshCharacter() };
   const pngBytes = makeFakePngBytes(100, 80);
 
@@ -514,43 +514,28 @@ test('bundled UI E2E: clipboard button, screen capture fallback toast, and visio
     },
   });
 
-  // Attach mock navigator with clipboard.read returning a PNG, and getDisplayMedia throwing SecurityError
-  booted.doc.defaultView = {
-    navigator: {
-      clipboard: {
-        async read() {
-          return [{
-            types: ['image/png'],
-            async getType() {
-              return makeFakeFile({ name: 'clip.png', type: 'image/png', bytes: pngBytes });
-            },
-          }];
-        },
-      },
-      mediaDevices: {
-        async getDisplayMedia() {
-          const err = new Error('Permission denied by iframe policy');
-          err.name = 'SecurityError';
-          throw err;
-        },
-      },
+  // 1. Clipboard and screen-capture buttons are removed; [첨부] sits directly above [전송]
+  assert.equal(booted.doc.querySelector('.rh-btn-attach-clipboard'), null);
+  assert.equal(booted.doc.querySelector('.rh-btn-attach-screen'), null);
+  assert.equal(booted.doc.querySelector('.rh-composer-tools'), null);
+  const actionsCol = booted.doc.querySelector('.rh-composer-actions');
+  assert.ok(actionsCol, '.rh-composer-actions column rendered');
+  const actionButtons = (actionsCol.children || []).filter(c => c.tagName === 'BUTTON');
+  assert.equal(actionButtons.length, 2);
+  assert.equal(actionButtons[0].textContent, '첨부');
+  assert.equal(actionButtons[1].textContent, '전송');
+
+  // 2. Pasting image and sending when model fails appends helpful Vision-support hint
+  const input = booted.doc.querySelector('.rh-composer-input');
+  const pastedPng = makeFakeFile({ name: 'clip.png', type: 'image/png', bytes: pngBytes });
+  fireElementEvent(input, 'paste', {
+    clipboardData: {
+      items: [{ kind: 'file', type: 'image/png', getAsFile: () => pastedPng }],
+      files: [],
     },
-  };
+  });
+  await booted.waitFor(() => Boolean(booted.doc.querySelector('.rh-attach-thumb')), 'pasted thumbnail');
 
-  // 1. Clicking screen capture button in blocked iframe shows graceful Ctrl+V guidance toast
-  const screenBtn = booted.doc.querySelector('.rh-btn-attach-screen');
-  assert.ok(screenBtn);
-  screenBtn.click();
-  await booted.waitFor(() => Boolean(booted.doc.querySelector('.rh-toast')), 'screen capture fallback toast');
-  assert.match(booted.doc.querySelector('.rh-toast').textContent, /Ctrl\+V/);
-
-  // 2. Clicking clipboard button attaches image from clipboard.read()
-  const clipBtn = booted.doc.querySelector('.rh-btn-attach-clipboard');
-  assert.ok(clipBtn);
-  clipBtn.click();
-  await booted.waitFor(() => Boolean(booted.doc.querySelector('.rh-attach-thumb')), 'clipboard thumbnail');
-
-  // 3. Sending image when model fails appends helpful Vision-support hint
   await booted.click('전송');
   await booted.waitFor(() => Boolean(booted.doc.querySelector('.rh-banner')), 'vision error banner');
   assert.match(booted.doc.querySelector('.rh-banner').textContent, /Vision 입력을 지원하는지 확인/);

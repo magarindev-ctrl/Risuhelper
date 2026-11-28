@@ -1,17 +1,17 @@
 //@name risuhelper-eval
 //@display-name RisuHelper 실모델 평가기 (임시)
 //@api 3.0
-//@version 1.1.3
+//@version 1.1.4
 
 /*
- * RisuHelper 20-Scenario Evaluator Plugin (temporary dev tool, v1.1.3)
+ * RisuHelper 20-Scenario Evaluator Plugin (temporary dev tool, v1.1.4)
  * License: GPL-3.0-only
  */
 (() => {
   'use strict';
   const __modules = {
   "src/version.js"(__require, __exports) {
-const VERSION = '1.1.3';
+const VERSION = '1.1.4';
 const PLUGIN_NAME = 'risuhelper';
 const STORAGE_KEY = 'risuhelper_state_v1';
 const PRESET_STORAGE_KEY = 'risuhelper_preset_v1';
@@ -19485,12 +19485,25 @@ html, body {
 .rh-composer-row {
   display: flex;
   gap: 8px;
-  align-items: flex-end;
+  align-items: stretch;
+}
+
+.rh-composer-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  flex-shrink: 0;
+}
+
+.rh-composer-actions .rh-btn {
+  justify-content: center;
+  min-width: 54px;
+  flex: 1;
 }
 
 .rh-textarea {
   flex: 1;
-  min-height: 44px;
+  min-height: 62px;
   max-height: 140px;
   resize: none;
   background: var(--rh-surface);
@@ -19910,45 +19923,6 @@ html, body {
 }
 
 /* File & image attachments (v1.1.3) */
-.rh-composer-tools {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  flex-wrap: wrap;
-}
-
-.rh-attach-btn {
-  appearance: none;
-  border: 1px solid var(--rh-border);
-  background: var(--rh-surface);
-  color: var(--rh-text);
-  border-radius: 7px;
-  padding: 3px 8px;
-  font-size: 11.5px;
-  font-weight: 600;
-  cursor: pointer;
-  line-height: 1.35;
-  transition: border-color 120ms ease, background 120ms ease, color 120ms ease;
-}
-
-.rh-attach-btn:hover:not(:disabled) {
-  border-color: var(--rh-accent);
-  color: var(--rh-accent);
-  background: var(--rh-surface-2);
-}
-
-.rh-attach-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.rh-attach-hint {
-  margin-left: auto;
-  font-size: 10.5px;
-  color: var(--rh-muted);
-  white-space: nowrap;
-}
-
 .rh-attach-tray {
   display: flex;
   flex-wrap: wrap;
@@ -27887,7 +27861,7 @@ const { summarizeChatList, mentionedChatIndex, isColdStoredChat } = __require("s
 const { summarizeChatVariables, previewRegexApplication, hasCbsSyntax } = __require("src/runtime-tools.js");
 const { collectRoutingText, wantsCharacterCatalog, extractRecentAssistantSkillIds } = __require("src/skills.js");
 const { createEmptyStore, normalizeConversationStore, createConversation, upsertConversation, renameConversation, togglePinConversation, deleteConversation, exportConversationStore, filterAndSortConversations, deserializeMessageFromStorage, deriveConversationTitle, normalizeTitle, clampSummaryText, formatRelativeTime, formatConversationAsMarkdown, measureUncompactedMessages, shouldAutoCompact, compactConversationMessages } = __require("src/conversations.js");
-const { MAX_ATTACHMENTS_PER_MESSAGE, MAX_IMAGES_PER_MESSAGE, FILE_ACCEPT_ATTR, formatFileSize, attachmentIcon, processFileLike, extractFilesFromClipboardEvent, readClipboardImagesFromApi, captureScreenImage, pickLocalFiles, buildDefaultUserPromptForAttachments, formatAttachmentsForPrompt, extractAttachmentRoutingHints } = __require("src/attachments.js");
+const { MAX_ATTACHMENTS_PER_MESSAGE, MAX_IMAGES_PER_MESSAGE, FILE_ACCEPT_ATTR, formatFileSize, attachmentIcon, processFileLike, extractFilesFromClipboardEvent, pickLocalFiles, buildDefaultUserPromptForAttachments, formatAttachmentsForPrompt, extractAttachmentRoutingHints } = __require("src/attachments.js");
 
 const DEFAULT_SETTINGS = {
   modelMode: 'model',
@@ -29316,53 +29290,6 @@ class RisuHelperApp {
     if (files.length > 0) {
       await this.addAttachmentsFromFiles(files, 'file');
     }
-  }
-
-  async pasteClipboardImageUi() {
-    if (this.busy) return;
-    const res = await readClipboardImagesFromApi(this.doc);
-    if (!res.ok) {
-      this.showToast(res.error || '클립보드 이미지를 읽지 못했습니다. 입력창에 Ctrl+V로 직접 붙여넣어 주세요.');
-      return;
-    }
-    let added = 0;
-    let firstErr = '';
-    for (const att of res.attachments || []) {
-      const pushRes = this._appendPendingAttachment(att);
-      if (pushRes.ok) added++;
-      else if (!firstErr) firstErr = pushRes.error;
-    }
-    if (added > 0) {
-      this.showToast(`클립보드 이미지 ${added}장 첨부됨`);
-    } else {
-      this.showToast(firstErr || '클립보드 이미지를 첨부하지 못했습니다.');
-    }
-  }
-
-  async captureScreenUi() {
-    if (this.busy) return;
-    const res = await captureScreenImage(this.doc);
-    if (res.ok && res.attachment) {
-      const pushRes = this._appendPendingAttachment(res.attachment);
-      if (pushRes.ok) {
-        const dims = res.attachment.width && res.attachment.height
-          ? ` (${res.attachment.width}×${res.attachment.height})`
-          : '';
-        this.showToast(`화면 캡처 첨부됨${dims}`);
-      } else {
-        this.showToast(pushRes.error);
-      }
-      return;
-    }
-    if (res.cancelled) {
-      this.showToast('화면 캡처를 취소했습니다.');
-      return;
-    }
-    if (res.blocked) {
-      this.showToast('플러그인 iframe 정책으로 화면 직접 캡처가 차단되어 있습니다. 스크린샷 복사(Win+Shift+S / Cmd+Shift+4) 후 입력창에 Ctrl+V로 붙여넣거나 📋 버튼을 눌러 주세요.');
-      return;
-    }
-    this.showToast(res.error || '화면 캡처에 실패했습니다. 스크린샷 복사 후 Ctrl+V로 붙여넣어 주세요.');
   }
 
   async handleComposerPaste(event) {
@@ -32425,6 +32352,14 @@ class RisuHelperApp {
       },
     });
 
+    const attachBtn = h(doc, 'button', {
+      type: 'button',
+      class: 'rh-btn rh-btn-attach-file',
+      title: '파일·이미지 첨부 (.js, .lua, .txt, .log, .json, .md, .css, .html, .svg, PNG/JPG/WebP/GIF · 입력창 Ctrl+V 붙여넣기 및 드래그 지원)',
+      disabled: this.busy,
+      onclick: () => this.pickAttachmentsUi(),
+    }, '첨부');
+
     const sendBtn = this.busy
       ? h(doc, 'button', {
           class: 'rh-btn danger',
@@ -32435,37 +32370,14 @@ class RisuHelperApp {
           onclick: triggerSend,
         }, '전송');
 
-    const composerTools = h(doc, 'div', { class: 'rh-composer-tools' },
-      h(doc, 'button', {
-        type: 'button',
-        class: 'rh-attach-btn rh-btn-attach-file',
-        title: '.js, .lua, .txt, .log, .json, .md, .css, .html, .svg 및 이미지 파일 첨부',
-        disabled: this.busy,
-        onclick: () => this.pickAttachmentsUi(),
-      }, '📎 파일·이미지'),
-      h(doc, 'button', {
-        type: 'button',
-        class: 'rh-attach-btn rh-btn-attach-clipboard',
-        title: '클립보드 이미지를 바로 첨부합니다 (입력창에서 Ctrl+V도 가능)',
-        disabled: this.busy,
-        onclick: () => this.pasteClipboardImageUi(),
-      }, '📋 클립보드'),
-      h(doc, 'button', {
-        type: 'button',
-        class: 'rh-attach-btn rh-btn-attach-screen',
-        title: '화면·창을 한 프레임 캡처해 첨부합니다',
-        disabled: this.busy,
-        onclick: () => this.captureScreenUi(),
-      }, '📷 화면 캡처'),
-      h(doc, 'span', { class: 'rh-attach-hint rh-hide-mobile' }, 'Ctrl+V 붙여넣기 · 드래그 첨부')
-    );
-
     const pendingTray = this.renderPendingAttachmentsTray();
 
     const composer = h(doc, 'div', { class: 'rh-composer' },
       pendingTray,
-      composerTools,
-      h(doc, 'div', { class: 'rh-composer-row' }, textarea, sendBtn)
+      h(doc, 'div', { class: 'rh-composer-row' },
+        textarea,
+        h(doc, 'div', { class: 'rh-composer-actions' }, attachBtn, sendBtn)
+      )
     );
 
     const dropOverlay = h(doc, 'div', { class: 'rh-drop-overlay' },

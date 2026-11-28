@@ -66,8 +66,6 @@ import {
   attachmentIcon,
   processFileLike,
   extractFilesFromClipboardEvent,
-  readClipboardImagesFromApi,
-  captureScreenImage,
   pickLocalFiles,
   buildDefaultUserPromptForAttachments,
   formatAttachmentsForPrompt,
@@ -1501,53 +1499,6 @@ class RisuHelperApp {
     if (files.length > 0) {
       await this.addAttachmentsFromFiles(files, 'file');
     }
-  }
-
-  async pasteClipboardImageUi() {
-    if (this.busy) return;
-    const res = await readClipboardImagesFromApi(this.doc);
-    if (!res.ok) {
-      this.showToast(res.error || '클립보드 이미지를 읽지 못했습니다. 입력창에 Ctrl+V로 직접 붙여넣어 주세요.');
-      return;
-    }
-    let added = 0;
-    let firstErr = '';
-    for (const att of res.attachments || []) {
-      const pushRes = this._appendPendingAttachment(att);
-      if (pushRes.ok) added++;
-      else if (!firstErr) firstErr = pushRes.error;
-    }
-    if (added > 0) {
-      this.showToast(`클립보드 이미지 ${added}장 첨부됨`);
-    } else {
-      this.showToast(firstErr || '클립보드 이미지를 첨부하지 못했습니다.');
-    }
-  }
-
-  async captureScreenUi() {
-    if (this.busy) return;
-    const res = await captureScreenImage(this.doc);
-    if (res.ok && res.attachment) {
-      const pushRes = this._appendPendingAttachment(res.attachment);
-      if (pushRes.ok) {
-        const dims = res.attachment.width && res.attachment.height
-          ? ` (${res.attachment.width}×${res.attachment.height})`
-          : '';
-        this.showToast(`화면 캡처 첨부됨${dims}`);
-      } else {
-        this.showToast(pushRes.error);
-      }
-      return;
-    }
-    if (res.cancelled) {
-      this.showToast('화면 캡처를 취소했습니다.');
-      return;
-    }
-    if (res.blocked) {
-      this.showToast('플러그인 iframe 정책으로 화면 직접 캡처가 차단되어 있습니다. 스크린샷 복사(Win+Shift+S / Cmd+Shift+4) 후 입력창에 Ctrl+V로 붙여넣거나 📋 버튼을 눌러 주세요.');
-      return;
-    }
-    this.showToast(res.error || '화면 캡처에 실패했습니다. 스크린샷 복사 후 Ctrl+V로 붙여넣어 주세요.');
   }
 
   async handleComposerPaste(event) {
@@ -4610,6 +4561,14 @@ class RisuHelperApp {
       },
     });
 
+    const attachBtn = h(doc, 'button', {
+      type: 'button',
+      class: 'rh-btn rh-btn-attach-file',
+      title: '파일·이미지 첨부 (.js, .lua, .txt, .log, .json, .md, .css, .html, .svg, PNG/JPG/WebP/GIF · 입력창 Ctrl+V 붙여넣기 및 드래그 지원)',
+      disabled: this.busy,
+      onclick: () => this.pickAttachmentsUi(),
+    }, '첨부');
+
     const sendBtn = this.busy
       ? h(doc, 'button', {
           class: 'rh-btn danger',
@@ -4620,37 +4579,14 @@ class RisuHelperApp {
           onclick: triggerSend,
         }, '전송');
 
-    const composerTools = h(doc, 'div', { class: 'rh-composer-tools' },
-      h(doc, 'button', {
-        type: 'button',
-        class: 'rh-attach-btn rh-btn-attach-file',
-        title: '.js, .lua, .txt, .log, .json, .md, .css, .html, .svg 및 이미지 파일 첨부',
-        disabled: this.busy,
-        onclick: () => this.pickAttachmentsUi(),
-      }, '📎 파일·이미지'),
-      h(doc, 'button', {
-        type: 'button',
-        class: 'rh-attach-btn rh-btn-attach-clipboard',
-        title: '클립보드 이미지를 바로 첨부합니다 (입력창에서 Ctrl+V도 가능)',
-        disabled: this.busy,
-        onclick: () => this.pasteClipboardImageUi(),
-      }, '📋 클립보드'),
-      h(doc, 'button', {
-        type: 'button',
-        class: 'rh-attach-btn rh-btn-attach-screen',
-        title: '화면·창을 한 프레임 캡처해 첨부합니다',
-        disabled: this.busy,
-        onclick: () => this.captureScreenUi(),
-      }, '📷 화면 캡처'),
-      h(doc, 'span', { class: 'rh-attach-hint rh-hide-mobile' }, 'Ctrl+V 붙여넣기 · 드래그 첨부')
-    );
-
     const pendingTray = this.renderPendingAttachmentsTray();
 
     const composer = h(doc, 'div', { class: 'rh-composer' },
       pendingTray,
-      composerTools,
-      h(doc, 'div', { class: 'rh-composer-row' }, textarea, sendBtn)
+      h(doc, 'div', { class: 'rh-composer-row' },
+        textarea,
+        h(doc, 'div', { class: 'rh-composer-actions' }, attachBtn, sendBtn)
+      )
     );
 
     const dropOverlay = h(doc, 'div', { class: 'rh-drop-overlay' },
