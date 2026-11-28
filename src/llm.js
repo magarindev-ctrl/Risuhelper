@@ -344,7 +344,10 @@ function normalizeToolCall(raw) {
     return { ok: false, error: '도구 호출에 tool 이름이 필요합니다.' };
   }
   if (!VALID_READ_TOOL_IDS.has(tool)) {
-    return { ok: false, error: `허용되지 않는 읽기 도구입니다: ${tool}` };
+    return {
+      ok: false,
+      error: `허용되지 않는 읽기 도구입니다: ${tool} (읽기 도구: load_skill, search_workspace, read_item, list_items, read_chat, read_vars, test_regex_cbs, audit_workspace, inspect_assets, host_info)`,
+    };
   }
   let args = {};
   if (raw.args && typeof raw.args === 'object' && !Array.isArray(raw.args)) {
@@ -1621,13 +1624,12 @@ function buildConversationMessages({
   if (enableTools) {
     const toolCatalogText = formatReadToolCatalog(capabilities, { allowFetchLog });
     const l1Text = (skillPack.l1Catalog || []).length > 0
-      ? skillPack.l1Catalog.map(s => `\`${s.id}\`(${s.label})`).join(', ')
+      ? skillPack.l1Catalog.map(s => `${s.id}(${s.label})`).join(', ')
       : '(없음)';
-    readToolsBlock = `\n\n[읽기·진단 도구 및 L1 내장 스킬 (Read-Only · 기본 3회)]
-충분하면 1회 바로 답/\`\`\`risuhelper-proposal 출력. 부족할 때만 \`\`\`risuhelper-tool 배열(최대 6개, 쓰기 불가).
-대용량 전면 개편·대량 일괄 작업은 \`\`\`risuhelper-plan JSON(확인 후 실행).
+    readToolsBlock = `\n\n[읽기·진단 도구 및 L1 내장 스킬 (Read-Only·3회)]
+충분하면 바로 답/\`\`\`risuhelper-proposal, 부족 시 \`\`\`risuhelper-tool 배열(≤6). 대용량은 \`\`\`risuhelper-plan JSON.
 - 도구: ${toolCatalogText}
-- L1 스킬(\`load_skill\`): ${l1Text}`;
+- L1(load_skill): ${l1Text}`;
   }
 
   const systemPrompt = `당신은 RisuAI(및 PocketRisu, RisuBard, 해적리스, RisuNest 등 포크) 안에 내장된 소통형 어시스턴트 "RisuHelper"입니다.
@@ -1715,6 +1717,7 @@ function buildAutoRepairFollowUpMessage({
   parseErrors = [],
   failedProposals = [],
   currentSourceExcerpt = '',
+  skillHintText = '',
   callNumber = 2,
   maxCalls = 3,
 } = {}) {
@@ -1731,6 +1734,9 @@ function buildAutoRepairFollowUpMessage({
     const title = item?.proposal?.title ? ` · ${item.proposal.title}` : '';
     const errMsg = item?.preview?.error || '미리보기 실패';
     lines.push(`- 제안 #${i + 1} (${action}${title}) 미리보기 오류: ${errMsg}`);
+  }
+  if (skillHintText) {
+    lines.push('\n' + String(skillHintText).slice(0, 4500));
   }
   if (currentSourceExcerpt) {
     const clipped = String(currentSourceExcerpt).slice(0, 3000);

@@ -37,43 +37,43 @@ const READ_TOOL_DEFS = [
   {
     id: 'load_skill',
     label: '내장 스킬 로드',
-    summary: 'L1 목록의 내장 스킬 지식·스키마 로드',
-    argsHint: 'skillIds[]',
+    summary: 'L1 목록의 내장 스킬 지식·스키마 로드 및 키워드 검색',
+    argsHint: 'skillIds[]?,query?',
     requiresCapabilities: [],
   },
   {
     id: 'search_workspace',
     label: '워크스페이스 전문 검색',
     summary: '캐릭터·로어북·Lua·정규식·페르소나·채팅 본문 로컬 키워드/정규식 검색(줄번호·문맥 포함)',
-    argsHint: 'query,scope?,useRegex?',
+    argsHint: 'query,scope?,charIndex?,useRegex?',
     requiresCapabilities: [],
   },
   {
     id: 'read_item',
     label: '항목 조회(전문·구간·목차)',
     summary: '필드·첫메시지·로어북·Lua·정규식·페르소나·모듈 조회(구간/aroundText/목차 지원)',
-    argsHint: 'kind,field|loreIndex,startLine?,aroundText?,outlineOnly?',
+    argsHint: 'kind,field|loreIndex,charIndex?,startLine?,aroundText?,outlineOnly?',
     requiresCapabilities: [],
   },
   {
     id: 'list_items',
     label: '목록 분할 조회',
     summary: '로어북·정규식·페르소나·모듈·채팅·캐릭터 페이지네이션/검색',
-    argsHint: 'kind,offset?,limit?,query?',
+    argsHint: 'kind:character|lorebook|regex|persona|module|chat,charIndex?,query?,offset?,limit?',
     requiresCapabilities: [],
   },
   {
     id: 'read_chat',
     label: '채팅 구간 조회',
     summary: '현재/다른 채팅의 지정 구간 메시지·메모리 요약 조회',
-    argsHint: 'chatIndex?,tail?,from?,to?',
+    argsHint: 'charIndex?,chatIndex?,tail?,from?,to?',
     requiresCapabilities: [],
   },
   {
     id: 'read_vars',
     label: '채팅 변수 조회',
     summary: '채팅 변수(scriptstate) 조회(타 채팅 포함)',
-    argsHint: 'chatIndex?,keys?[]',
+    argsHint: 'charIndex?,chatIndex?,keys?[]',
     requiresCapabilities: [],
   },
   {
@@ -160,7 +160,7 @@ function getAvailableReadTools(capabilities = null, { allowFetchLog = false } = 
 
 function formatReadToolCatalog(capabilities = null, { allowFetchLog = false } = {}) {
   const tools = getAvailableReadTools(capabilities, { allowFetchLog });
-  return tools.map(t => `\`${t.id}\`(${t.argsHint})`).join(', ');
+  return tools.map(t => (t.argsHint ? `${t.id}(${t.argsHint})` : t.id)).join(', ');
 }
 
 function describeToolCall(call) {
@@ -168,8 +168,12 @@ function describeToolCall(call) {
   const args = call?.args && typeof call.args === 'object' ? call.args : {};
   switch (tool) {
     case 'load_skill': {
-      const ids = Array.isArray(args.skillIds) ? args.skillIds : (args.skillId ? [args.skillId] : []);
-      return ids.length ? `스킬 로드(${ids.join(', ')})` : '스킬 로드';
+      const ids = Array.isArray(args.skillIds)
+        ? args.skillIds
+        : [args.skillId ?? args.skill ?? args.id ?? args.action].filter(Boolean);
+      if (ids.length) return `스킬 로드(${ids.join(', ')})`;
+      if (args.query) return `스킬 검색("${String(args.query).slice(0, 16)}")`;
+      return '스킬 목록 조회';
     }
     case 'search_workspace': {
       const q = String(args.query || '').slice(0, 20);
@@ -426,8 +430,69 @@ function collectKnownAssetNames(char, mod) {
   return set;
 }
 
+const READ_ITEM_KIND_ALIASES = {
+  char_field: 'char_field',
+  field: 'char_field',
+  authornote: 'authorNote',
+  author_note: 'authorNote',
+  chat_note: 'authorNote',
+  greeting: 'greeting',
+  greetings: 'greeting',
+  firstmessage: 'greeting',
+  lorebook: 'lorebook',
+  lorebooks: 'lorebook',
+  lore: 'lorebook',
+  lua: 'lua',
+  trigger: 'lua',
+  regex: 'regex',
+  regexes: 'regex',
+  persona: 'persona',
+  personas: 'persona',
+  module: 'module',
+  modules: 'module',
+  config: 'config',
+  memory: 'memory',
+  onboarding: 'onboarding',
+  group: 'group',
+  chat_folders: 'chat_folders',
+  theme: 'theme',
+  extension: 'extensions',
+  extensions: 'extensions',
+};
+
+const LIST_ITEM_KIND_ALIASES = {
+  lorebook: 'lorebook',
+  lorebooks: 'lorebook',
+  lore: 'lorebook',
+  regex: 'regex',
+  regexes: 'regex',
+  script: 'regex',
+  scripts: 'regex',
+  persona: 'persona',
+  personas: 'persona',
+  module: 'module',
+  modules: 'module',
+  chat: 'chat',
+  chats: 'chat',
+  character: 'character',
+  characters: 'character',
+  char: 'character',
+  chars: 'character',
+  extension: 'extensions',
+  extensions: 'extensions',
+};
+
 function optionalInt(val) {
   return Number.isInteger(val) && val >= 0 ? val : undefined;
+}
+
+function resolveCharIndexArg(args = {}) {
+  return optionalInt(args.charIndex) ?? optionalInt(args.targetCharIndex) ?? optionalInt(args.sourceCharIndex);
+}
+
+function resolveChatIndexArg(args = {}) {
+  const raw = args.chatIndex ?? args.targetChatIndex ?? args.sourceChatIndex;
+  return raw === 'current' ? undefined : optionalInt(raw);
 }
 
 function addPendingUnlock(pending, bucket, value) {
@@ -437,12 +502,13 @@ function addPendingUnlock(pending, bucket, value) {
 }
 
 async function runReadItem(adapter, args, pendingUnlocks) {
-  const kind = String(args.kind || '').trim();
+  const rawKind = String(args.kind || '').trim();
+  const kind = READ_ITEM_KIND_ALIASES[rawKind.toLowerCase()] || rawKind;
   const maxChars = Math.max(500, Math.min(adapter.maxContentChars || 60000, Number(args.maxChars) || 12000));
-  const charHint = { targetCharIndex: optionalInt(args.charIndex) };
+  const charHint = { targetCharIndex: resolveCharIndexArg(args) };
   const chatHint = {
-    targetCharIndex: optionalInt(args.charIndex),
-    targetChatIndex: args.chatIndex === 'current' ? undefined : optionalInt(args.chatIndex),
+    targetCharIndex: resolveCharIndexArg(args),
+    targetChatIndex: resolveChatIndexArg(args),
   };
 
   if (kind === 'char_field') {
@@ -813,18 +879,22 @@ async function runReadItem(adapter, args, pendingUnlocks) {
     };
   }
 
-  return { ok: false, error: `알 수 없는 read_item kind입니다: ${kind}` };
+  return {
+    ok: false,
+    error: `알 수 없는 read_item kind입니다: ${rawKind || '(비어 있음)'} (허용: char_field, authorNote, greeting, lorebook, lua, regex, persona, module, config, memory, onboarding, group, chat_folders, theme, extensions)`,
+  };
 }
 
 async function runListItems(adapter, args) {
-  const kind = String(args.kind || '').trim();
+  const rawKind = String(args.kind || '').trim();
+  const kind = LIST_ITEM_KIND_ALIASES[rawKind.toLowerCase()] || rawKind;
   const offset = Math.max(0, Number.isInteger(args.offset) ? args.offset : (Number(args.offset) || 0));
   const limit = Math.max(1, Math.min(80, Number.isInteger(args.limit) ? args.limit : (Number(args.limit) || 40)));
   const q = String(args.query ?? '').trim().toLowerCase();
-  const charHint = { targetCharIndex: optionalInt(args.charIndex) };
+  const charHint = { targetCharIndex: resolveCharIndexArg(args) };
   const chatHint = {
-    targetCharIndex: optionalInt(args.charIndex),
-    targetChatIndex: args.chatIndex === 'current' ? undefined : optionalInt(args.chatIndex),
+    targetCharIndex: resolveCharIndexArg(args),
+    targetChatIndex: resolveChatIndexArg(args),
   };
 
   const paginate = (items) => {
@@ -843,9 +913,11 @@ async function runListItems(adapter, args) {
   if (kind === 'lorebook') {
     const scope = args.scope || 'character';
     let list = [];
+    let ownerMeta = {};
     if (scope === 'chat') {
-      const { chat } = await adapter._resolveTargetChat(chatHint, null, '목록 조회');
+      const { chat, char, charIndex, chatIndex } = await adapter._resolveTargetChat(chatHint, null, '목록 조회');
       list = Array.isArray(chat.localLore) ? chat.localLore : [];
+      ownerMeta = { charIndex, charName: char?.name || '(무제)', chatIndex };
     } else if (scope === 'module') {
       const { modules, permissionDenied } = await adapter.readModules();
       if (permissionDenied) return { ok: false, error: 'DB 읽기 권한이 없습니다.' };
@@ -853,17 +925,20 @@ async function runListItems(adapter, args) {
       const mod = modules[modIdx];
       if (!mod) return { ok: false, error: `모듈 #${modIdx + 1}을(를) 찾을 수 없습니다.` };
       list = Array.isArray(mod.lorebook) ? mod.lorebook : [];
+      ownerMeta = { moduleIndex: modIdx, moduleName: mod.name || '(무제)' };
     } else {
-      const { char } = await adapter._resolveTargetCharacter(charHint, null, '목록 조회');
+      const { char, charIndex } = await adapter._resolveTargetCharacter(charHint, null, '목록 조회');
       list = Array.isArray(char.globalLore) ? char.globalLore : [];
+      ownerMeta = { charIndex, charName: char?.name || '(무제)' };
     }
     const { loreSummary, foldersSummary, orphanedLoreCount } = summarizeLoreList(list, list.length);
-    return { ok: true, kind, scope, orphanedLoreCount, foldersSummary, ...paginate(loreSummary) };
+    return { ok: true, kind, scope, ...ownerMeta, orphanedLoreCount, foldersSummary, ...paginate(loreSummary) };
   }
 
   if (kind === 'regex') {
     const scope = args.scope || 'character';
     let list = [];
+    let ownerMeta = {};
     if (scope === 'module') {
       const { modules, permissionDenied } = await adapter.readModules();
       if (permissionDenied) return { ok: false, error: 'DB 읽기 권한이 없습니다.' };
@@ -871,9 +946,11 @@ async function runListItems(adapter, args) {
       const mod = modules[modIdx];
       if (!mod) return { ok: false, error: `모듈 #${modIdx + 1}을(를) 찾을 수 없습니다.` };
       list = Array.isArray(mod.regex) ? mod.regex : [];
+      ownerMeta = { moduleIndex: modIdx, moduleName: mod.name || '(무제)' };
     } else {
-      const { char } = await adapter._resolveTargetCharacter(charHint, null, '목록 조회');
+      const { char, charIndex } = await adapter._resolveTargetCharacter(charHint, null, '목록 조회');
       list = Array.isArray(char.customscript) ? char.customscript : [];
+      ownerMeta = { charIndex, charName: char?.name || '(무제)' };
     }
     const rows = list.map((r, i) => ({
       regexIndex: i,
@@ -882,7 +959,7 @@ async function runListItems(adapter, args) {
       in: String(r?.in || '').slice(0, 80),
       flag: r?.flag || '',
     }));
-    return { ok: true, kind, scope, ...paginate(rows) };
+    return { ok: true, kind, scope, ...ownerMeta, ...paginate(rows) };
   }
 
   if (kind === 'persona') {
@@ -938,6 +1015,7 @@ async function runListItems(adapter, args) {
             ok: true,
             kind,
             usedQueryConversations: true,
+            charIndex,
             charName: char.name || '(무제)',
             ...paginate(rows),
             hasMore: Boolean(res?.nextCursor || (offset + limit < rows.length)),
@@ -954,7 +1032,7 @@ async function runListItems(adapter, args) {
       coldStored: c.coldStored,
       current: c.current,
     }));
-    return { ok: true, kind, charName: char.name || '(무제)', chatFolders: char.chatFolders || [], ...paginate(chats) };
+    return { ok: true, kind, charIndex, charName: char.name || '(무제)', chatFolders: char.chatFolders || [], ...paginate(chats) };
   }
 
   if (kind === 'character') {
@@ -963,18 +1041,21 @@ async function runListItems(adapter, args) {
     return { ok: true, kind, usedQueryCharacters: Boolean(res.usedQueryCharacters), ...paginate(res.catalog) };
   }
 
-  if (kind === 'extension' || kind === 'extensions') {
+  if (kind === 'extensions') {
     const rows = adapter.extensionRuntime ? adapter.extensionRuntime.list() : [];
     return { ok: true, kind: 'extensions', ...paginate(rows) };
   }
 
-  return { ok: false, error: `알 수 없는 list_items kind입니다: ${kind}` };
+  return {
+    ok: false,
+    error: `알 수 없는 list_items kind입니다: ${rawKind || '(비어 있음)'} (허용: lorebook, regex, persona, module, chat, character, extensions)`,
+  };
 }
 
 async function runReadChat(adapter, args) {
   const chatHint = {
-    targetCharIndex: optionalInt(args.charIndex),
-    targetChatIndex: args.chatIndex === 'current' ? undefined : optionalInt(args.chatIndex),
+    targetCharIndex: resolveCharIndexArg(args),
+    targetChatIndex: resolveChatIndexArg(args),
   };
   let resolved;
   try {
@@ -1098,8 +1179,8 @@ async function runReadChat(adapter, args) {
 
 async function runReadVars(adapter, args) {
   const chatHint = {
-    targetCharIndex: optionalInt(args.charIndex),
-    targetChatIndex: args.chatIndex === 'current' ? undefined : optionalInt(args.chatIndex),
+    targetCharIndex: resolveCharIndexArg(args),
+    targetChatIndex: resolveChatIndexArg(args),
   };
   const { chat, char, charIndex, chatIndex } = await adapter._resolveTargetChat(chatHint, null, '채팅 변수 조회');
   const summary = summarizeChatVariables(chat);
@@ -1588,10 +1669,10 @@ async function runSearchWorkspace(adapter, args = {}) {
   const maxMatches = Math.max(1, Math.min(40, Number(args.maxMatches) || 15));
   const contextChars = Math.max(80, Math.min(800, Number(args.contextChars) || 360));
   const maxPerItem = Math.max(1, Math.min(5, Number(args.maxPerItem) || 3));
-  const charHint = { targetCharIndex: optionalInt(args.charIndex) };
+  const charHint = { targetCharIndex: resolveCharIndexArg(args) };
   const chatHint = {
-    targetCharIndex: optionalInt(args.charIndex),
-    targetChatIndex: args.chatIndex === 'current' ? undefined : optionalInt(args.chatIndex),
+    targetCharIndex: resolveCharIndexArg(args),
+    targetChatIndex: resolveChatIndexArg(args),
   };
 
   let regex = null;
@@ -1885,10 +1966,12 @@ async function executeReadTool(adapter, call, toolContext = {}, unlocks = null, 
     let result;
     switch (tool) {
       case 'load_skill': {
-        const ids = Array.isArray(args.skillIds)
+        const rawIds = Array.isArray(args.skillIds)
           ? args.skillIds
-          : [args.skillId ?? args.skill ?? args.id].filter(Boolean);
-        result = loadSkillPack(ids, capabilities);
+          : Array.isArray(args.skills)
+            ? args.skills
+            : [args.skillId ?? args.skill ?? args.id ?? args.action ?? args.name].filter(Boolean);
+        result = loadSkillPack(rawIds, capabilities, { query: args.query ?? args.keyword ?? '' });
         for (const id of result.loaded || []) pendingUnlocks.skillIds.push(id);
         break;
       }

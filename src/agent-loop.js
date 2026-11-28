@@ -20,6 +20,10 @@ import {
   describeToolCall,
 } from './read-tools.js';
 import {
+  getOwnerSkillForAction,
+  loadSkillPack,
+} from './skills.js';
+import {
   runStagedPipeline,
 } from './staged-pipeline.js';
 
@@ -346,6 +350,33 @@ async function runAgentLoop({
         label: `${call + 1}/${budget} · 제안 오류 자동 수정 중...`,
       });
 
+      const missingSkillIds = [];
+      const seenActionSkills = new Set();
+      const collectActionSkill = (act) => {
+        const sid = getOwnerSkillForAction(act);
+        if (!sid || sid === 'core_text' || seenActionSkills.has(sid) || loadedSkillIds.has(sid)) return;
+        seenActionSkills.add(sid);
+        missingSkillIds.push(sid);
+      };
+      for (const item of failedProposals) {
+        if (item?.proposal?.action) collectActionSkill(item.proposal.action);
+      }
+      for (const err of parsed.errors || []) {
+        const raw = String(err?.raw || err?.error || '');
+        for (const m of raw.matchAll(/"action"\s*:\s*"([a-z_]+)"/g)) {
+          collectActionSkill(m[1]);
+        }
+      }
+      let skillHintText = '';
+      if (missingSkillIds.length > 0) {
+        const caps = adapter?.getCapabilities ? adapter.getCapabilities() : null;
+        const pack = loadSkillPack(missingSkillIds.slice(0, 2), caps);
+        if (pack.ok && pack.text) {
+          skillHintText = pack.text;
+          for (const sid of pack.loaded) loadedSkillIds.add(sid);
+        }
+      }
+
       currentMessages.push({ role: 'assistant', content: rawReply });
       currentMessages.push({
         role: 'user',
@@ -353,6 +384,7 @@ async function runAgentLoop({
           parseErrors: [...parsed.errors, ...(parsed.planErrors || []), ...parsed.toolErrors],
           failedProposals,
           currentSourceExcerpt: lastSourceExcerpt,
+          skillHintText,
           callNumber: call + 1,
           maxCalls: budget,
         }),

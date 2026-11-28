@@ -74,7 +74,7 @@ const SKILL_DEFS = [
     triggers: {
       screens: ['character'],
       targetKinds: ['char_field', 'chat_note', 'chat_message'],
-      keywords: /설명(?!\s*(?:해|만|을\s*해|좀|부탁))|디스크립션|desc|캐릭터\s*(?:소개|프로필\s*본문|정보)|시스템\s*프롬프트|시프|글로벌\s*노트|글노|깊이\s*프롬프트|뎁스\s*프롬프트|depth_?prompt|작가(?:의)?\s*노트|작노|author\s*note|성격|시나리오|예시\s*대화|백그라운드|배경\s*임베딩|번역가|제작자\s*(?:코멘트|노트)|닉네임|기본\s*변수|커스텀\s*토글/i,
+      keywords: /설명(?!\s*(?:해|만|을\s*해|좀|부탁))|디스크립션|추가\s*디스크립션|additionalText|desc|캐릭터\s*(?:소개|프로필\s*본문|정보|이름)|시스템\s*프롬프트|(?<![가-힣])시프(?:[을를은는이가의도만에]|에서|랑|이랑|(?![가-힣]))|글로벌\s*노트|(?<![가-힣])글노(?:[을를은는이가의도만에]|에서|랑|이랑|(?![가-힣]))|깊이\s*프롬프트|뎁스\s*프롬프트|depth_?prompt|후처리\s*지시|히스토리\s*이후|postHistory|작가(?:의)?\s*노트|작노|author\s*note|성격|시나리오|예시\s*대화|대사\s*예시|백그라운드|배경\s*임베딩|backgroundHTML|virtualscript|번역가|제작자\s*(?:코멘트|노트)|닉네임|기본\s*변수|커스텀\s*토글/i,
       contextKeys: [],
       freeTalkSchemaBaseline: true,
     },
@@ -99,7 +99,7 @@ const SKILL_DEFS = [
       screens: ['character'],
       targetKinds: ['char_alt_greeting'],
       fieldKeys: ['firstMessage'],
-      keywords: /첫\s*(?:메시지|메세지|인사|대사|장면)|추가\s*첫|인사말|오프닝|도입부|그리팅|greeting|alternate\s*greeting|first\s*message|fmIndex/i,
+      keywords: /첫\s*(?:메시지|메세지|인사|대사|장면)|추가\s*첫|인사말|퍼메|퍼스트\s*메시지|대체\s*인사|시작\s*(?:메시지|메세지|장면|대사)|오프닝|도입부|인트로|그리팅|알터\s*그리팅|alt\s*greeting|greeting|alternate\s*greeting|first\s*message|fmIndex/i,
       contextKeys: [],
       freeTalkSchemaBaseline: true,
     },
@@ -125,7 +125,7 @@ const SKILL_DEFS = [
     triggers: {
       screens: ['lorebook'],
       targetKinds: ['char_lorebook', 'chat_lorebook', 'module_lorebook'],
-      keywords: /로어북|로어\b|lorebook|lore\b|(?<!채팅\s*)폴더|(?<!chat)folder|세계관|설정집|백과|인물\s*정보|용어집|요약\s*(?:항목|로어)|이사|insertorder|@@depth|활성화\s*키|키워드\s*(?:등록|추가|수정)|상시\s*활성|alwaysActive/i,
+      keywords: /로어북|(?<![가-힣])로어|lorebook|lore\b|localLore|globalLore|(?<!채팅\s*)폴더|(?<!chat)folder|세계관|설정집|백과|인물\s*(?:정보|설정)|등장인물\s*(?:등록|추가|정리|설정)|npc\s*(?:등록|추가|설정)|용어집|요약\s*(?:항목|로어)|이사|insertorder|@@depth|활성화?\s*키|키워드\s*(?:등록|추가|수정|삭제|제거|변경|확인)|상시\s*활성|alwaysActive/i,
       contextKeys: [],
       freeTalkSchemaBaseline: true,
     },
@@ -152,7 +152,7 @@ const SKILL_DEFS = [
     triggers: {
       screens: ['scripts'],
       targetKinds: ['char_lua', 'module_lua', 'char_regex', 'module_regex'],
-      keywords: /lua|루아|트리거|trigger|정규식|정규\s*표현식|regex|customscript|상태창|스탯창|hud|배지|editdisplay|editoutput|editinput|editprocess|cbs|\{\{|스크립트|script|꾸며|표시\s*형식|치환|턴\s*수|응답마다|출력마다|html|css|버튼\s*클릭|onOutput|onInput|listenEdit/i,
+      keywords: /lua|루아|트리거|trigger|정규\s*식|정규\s*표현식|regex|customscript|상태창|스탯창|hud|배지|editdisplay|editoutput|editinput|editprocess|인풋\s*수정|아웃풋\s*수정|디스플레이\s*수정|출력\s*(?:꾸미|치환|필터|가공|숨기)|입력\s*(?:치환|필터|가공)|태그\s*숨기|사고\s*과정\s*숨기|cbs|\{\{|스크립트|script|꾸며|표시\s*형식|치환|턴\s*수|응답마다|출력마다|html|css|버튼\s*클릭|onOutput|onInput|listenEdit/i,
       contextKeys: [],
       freeTalkSchemaBaseline: true,
     },
@@ -176,7 +176,7 @@ const SKILL_DEFS = [
     triggers: {
       screens: [],
       targetKinds: [],
-      keywords: /모듈\s*(?:하나|통째|통으로|신규|새로|생성|만들|추가|제작|짜|패키지|구축)|새\s*모듈|신규\s*모듈|\.risum|create_module/i,
+      keywords: /모듈\s*(?:하나|통째|통으로|신규|새로|생성|만들|추가|제작|짜|패키지|구축)|모듈로\s*(?:만들|묶|패키징)|새\s*모듈|신규\s*모듈|확장\s*팩|패키지\s*모듈|\.?risum\b|create_module/i,
       contextKeys: [],
       freeTalkSchemaBaseline: false,
     },
@@ -200,7 +200,7 @@ const SKILL_DEFS = [
     triggers: {
       screens: ['persona'],
       targetKinds: ['persona'],
-      keywords: /페르소나|페르\b|persona|바인딩|bindedPersona|유저\s*(?:설정|프로필|정보|소개|캐릭터|이름)|(?:내|플레이어|주인공)\s*(?:캐릭터\s*)?(?:프로필|설정)|화자\s*설정/i,
+      keywords: /페르소나|(?<![가-힣])페르(?:[을를은는이가의도만에]|에서|랑|이랑|(?![가-힣]))|persona|바인딩|bindedPersona|유저\s*(?:설정|프로필|정보|소개|캐릭터|이름)|(?:내|플레이어|주인공)\s*(?:캐릭터\s*)?(?:프로필|설정|정보|소개|이름)|화자\s*설정/i,
       contextKeys: [],
       freeTalkSchemaBaseline: true,
     },
@@ -224,7 +224,7 @@ const SKILL_DEFS = [
     triggers: {
       screens: ['settings'],
       targetKinds: ['config'],
-      keywords: /전역\s*설정|리스\s*설정|설정(?:값|을|이|은|\s*진단|\s*변경|\s*수정|\s*바꿔|\s*올려|\s*내려|\s*알려)|컨피그|config|temperature|온도|창의성|maxResponse|최대\s*응답|응답\s*길이|maxContext|최대\s*컨텍스트|컨텍스트\s*(?:크기|토큰)|페널티|penalty|customCSS|guiHTML|테마|theme|줄간격|lineHeight|전역\s*모듈\s*활성|모듈\s*활성|enabledModules|보조\s*모델|seperateModels/i,
+      keywords: /전역\s*설정|리스\s*설정|설정(?:값|을|이|은|\s*진단|\s*변경|\s*수정|\s*바꿔|\s*올려|\s*내려|\s*알려)|컨피그|config|temperature|템퍼러처|온도|창의성|maxResponse|최대\s*(?:응답|토큰)|(?:응답|출력)\s*길이|maxContext|최대\s*컨텍스트|컨텍스트\s*(?:크기|토큰)|페널티|penalty|customCSS|커스텀\s*css|guiHTML|채팅\s*html|테마|theme|줄\s*간격|lineHeight|전역\s*모듈|모듈\s*(?:활성|켜|끄|비활성)|enabledModules|보조\s*모델|seperateModels/i,
       contextKeys: ['attachedFetchLog'],
       freeTalkSchemaBaseline: true,
     },
@@ -246,7 +246,7 @@ const SKILL_DEFS = [
     triggers: {
       screens: [],
       targetKinds: [],
-      keywords: /로어북\s*(?:설정|예산|토큰|깊이)|토큰\s*예산|tokenBudget|스캔\s*깊이|scanDepth|재귀\s*스캔|recursiveScanning|전체\s*단어|fullWordMatching|바이어스|로짓|bias|금지어\s*감점|(?:캐릭터|기존|봇)\s*태그|태그\s*(?:추가|삭제|제거|수정|편집|목록|정리|에|에서)|\btags\b/i,
+      keywords: /로어(?:북)?\s*(?:설정|예산|토큰|깊이)|loreSettings|토큰\s*예산|tokenBudget|스캔\s*(?:깊이|범위)|scanDepth|재귀\s*스캔|recursiveScanning|전체\s*단어|fullWordMatching|바이어스|로짓|bias|단어\s*(?:억제|감점|가중치|금지)|금지어\s*(?:감점|등록|추가|설정|제거)|(?:캐릭터|기존|봇)\s*태그|태그\s*(?:추가|삭제|제거|수정|편집|목록|정리|에|에서)|\btags\b/i,
       contextKeys: ['charSettings'],
       freeTalkSchemaBaseline: false,
     },
@@ -265,12 +265,13 @@ const SKILL_DEFS = [
     summary: '새 캐릭터 카드 생성(create_character) 및 다른 캐릭터의 로어북·정규식·Lua 포팅(port_from_character)',
     requiresCapabilities: [],
     actions: ['create_character', 'port_from_character'],
-    tools: ['list_items', 'read_item', 'inspect_assets'],
+    tools: ['list_items', 'search_workspace', 'read_item', 'inspect_assets'],
     maxChars: 3800,
     triggers: {
       screens: [],
       targetKinds: [],
-      keywords: /새\s*캐릭터|신규\s*캐릭터|새\s*봇|신규\s*봇|캐릭터\s*(?:카드\s*)?(?:새로\s*)?(?:생성|만들|추가|제작|포팅|복사|이식)|봇\s*(?:카드\s*)?(?:새로\s*)?(?:생성|만들|제작)|다른\s*캐릭터|타\s*캐릭터|교차\s*포팅|포팅|이식해|create_character|port_from_character/i,
+      keywords: /새\s*캐릭터|신규\s*캐릭터|새\s*봇|신규\s*봇|캐릭터\s*(?:카드\s*)?(?:새로\s*)?(?:생성|만들|추가|제작|포팅|복사|이식)|봇\s*(?:카드\s*)?(?:새로\s*)?(?:생성|만들|제작)|다른\s*(?:캐릭터|봇)|타\s*(?:캐릭터|봇)|교차\s*포팅|포팅|이식해|create_character|port_from_character/i,
+      match: (text) => wantsCharacterCatalog(text),
       contextKeys: ['characterCatalog'],
       freeTalkSchemaBaseline: false,
     },
@@ -278,6 +279,7 @@ const SKILL_DEFS = [
     rules: [
       '새 캐릭터 카드를 처음부터 만들 때는 `create_character`를 사용하세요(현재 캐릭터를 덮어쓰지 않고 새 캐릭터로 추가됩니다).',
       '다른 캐릭터의 로어북·정규식·Lua를 현재 캐릭터로 옮길 때는 `port_from_character`를 사용하세요. 어느 캐릭터에서 가져올지 불분명하면 [다른 캐릭터 목록]을 보여 주고 먼저 물어보세요.',
+      '다른 캐릭터 목록이나 내부 로어북·정규식·Lua를 직접 확인할 때는 `list_items(kind:"character",query)`로 `charIndex`를 찾은 뒤 `list_items(kind:"lorebook",charIndex)`·`search_workspace(query,charIndex)`·`read_item(...,charIndex)`로 조회할 수 있습니다.',
     ],
     schemas: [
       '- 새 캐릭터 카드 생성: {"action":"create_character","title":"설명","name":"캐릭터명","desc":"설명","firstMessage":"첫 메시지","alternateGreetings":[],"personality":"","scenario":"","systemPrompt":"","creatorNotes":"","defaultVariables":"","tags":["태그"],"loreSettings":{"tokenBudget":1200,"scanDepth":4,"recursiveScanning":true},"bias":[],"globalLore":[],"customscript":[],"luaCode":""}',
@@ -296,7 +298,7 @@ const SKILL_DEFS = [
     triggers: {
       screens: [],
       targetKinds: [],
-      keywords: /채팅\s*변수|변수|scriptstate|호감도|affection|\bhp\b|\bmp\b|체력|마나|골드|소지금|스탯|상태값|플래그|카운터|\bvar\b|getvar|setvar|초기화/i,
+      keywords: /채팅\s*변수|상태\s*변수|변수|scriptstate|호감도|신뢰도|친밀도|affection|\bhp\b|\bmp\b|체력|마나|골드|소지금|경험치|진행도|스탯|상태값|플래그|카운터|수치\s*(?:바꿔|변경|수정|올려|내려|조정|확인)|\bvar\b|getvar|setvar|초기화/i,
       contextKeys: [],
       freeTalkSchemaBaseline: true,
     },
@@ -320,7 +322,7 @@ const SKILL_DEFS = [
     triggers: {
       screens: [],
       targetKinds: [],
-      keywords: /이사|옮겨|가져와|이관|참조\s*채팅|\d+\s*번\s*채팅|채팅\s*#?\d+|이전\s*채팅|다른\s*채팅|콜드\s*스토리지|새\s*채팅|신규\s*채팅|채팅\s*(?:생성|만들|추가|분리|새로)|세션\s*(?:분리|새로|이사)|다음\s*회차|2부\s*채팅|create_chat|import_chat/i,
+      keywords: /이사|옮겨|가져와|이관|참조\s*채팅|\d+\s*번\s*채팅|채팅\s*#?\d+|이전\s*채팅|다른\s*채팅|콜드\s*스토리지|새\s*(?:채팅|대화|방)|신규\s*채팅|채팅(?:방)?\s*(?:생성|만들|추가|분리|새로|복사)|대화\s*(?:이사|분리|이어서)|세션\s*(?:분리|새로|이사)|회차\s*(?:분리|넘기|이사)|다음\s*회차|2부\s*채팅|백업\s*채팅|create_chat|import_chat/i,
       contextKeys: ['chatList', 'referenceChat'],
       freeTalkSchemaBaseline: false,
     },
@@ -347,7 +349,7 @@ const SKILL_DEFS = [
     triggers: {
       screens: [],
       targetKinds: [],
-      keywords: /요청\s*로그|api\s*로그|fetch\s*log|에러\s*로그|오류\s*로그|(?:400|401|403|429|500|502|503)\s*(?:에러|오류|error)|http\s*(?:에러|오류|상태)|응답\s*로그|전송\s*실패\s*원인/i,
+      keywords: /요청\s*로그|api\s*(?:로그|에러|오류|실패)|요청\s*(?:에러|오류|실패)|호출\s*(?:에러|오류|실패)|fetch\s*log|에러\s*로그|오류\s*로그|(?:400|401|403|429|500|502|503)\s*(?:에러|오류|error)?|http\s*(?:에러|오류|상태)|토큰\s*초과|레이트\s*리밋|rate\s*limit|응답\s*(?:로그|실패)|전송\s*실패\s*원인/i,
       currentTurnOnly: true,
       contextKeys: ['attachedFetchLog'],
       freeTalkSchemaBaseline: false,
@@ -368,7 +370,7 @@ const SKILL_DEFS = [
     triggers: {
       screens: [],
       targetKinds: [],
-      keywords: /색상\s*스킴|컬러\s*스킴|colorScheme|텍스트\s*테마|글자\s*테마|textTheme|다크\s*테마|라이트\s*테마|테마\s*(?:변경|바꿔|전환|커스텀|적용)|채팅\s*(?:hud|패널|상태창\s*패널)|hud\s*패널|setChatPanel|set_chat_panel|update_theme/i,
+      keywords: /색상\s*스킴|컬러\s*스킴|colorScheme|텍스트\s*테마|글자\s*테마|textTheme|다크\s*(?:테마|모드)|라이트\s*(?:테마|모드)|배경색|글자색|폰트\s*색|색상\s*(?:변경|바꿔|조정|커스텀)|테마\s*(?:변경|바꿔|전환|커스텀|적용)|채팅\s*(?:hud|패널|상태창\s*패널)|(?:상단|하단|오버레이|상태)\s*(?:hud|패널)|hud\s*패널|setChatPanel|set_chat_panel|update_theme/i,
       contextKeys: [],
       freeTalkSchemaBaseline: false,
     },
@@ -393,7 +395,7 @@ const SKILL_DEFS = [
     triggers: {
       screens: [],
       targetKinds: [],
-      keywords: /additionalAssets|emotionImages|에셋.{0,24}(?:등록|추가|저장|연결|바인딩|이름|오타|수리|교체|변경)|인레이|inlay|saveAsset|createInlay|register_asset|캐릭터\s*(?:순서|정렬)\s*(?:복구|정리|수리)|checkCharOrder|워크스페이스\s*(?:수리|복구|정비|건강검진)|고아\s*로어북\s*(?:수리|복구)|chat\.id\s*(?:복구|수리|부여)|repair_workspace/i,
+      keywords: /additionalAssets|emotionImages|에셋.{0,24}(?:등록|추가|저장|연결|바인딩|이름|오타|수리|교체|변경|목록|확인|검사|누락|깨진)|이미지\s*(?:에셋|누락|깨진|등록|연결)|표정\s*이미지|svg\s*(?:등록|배지|아이콘|에셋)|인레이|inlay|saveAsset|createInlay|register_asset|캐릭터\s*(?:순서|정렬)\s*(?:복구|정리|수리)|checkCharOrder|워크스페이스\s*(?:수리|복구|정비|건강\s*검진)|건강\s*검진|고아\s*(?:로어북|로어|폴더)|깨진\s*(?:정규식|폴더|에셋|링크)|chat\.id\s*(?:복구|수리|부여)|repair_workspace/i,
       contextKeys: [],
       freeTalkSchemaBaseline: false,
     },
@@ -418,7 +420,7 @@ const SKILL_DEFS = [
     triggers: {
       screens: [],
       targetKinds: [],
-      keywords: /메시지.{0,20}(?:삭제|지워|비활성|숨김|북마크|편집|수정)|말풍선.{0,20}(?:삭제|비활성|북마크|편집|수정)|북마크|manage_chat_messages|hypa|하이파|supa|수파|메모리.{0,12}(?:요약|수정|편집|중요|추가|삭제|확인)|요약\s*메모리|update_memory|채팅\s*폴더|chatFolders|organize_chat_folders/i,
+      keywords: /메시지.{0,20}(?:삭제|지워|비활성|숨김|숨기|북마크|편집|수정)|말풍선.{0,20}(?:삭제|비활성|숨기|북마크|편집|수정)|대화\s*(?:삭제|지워|숨김|비활성|북마크)|북마크|고정\s*메시지|manage_chat_messages|hypa|하이파|supa|수파|메모리.{0,12}(?:요약|수정|편집|중요|추가|삭제|확인|청크)|요약\s*메모리|장기\s*기억|기억\s*요약|update_memory|채팅\s*(?:폴더|분류)|chatFolders|organize_chat_folders/i,
       contextKeys: [],
       freeTalkSchemaBaseline: false,
     },
@@ -444,7 +446,7 @@ const SKILL_DEFS = [
     triggers: {
       screens: [],
       targetKinds: [],
-      keywords: /그룹\s*챗|그룹\s*채팅|그룹\s*(?:멤버|설정|발언|비율|순서|오토)|발언\s*비율|talkativeness|orderByOrder|update_group_chat|온보딩|onboarding|시작\s*설문|시작\s*폼|초기\s*설정\s*폼|update_onboarding/i,
+      keywords: /그룹\s*챗|그룹\s*채팅|단체\s*(?:채팅|방)|다인\s*챗|합방|그룹\s*(?:멤버|설정|발언|비율|순서|오토)|발언\s*(?:비율|순서|확률)|끼어들기|오토\s*모드|talkativeness|orderByOrder|update_group_chat|온보딩|onboarding|시작\s*(?:설문|폼|질문|입력\s*폼|설정\s*창)|초기\s*(?:설정\s*폼|질문)|update_onboarding/i,
       contextKeys: [],
       freeTalkSchemaBaseline: false,
     },
@@ -469,7 +471,7 @@ const SKILL_DEFS = [
     triggers: {
       screens: [],
       targetKinds: [],
-      keywords: /상주\s*확장|확장\s*규칙|전역\s*스크립트\s*핸들러|script_handler|전역\s*치환|replacer|응답\s*후\s*감시|chat_listener|요청\s*본문\s*패치|인터셉터|body_intercepter|mcp\s*(?:서버|도구|노출)|mcp_server|tts\s*(?:전처리|후처리|정리|필터)|tts_processor|플러그인\s*채널|plugin_channel|manage_extensions/i,
+      keywords: /상주\s*(?:확장|규칙)|확장\s*규칙|전역\s*(?:스크립트\s*핸들러|정규식)|script_handler|전역\s*치환|replacer|응답\s*(?:후\s*)?감시|자동\s*감시|chat_listener|요청\s*(?:본문\s*패치|가로채|변조)|인터셉터|body_intercepter|mcp\s*(?:서버|도구|노출)|mcp_server|tts\s*(?:전처리|후처리|정리|필터|규칙)|음성\s*(?:전처리|후처리|필터)|tts_processor|플러그인\s*채널|plugin_channel|manage_extensions/i,
       contextKeys: [],
       freeTalkSchemaBaseline: false,
     },
@@ -494,7 +496,7 @@ const SKILL_DEFS = [
     triggers: {
       screens: [],
       targetKinds: [],
-      keywords: /바드\s*위키|bard\s*wiki|bardWiki|서사\s*위키|위키\s*(?:문서|등급|컨텍스트|휴지통)|manage_bard_wiki/i,
+      keywords: /바드\s*위키|리스바드\s*위키|risubard\s*위키|bard\s*wiki|bardWiki|서사\s*위키|위키\s*(?:문서|등급|컨텍스트|휴지통|등록|추가|저장|수정|조회|검색|정리|삭제)|manage_bard_wiki/i,
       contextKeys: [],
       freeTalkSchemaBaseline: false,
     },
@@ -518,7 +520,7 @@ const SKILL_DEFS = [
     triggers: {
       screens: [],
       targetKinds: [],
-      keywords: /리스네스트|risunest|네이티브\s*패치|대화\s*정밀\s*패치|risunestPatch|patch_risunest_conversation|호스트\s*툴/i,
+      keywords: /리스\s*네스트|risunest|네이티브\s*패치|원자\s*패치|대화\s*정밀\s*패치|risunestPatch|patch_risunest_conversation|호스트\s*(?:툴|도구)/i,
       contextKeys: [],
       freeTalkSchemaBaseline: false,
     },
@@ -641,9 +643,39 @@ function collectRoutingText(userInput = '', history = [], maxRecentUserTurns = 2
   return parts.join('\n');
 }
 
+const EXPLICIT_CHAR_CATALOG_RE =
+  /포팅|다른\s*(?:캐릭터|봇)|타\s*(?:캐릭터|봇)|(?:캐릭터|봇)\s*목록|교차\s*포팅|port_from_character/i;
+const NAMED_CHAR_QUOTED_RE = /(?:이?라는|이?란)\s*(?:캐릭터|봇)/;
+const NAMED_CHAR_SOURCE_RE =
+  /([가-힣A-Za-z0-9_"'`」』]+)\s*(?:캐릭터|봇)(?:에서|에\s*있는|에\s*들어|의\s*(?:로어북|정규식|루아|lua|스크립트|설정|카드|정보)|쪽)/gi;
+const CURRENT_CHAR_PREFIX_RE =
+  /^(?:이|현재|지금|해당|열린|열려있는|있는|선택된|켜진|활성|내|우리|새|신규|기존|본|원래|메인|같은|이쪽|여기|그룹|그룹챗|플레이어|유저|사용자|첫|두|세|네|각|모든|전체|위|아래)$/;
+const NON_CHAR_RESOURCE_PREFIX_RE =
+  /^(?:로어북|정규식|에셋|변수|채팅|모듈|페르소나|프롬프트|설정|스크립트|태그|메시지|대화|내용|항목|필드|트리거|코드|노트|요약)(?:을|를|은|는|이|가|도|만|에서|으로|로)?$/;
+
 /**
- * Extracts skill IDs for any proposals emitted in the immediately preceding assistant message
- * so follow-up tweaks ("조금만 바꿔줘") keep that action's schema & knowledge active.
+ * Returns true when user text references another character/bot or asks for cross-character
+ * lookup/porting, while avoiding false positives on current-character editing phrases.
+ */
+function wantsCharacterCatalog(text = '') {
+  const s = String(text ?? '');
+  if (!s.trim()) return false;
+  if (EXPLICIT_CHAR_CATALOG_RE.test(s)) return true;
+  if (NAMED_CHAR_QUOTED_RE.test(s)) return true;
+  for (const m of s.matchAll(NAMED_CHAR_SOURCE_RE)) {
+    const rawPrefix = String(m[1] || '').replace(/^["'`「『]+|["'`」』]+$/g, '');
+    if (!rawPrefix) continue;
+    if (CURRENT_CHAR_PREFIX_RE.test(rawPrefix)) continue;
+    if (NON_CHAR_RESOURCE_PREFIX_RE.test(rawPrefix)) continue;
+    if (rawPrefix.length >= 3 && /(?:을|를|에서|으로|에게|한테|부터|까지)$/.test(rawPrefix)) continue;
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Extracts skill IDs for any proposals emitted or L2 skills dynamically loaded in the immediately
+ * preceding assistant message so follow-up turns keep those skills and contexts active.
  */
 function extractRecentAssistantSkillIds(history = []) {
   const ids = new Set();
@@ -651,6 +683,13 @@ function extractRecentAssistantSkillIds(history = []) {
   for (let i = history.length - 1; i >= 0; i--) {
     const msg = history[i];
     if (!msg || msg.role !== 'assistant') continue;
+    if (Array.isArray(msg.loopMeta?.loadedSkillIds)) {
+      for (const sid of msg.loopMeta.loadedSkillIds) {
+        if (sid && SKILL_BY_ID.has(sid) && sid !== 'core_text' && sid !== 'chat_input') {
+          ids.add(sid);
+        }
+      }
+    }
     if (Array.isArray(msg.proposals)) {
       for (const item of msg.proposals) {
         const act = item?.proposal?.action || item?.action;
@@ -693,36 +732,135 @@ function getSkillCatalog(capabilities = null, excludeIds = []) {
     }));
 }
 
+const SKILL_CATALOG_QUERY_RE = /^(?:list|catalog|all|\*|목록|전체|스킬\s*목록)$/i;
+
+/**
+ * Searches supported built-in skills by natural-language Korean/English keyword, label, action name,
+ * or tool name so models can discover skills even when they don't know exact internal IDs.
+ */
+function findMatchingSkills(query = '', capabilities = null, maxResults = 4) {
+  const q = String(query ?? '').trim();
+  if (!q) return [];
+  const lower = q.toLowerCase();
+  const tokens = lower.split(/[\s,./·|]+/).map(t => t.trim()).filter(t => t.length >= 2);
+  const scored = [];
+
+  for (const def of SKILL_DEFS) {
+    if (!isSkillSupported(def, capabilities)) continue;
+    let score = 0;
+    const idLower = def.id.toLowerCase();
+    const labelLower = String(def.label || '').toLowerCase();
+    const summaryLower = String(def.summary || '').toLowerCase();
+    const actionsLower = (def.actions || []).map(a => a.toLowerCase());
+    const toolsLower = (def.tools || []).map(t => t.toLowerCase());
+
+    if (idLower === lower || labelLower === lower) score += 20;
+    else if (labelLower.includes(lower) || idLower.includes(lower)) score += 10;
+    if (summaryLower.includes(lower)) score += 7;
+    if (actionsLower.some(a => a === lower || a.includes(lower))) score += 10;
+    if (toolsLower.some(t => t === lower || t.includes(lower))) score += 6;
+    if (def.triggers?.keywords?.test(q)) score += 9;
+    if (typeof def.triggers?.match === 'function' && def.triggers.match(q)) score += 9;
+
+    if (tokens.length > 0) {
+      const hay = `${idLower} ${labelLower} ${summaryLower} ${actionsLower.join(' ')} ${toolsLower.join(' ')}`;
+      for (const tok of tokens) {
+        if (hay.includes(tok)) score += 3;
+        else if (def.triggers?.keywords?.test(tok)) score += 3;
+      }
+    }
+
+    if (score > 0) scored.push({ def, score });
+  }
+
+  scored.sort((a, b) => b.score - a.score);
+  return scored.slice(0, Math.max(1, maxResults)).map(x => x.def);
+}
+
+function resolveDirectSkillId(raw) {
+  const trimmed = String(raw ?? '').trim();
+  if (!trimmed) return null;
+  if (SKILL_BY_ID.has(trimmed)) return trimmed;
+  const snake = trimmed.toLowerCase().replace(/[\s-]+/g, '_');
+  if (SKILL_BY_ID.has(snake)) return snake;
+  if (SKILL_ID_BY_ACTION.has(trimmed)) return SKILL_ID_BY_ACTION.get(trimmed);
+  if (SKILL_ID_BY_ACTION.has(snake)) return SKILL_ID_BY_ACTION.get(snake);
+  return null;
+}
+
 /**
  * L2 dynamic skill loader used by the Read-Only `load_skill` tool inside the 3-call loop.
+ * Supports exact skill IDs, action names, Korean/English keyword/query discovery, and catalog listing.
  */
-function loadSkillPack(skillIds = [], capabilities = null) {
-  const requested = Array.isArray(skillIds) ? skillIds : [skillIds];
+function loadSkillPack(skillIds = [], capabilities = null, options = {}) {
+  const requested = Array.isArray(skillIds) ? skillIds : (skillIds ? [skillIds] : []);
+  const query = String(options?.query ?? '').trim();
   const loaded = [];
   const unknown = [];
   const unsupported = [];
   const knowledgeKeys = new Set();
   const rules = [];
   const schemas = [];
+  const tools = new Set();
 
-  for (const rawId of requested) {
-    const id = String(rawId ?? '').trim();
-    if (!id) continue;
-    const def = SKILL_BY_ID.get(id);
-    if (!def) {
-      unknown.push(id);
-      continue;
-    }
+  const addSkill = (def) => {
+    if (!def) return;
     if (!isSkillSupported(def, capabilities)) {
-      unsupported.push(id);
-      continue;
+      if (!unsupported.includes(def.id)) unsupported.push(def.id);
+      return;
     }
-    if (!loaded.includes(id)) {
-      loaded.push(id);
+    if (!loaded.includes(def.id)) {
+      loaded.push(def.id);
       for (const k of def.knowledge || []) knowledgeKeys.add(k);
       for (const r of def.rules || []) rules.push(r);
       for (const s of def.schemas || []) schemas.push(s);
+      for (const t of def.tools || []) tools.add(t);
     }
+  };
+
+  let wantsCatalog = false;
+  for (const rawId of requested) {
+    const id = String(rawId ?? '').trim();
+    if (!id) continue;
+    if (SKILL_CATALOG_QUERY_RE.test(id)) {
+      wantsCatalog = true;
+      continue;
+    }
+    const directId = resolveDirectSkillId(id);
+    if (directId) {
+      addSkill(SKILL_BY_ID.get(directId));
+      continue;
+    }
+    // Try fuzzy keyword/label discovery across supported skills
+    const matches = findMatchingSkills(id, capabilities, 3);
+    if (matches.length > 0) {
+      for (const def of matches) addSkill(def);
+    } else {
+      unknown.push(id);
+    }
+  }
+
+  if (query) {
+    if (SKILL_CATALOG_QUERY_RE.test(query)) {
+      wantsCatalog = true;
+    } else {
+      const directId = resolveDirectSkillId(query);
+      if (directId) {
+        addSkill(SKILL_BY_ID.get(directId));
+      } else {
+        const matches = findMatchingSkills(query, capabilities, 4);
+        if (matches.length > 0) {
+          for (const def of matches) addSkill(def);
+        } else {
+          unknown.push(query);
+        }
+      }
+    }
+  }
+
+  // Empty load_skill({}) acts as a read-only catalog discovery call
+  if (requested.filter(v => String(v ?? '').trim()).length === 0 && !query) {
+    wantsCatalog = true;
   }
 
   const sections = [];
@@ -730,12 +868,28 @@ function loadSkillPack(skillIds = [], capabilities = null) {
   if (knowledgeText) sections.push(`[불러온 내장 스킬 지식]\n${knowledgeText}`);
   if (rules.length > 0) sections.push(`[규칙]\n${rules.map((r, i) => `${i + 1}. ${r}`).join('\n')}`);
   if (schemas.length > 0) sections.push(`[지원 action 스키마]\n${schemas.join('\n')}`);
+  if (tools.size > 0) sections.push(`[권장 읽기 도구]\n${[...tools].join(', ')}`);
+
+  let availableSkills;
+  if (wantsCatalog || (loaded.length === 0 && unknown.length > 0)) {
+    availableSkills = getSkillCatalog(capabilities, []);
+    if (wantsCatalog) {
+      const catalogLines = availableSkills.map(s =>
+        `- ${s.id} (${s.label}): ${s.summary}` +
+        (s.actions.length ? ` [actions: ${s.actions.join(', ')}]` : '') +
+        (s.tools.length ? ` [tools: ${s.tools.join(', ')}]` : '')
+      );
+      sections.push(`[사용 가능한 내장 스킬 목록]\n${catalogLines.join('\n')}`);
+    }
+  }
 
   return {
-    ok: loaded.length > 0,
+    ok: loaded.length > 0 || wantsCatalog,
     loaded,
     unknown,
     unsupported,
+    ...(wantsCatalog ? { catalogListed: true } : {}),
+    ...(availableSkills ? { availableSkills } : {}),
     text: sections.join('\n\n'),
   };
 }
@@ -814,6 +968,12 @@ function selectSkills({
     if (tr.keywords) {
       const kwText = tr.currentTurnOnly ? String(userInput ?? '') : text;
       if (tr.keywords.test(kwText)) {
+        active.add(def.id);
+      }
+    }
+    if (typeof tr.match === 'function') {
+      const matchText = tr.currentTurnOnly ? String(userInput ?? '') : text;
+      if (tr.match(matchText)) {
         active.add(def.id);
       }
     }
@@ -945,8 +1105,11 @@ export {
   validateSkillRegistry,
   isSkillSupported,
   getSkillCatalog,
+  findMatchingSkills,
   loadSkillPack,
   collectRoutingText,
+  extractRecentAssistantSkillIds,
+  wantsCharacterCatalog,
   selectSkills,
   buildSkillPromptSections,
 };

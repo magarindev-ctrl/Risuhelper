@@ -37,7 +37,7 @@ import { planGreetingContext, wantsGreetingText } from './greetings.js';
 import { planFieldContext, mentionedFields, AUTHOR_NOTE_FIELD } from './fields.js';
 import { summarizeChatList, mentionedChatIndex, isColdStoredChat } from './chat-transfer.js';
 import { summarizeChatVariables, previewRegexApplication, hasCbsSyntax } from './runtime-tools.js';
-import { collectRoutingText } from './skills.js';
+import { collectRoutingText, wantsCharacterCatalog, extractRecentAssistantSkillIds } from './skills.js';
 import {
   createEmptyStore,
   normalizeConversationStore,
@@ -1384,11 +1384,20 @@ class RisuHelperApp {
     }
     // First messages & character fields: full text when the request mentions them (or on the
     // chat/greeting screen for first messages), otherwise short previews when char summary is on.
+    const recentSkillIds = extractRecentAssistantSkillIds(historyMessages);
     const wantGreetingText = wantsGreetingText(ctx, userInput);
     const wantFields = mentionedFields(userInput);
-    const wantChatVars = /변수|scriptstate|호감도|affection|\bhp\b|\bmp\b|스탯|상태값|플래그|카운터|\bvar\b|getvar|setvar|초기화/i.test(routingText);
-    const wantCharRegex = ctx.screen === 'scripts' || ctx.targetKind === 'char_regex' || /정규식|regex|customscript|상태창|hud|스크립트|꾸며|치환/i.test(routingText);
-    const wantCharSettings = /로어북\s*(?:설정|예산|토큰|깊이)|토큰\s*예산|tokenBudget|스캔\s*깊이|scanDepth|재귀\s*스캔|recursiveScanning|전체\s*단어|fullWordMatching|바이어스|로짓|bias|태그|tags/i.test(routingText);
+    const wantChatVars =
+      recentSkillIds.has('chat_vars') ||
+      /변수|scriptstate|호감도|신뢰도|친밀도|진행도|affection|\bhp\b|\bmp\b|스탯|상태값|플래그|카운터|\bvar\b|getvar|setvar|초기화/i.test(routingText);
+    const wantCharRegex =
+      ctx.screen === 'scripts' ||
+      ctx.targetKind === 'char_regex' ||
+      recentSkillIds.has('scripts') ||
+      /정규\s*식|regex|customscript|상태창|hud|스크립트|꾸며|치환/i.test(routingText);
+    const wantCharSettings =
+      recentSkillIds.has('char_settings') ||
+      /로어(?:북)?\s*(?:설정|예산|토큰|깊이)|loreSettings|토큰\s*예산|tokenBudget|스캔\s*(?:깊이|범위)|scanDepth|재귀\s*스캔|recursiveScanning|전체\s*단어|fullWordMatching|바이어스|로짓|bias|단어\s*(?:억제|감점|가중치|금지)|금지어|태그|tags/i.test(routingText);
     if (this.settings.includeCharSummary || this.settings.includeLoreSummary || wantGreetingText || wantFields.length > 0 || wantChatVars || wantCharRegex || wantCharSettings) {
       try {
         const { char } = await this.adapter.readActiveCharacter();
@@ -1631,7 +1640,8 @@ class RisuHelperApp {
     const wantPersonaSummary =
       ctx.targetKind === 'persona' ||
       ctx.screen === 'persona' ||
-      /페르소나|persona|바인딩|bindedPersona|유저\s*(?:설정|프로필|정보|소개|캐릭터)|(?:내|플레이어|주인공)\s*(?:캐릭터\s*)?프로필/i.test(routingText);
+      recentSkillIds.has('persona') ||
+      /페르소나|(?<![가-힣])페르(?:[을를은는이가의도만에]|에서|랑|이랑|(?![가-힣]))|persona|바인딩|bindedPersona|유저\s*(?:설정|프로필|정보|소개|캐릭터|이름)|(?:내|플레이어|주인공)\s*(?:캐릭터\s*)?(?:프로필|설정|정보|소개|이름)/i.test(routingText);
     if (wantPersonaSummary) {
       try {
         const p = await this.adapter.readPersonas();
@@ -1654,14 +1664,14 @@ class RisuHelperApp {
       } catch {}
     }
 
-    if (this.settings.includeConfigSummary || ctx.targetKind === 'config' || ctx.screen === 'settings') {
+    if (this.settings.includeConfigSummary || ctx.targetKind === 'config' || ctx.screen === 'settings' || recentSkillIds.has('config')) {
       try {
         const cfg = await this.adapter.readAllowedConfig();
         if (cfg) extra.configSummary = cfg;
       } catch {}
     }
 
-    if (/포팅|다른\s*캐릭터|캐릭터\s*목록|교차\s*포팅|port_from_character/i.test(routingText)) {
+    if (wantsCharacterCatalog(routingText) || recentSkillIds.has('char_create_port')) {
       try {
         const res = await this.adapter.readCharacterCatalog();
         if (!res.permissionDenied && res.catalog.length > 0) {

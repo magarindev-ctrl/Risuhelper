@@ -53,7 +53,7 @@ function planGreetingContext(char, chat, { includeFullText = false, budget = GRE
   return { activeIndex, greetings, shownFull: greetings.filter(g => !g.truncated).map(g => g.index) };
 }
 
-const GREETING_REQUEST_RE = /첫\s*(메시지|메세지|인사|대사)|인사말|퍼스트\s*메시지|first\s*message|greeting/i;
+const GREETING_REQUEST_RE = /첫\s*(메시지|메세지|인사|대사|장면)|인사말|퍼메|퍼스트\s*메시지|오프닝|도입부|그리팅|first\s*message|greeting/i;
 
 /**
  * Whether full greeting text is worth its prompt cost for this request: on the chat screen
